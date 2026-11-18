@@ -131,9 +131,11 @@ export function Layout({
     <div className="flex flex-col h-full">
       <div className="h-16 px-5 flex items-center justify-between border-b border-slate-200 dark:border-slate-800 shrink-0">
         <div className="flex items-center gap-2.5">
-          <div className="w-8 h-8 rounded-lg bg-emerald-600 text-white flex items-center justify-center font-bold text-sm">
-            R
-          </div>
+          <img
+            src="/assets/aistudio/WhatsApp_Image_2026-10-29_at_11.52.03_ee88581e.jpeg"
+            alt="RunBD Logo"
+            className="w-9 h-9 rounded-lg object-cover border border-slate-200 dark:border-slate-700/80 shadow-xs shrink-0"
+          />
           <span className="text-base font-bold tracking-tight text-slate-900 dark:text-white whitespace-nowrap">
             RunBD
           </span>
@@ -217,10 +219,15 @@ export function Layout({
               type="button"
               onClick={() => setMobileMenuOpen(true)}
               aria-label="Open navigation menu"
-              className="lg:hidden p-2 rounded-lg text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+              className="lg:hidden p-2 rounded-lg text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 shrink-0"
             >
               <Menu className="w-5 h-5" />
             </button>
+            <img
+              src="/assets/aistudio/WhatsApp_Image_2026-10-29_at_11.52.03_ee88581e.jpeg"
+              alt="RunBD Logo"
+              className="lg:hidden w-8 h-8 rounded-lg object-cover border border-slate-200 dark:border-slate-700/80 shadow-xs shrink-0"
+            />
             <div className="min-w-0">
               <div className="flex items-center gap-1.5 sm:gap-2 text-sm font-semibold text-slate-900 dark:text-white min-w-0">
                 <span className="truncate">{user.name}</span>

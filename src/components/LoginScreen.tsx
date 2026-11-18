@@ -64,11 +64,13 @@ export function LoginScreen({ onLogin, theme, onToggleTheme }: LoginScreenProps)
     <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col">
       {/* Top minimal bar */}
       <header className="w-full max-w-6xl mx-auto px-6 py-5 flex items-center justify-between">
-        <div className="flex items-center gap-2.5">
-          <div className="w-9 h-9 rounded-lg bg-emerald-600 text-white flex items-center justify-center font-bold text-base tracking-tight">
-            R
-          </div>
-          <span className="text-lg font-bold tracking-tight">RunBD</span>
+        <div className="flex items-center gap-2.5 sm:gap-3">
+          <img
+            src="/assets/aistudio/WhatsApp_Image_2026-10-29_at_11.52.03_ee88581e.jpeg"
+            alt="RunBD Logo"
+            className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl object-cover border border-slate-200 dark:border-slate-700/80 shadow-xs shrink-0"
+          />
+          <span className="text-lg sm:text-xl font-bold tracking-tight">RunBD</span>
         </div>
         <button
           type="button"
