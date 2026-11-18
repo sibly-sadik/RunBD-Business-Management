@@ -1,0 +1,6 @@
+{
+  "name": "RunBD Business Management Application",
+  "description": "Production-ready SaaS platform for managing call center operations, data collection, Round-Robin lead distribution, agent performance tracking, and Google Sheets real-time sync.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
