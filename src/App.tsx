@@ -39,7 +39,18 @@ import {
   normalizeFacebookUrl,
   normalizePostUrl,
 } from './utils/leadLogic';
-import { pushToGoogleSheetsWebhook, SheetsSyncPayload, storage } from './utils/storage';
+import {
+  mergeRemoteCallLogs,
+  mergeRemoteContentPosts,
+  mergeRemoteLeads,
+} from './utils/sheetsSync';
+import {
+  DEFAULT_GOOGLE_SHEETS_WEBHOOK_URL,
+  pullFromGoogleSheetsWebhook,
+  pushToGoogleSheetsWebhook,
+  SheetsSyncPayload,
+  storage,
+} from './utils/storage';
 
 function defaultTabForRole(role: User['role']): NavTab {
   if (role === 'admin') return 'admin-overview';
@@ -205,6 +216,89 @@ export default function App() {
     [buildDailySummary, contentPosts]
   );
 
+  const syncFromSheets = useCallback(
+    async (webhookUrl: string, options?: { notify?: boolean }) => {
+      const targetUrl = webhookUrl.trim();
+      if (!targetUrl) {
+        setSyncStatus('offline');
+        return { ok: false, pulledData: false };
+      }
+
+      setSyncStatus('syncing');
+      const pullRes = await pullFromGoogleSheetsWebhook(targetUrl);
+
+      if (pullRes.ok && pullRes.pulledData && pullRes.data) {
+        const { leads: remoteLeads, callLogs: remoteCallLogs, contentPosts: remotePosts } =
+          pullRes.data;
+        if (remoteLeads.length > 0) {
+          setLeads((prev) => mergeRemoteLeads(prev, remoteLeads));
+        }
+        if (remoteCallLogs.length > 0) {
+          setCallLogs((prev) => mergeRemoteCallLogs(prev, remoteCallLogs));
+        }
+        if (remotePosts.length > 0) {
+          setContentPosts((prev) => mergeRemoteContentPosts(prev, remotePosts));
+        }
+        setSyncStatus('synced');
+        setSettings((prev) => ({ ...prev, lastSyncedAt: new Date().toISOString() }));
+        if (options?.notify) {
+          addToast(
+            'success',
+            'Synced from Google Sheets',
+            `Pulled ${remoteLeads.length} leads, ${remoteCallLogs.length} call logs, and ${remotePosts.length} posts.`
+          );
+        }
+        return { ok: true, pulledData: true };
+      }
+
+      // Fallback to a non-destructive connectivity check when doGet is not deployed yet
+      const pingRes = await pushToGoogleSheetsWebhook(targetUrl, {
+        event: 'CONNECT_CHECK',
+        dailySummary: {
+          date: new Date().toISOString().slice(0, 10),
+          totalLeads: 0,
+          callsMadeToday: 0,
+          orderConfirmedCount: 0,
+          interestedCount: 0,
+          conversionRate: 0,
+        },
+      });
+
+      if (pingRes.ok) {
+        setSyncStatus('synced');
+        setSettings((prev) => ({ ...prev, lastSyncedAt: new Date().toISOString() }));
+        if (options?.notify) {
+          addToast(
+            'success',
+            'Google Sheets Connected',
+            'Webhook connection verified. Deploy doGet in Code.gs to enable two-way pull.'
+          );
+        }
+        return { ok: true, pulledData: false };
+      }
+
+      setSyncStatus('error');
+      if (options?.notify) {
+        addToast(
+          'error',
+          'Sync Failed',
+          pingRes.error ?? 'Unable to reach Google Sheets webhook.'
+        );
+      }
+      return { ok: false, pulledData: false };
+    },
+    [addToast]
+  );
+
+  // Automatically connect and pull latest data on initial app load
+  useEffect(() => {
+    const initialUrl = storage.getSettings().googleSheetsWebhookUrl;
+    if (initialUrl) {
+      void syncFromSheets(initialUrl);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Auth handlers
   const handleLogin = (user: User) => {
     setCurrentUser(user);
@@ -212,6 +306,9 @@ export default function App() {
     setActiveTab(defaultTabForRole(user.role));
     appendAudit(user, 'LOGIN', `Signed into ${user.role} workspace`);
     addToast('success', `Welcome back, ${user.name}`, `Signed in as ${user.title}`);
+    if (settings.googleSheetsWebhookUrl) {
+      void syncFromSheets(settings.googleSheetsWebhookUrl);
+    }
   };
 
   const handleLogout = () => {
@@ -836,10 +933,14 @@ export default function App() {
         {currentUser.role === 'admin' && activeTab === 'admin-sheets' && (
           <AdminSheetsView
             webhookUrl={settings.googleSheetsWebhookUrl}
+            defaultWebhookUrl={DEFAULT_GOOGLE_SHEETS_WEBHOOK_URL}
             lastSyncedAt={settings.lastSyncedAt}
             syncStatus={syncStatus}
             onSaveWebhookUrl={handleSaveWebhookUrl}
             onTestAndSync={handleTestAndSyncSheets}
+            onPullLatest={async (url) => {
+              await syncFromSheets(url, { notify: true });
+            }}
           />
         )}
       </Layout>

@@ -1,6 +1,12 @@
 import { AppSettings, AuditLog, CallLog, ContentPost, DuplicateAttempt, Lead } from '../types';
 import type { FinalDailySummary } from './leadLogic';
 import {
+  getDefaultWebhookUrl,
+  ParsedPullPayload,
+  parsePullPayload,
+  resolveWebhookUrl,
+} from './sheetsSync';
+import {
   createSeedAuditLogs,
   createSeedCallLogs,
   createSeedContentPosts,
@@ -8,6 +14,14 @@ import {
   createSeedLeads,
   DEFAULT_SETTINGS,
 } from '../data/seedData';
+
+const ENV_GOOGLE_SHEET_WEBHOOK_URL =
+  (import.meta as unknown as { env?: Record<string, string | undefined> }).env
+    ?.VITE_GOOGLE_SHEET_WEBHOOK_URL ?? '';
+
+export const DEFAULT_GOOGLE_SHEETS_WEBHOOK_URL = getDefaultWebhookUrl(
+  ENV_GOOGLE_SHEET_WEBHOOK_URL
+);
 
 const STORAGE_KEYS = {
   LEADS: 'runbd_leads_v2',
@@ -60,7 +74,25 @@ export const storage = {
     safeRead<ContentPost[]>(STORAGE_KEYS.CONTENT_POSTS, createSeedContentPosts),
   saveContentPosts: (posts: ContentPost[]) => safeWrite(STORAGE_KEYS.CONTENT_POSTS, posts),
 
-  getSettings: () => safeRead<AppSettings>(STORAGE_KEYS.SETTINGS, () => DEFAULT_SETTINGS),
+  getSettings: (): AppSettings => {
+    const settings = safeRead<AppSettings>(STORAGE_KEYS.SETTINGS, () => ({
+      ...DEFAULT_SETTINGS,
+      googleSheetsWebhookUrl: DEFAULT_GOOGLE_SHEETS_WEBHOOK_URL,
+    }));
+    const resolvedUrl = resolveWebhookUrl(
+      settings.googleSheetsWebhookUrl,
+      ENV_GOOGLE_SHEET_WEBHOOK_URL
+    );
+    if (settings.googleSheetsWebhookUrl !== resolvedUrl) {
+      const updated: AppSettings = {
+        ...settings,
+        googleSheetsWebhookUrl: resolvedUrl,
+      };
+      safeWrite(STORAGE_KEYS.SETTINGS, updated);
+      return updated;
+    }
+    return settings;
+  },
   saveSettings: (settings: AppSettings) => safeWrite(STORAGE_KEYS.SETTINGS, settings),
 
   getSessionUserId: (): string | null => {
@@ -97,7 +129,13 @@ export const storage = {
 };
 
 export interface SheetsSyncPayload {
-  event: 'TEST_SYNC' | 'FULL_SYNC' | 'LEAD_UPSERT' | 'CALL_LOGGED' | 'KAWSAR_POST_LOGGED';
+  event:
+    | 'TEST_SYNC'
+    | 'FULL_SYNC'
+    | 'LEAD_UPSERT'
+    | 'CALL_LOGGED'
+    | 'KAWSAR_POST_LOGGED'
+    | 'CONNECT_CHECK';
   lead?: Lead;
   leads?: Lead[];
   callLog?: CallLog;
@@ -151,3 +189,70 @@ export async function pushToGoogleSheetsWebhook(
     };
   }
 }
+
+export interface PullSheetsResult {
+  ok: boolean;
+  pulledData: boolean;
+  data?: ParsedPullPayload;
+  error?: string;
+}
+
+/**
+ * Attempts to pull the latest leads, call logs, and Kawsar posts from Google Sheets
+ * via a GET request to the Apps Script Web App (`doGet`).
+ */
+export async function pullFromGoogleSheetsWebhook(
+  webhookUrl: string
+): Promise<PullSheetsResult> {
+  const trimmed = webhookUrl.trim();
+  if (!trimmed) {
+    return { ok: false, pulledData: false, error: 'No webhook URL configured' };
+  }
+
+  let targetUrl: string;
+  try {
+    const parsed = new URL(trimmed);
+    parsed.searchParams.set('action', 'pull');
+    targetUrl = parsed.toString();
+  } catch {
+    return { ok: false, pulledData: false, error: 'Invalid webhook URL format' };
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+
+  try {
+    const res = await fetch(targetUrl, {
+      method: 'GET',
+      redirect: 'follow',
+      signal: controller.signal,
+      headers: {
+        Accept: 'application/json',
+      },
+    });
+    if (!res.ok) {
+      return { ok: false, pulledData: false, error: `HTTP ${res.status}` };
+    }
+    const text = await res.text();
+    let json: unknown;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      return { ok: false, pulledData: false, error: 'Response is not JSON' };
+    }
+    const data = parsePullPayload(json);
+    if (!data) {
+      return { ok: false, pulledData: false, error: 'Unexpected payload structure' };
+    }
+    return { ok: true, pulledData: true, data };
+  } catch (err) {
+    return {
+      ok: false,
+      pulledData: false,
+      error: err instanceof Error ? err.message : 'Unable to fetch remote data',
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+

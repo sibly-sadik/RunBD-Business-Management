@@ -1,10 +1,12 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Check,
   Code2,
   Copy,
+  DownloadCloud,
   FileSpreadsheet,
   RefreshCw,
+  RotateCcw,
   Save,
   X,
 } from 'lucide-react';
@@ -14,27 +16,41 @@ import { formatDateTime } from '../utils/leadLogic';
 
 interface AdminSheetsViewProps {
   webhookUrl: string;
+  defaultWebhookUrl: string;
   lastSyncedAt: string | null;
   syncStatus: SyncStatus;
   onSaveWebhookUrl: (url: string) => void;
   onTestAndSync: (url: string) => Promise<void>;
+  onPullLatest: (url: string) => Promise<void>;
 }
 
 export function AdminSheetsView({
   webhookUrl,
+  defaultWebhookUrl,
   lastSyncedAt,
   syncStatus,
   onSaveWebhookUrl,
   onTestAndSync,
+  onPullLatest,
 }: AdminSheetsViewProps) {
   const [urlInput, setUrlInput] = useState(webhookUrl);
   const [scriptModalOpen, setScriptModalOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [pulling, setPulling] = useState(false);
+
+  useEffect(() => {
+    setUrlInput(webhookUrl);
+  }, [webhookUrl]);
 
   const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
     onSaveWebhookUrl(urlInput.trim());
+  };
+
+  const handleResetDefault = () => {
+    setUrlInput(defaultWebhookUrl);
+    onSaveWebhookUrl(defaultWebhookUrl);
   };
 
   const handleTest = async () => {
@@ -43,6 +59,15 @@ export function AdminSheetsView({
       await onTestAndSync(urlInput.trim());
     } finally {
       setTesting(false);
+    }
+  };
+
+  const handlePull = async () => {
+    setPulling(true);
+    try {
+      await onPullLatest(urlInput.trim());
+    } finally {
+      setPulling(false);
     }
   };
 
@@ -92,6 +117,8 @@ export function AdminSheetsView({
               <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
                 {lastSyncedAt
                   ? `Last synced: ${formatDateTime(lastSyncedAt)}`
+                  : syncStatus === 'synced' || syncStatus === 'syncing'
+                  ? 'Connected automatically using the default RunBD Google Sheets webhook.'
                   : 'Currently running in Offline Local Mode (localStorage).'}
               </p>
             </div>
@@ -145,13 +172,34 @@ export function AdminSheetsView({
 
             <button
               type="button"
-              disabled={testing || !urlInput.trim()}
+              disabled={testing || pulling || !urlInput.trim()}
               onClick={handleTest}
               className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-semibold transition-colors cursor-pointer"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${testing ? 'animate-spin' : ''}`} />
-              <span>{testing ? 'Syncing...' : 'Test & Sync'}</span>
+              <span>{testing ? 'Syncing...' : 'Test & Push Sync'}</span>
             </button>
+
+            <button
+              type="button"
+              disabled={pulling || testing || !urlInput.trim()}
+              onClick={handlePull}
+              className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-lg border border-emerald-500/40 bg-emerald-500/10 hover:bg-emerald-500/20 disabled:opacity-50 text-emerald-700 dark:text-emerald-300 text-xs font-semibold transition-colors cursor-pointer"
+            >
+              <DownloadCloud className={`w-3.5 h-3.5 ${pulling ? 'animate-pulse' : ''}`} />
+              <span>{pulling ? 'Pulling...' : 'Pull Latest Data'}</span>
+            </button>
+
+            {urlInput.trim() !== defaultWebhookUrl && (
+              <button
+                type="button"
+                onClick={handleResetDefault}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-lg border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-semibold text-slate-600 dark:text-slate-300 transition-colors cursor-pointer"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>Reset to Default</span>
+              </button>
+            )}
           </div>
         </form>
       </section>

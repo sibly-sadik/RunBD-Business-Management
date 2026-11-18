@@ -1,4 +1,5 @@
 import { AppSettings, AuditLog, CallLog, ContentPost, DuplicateAttempt, Lead, User } from '../types';
+import { FALLBACK_GOOGLE_SHEETS_WEBHOOK_URL } from '../utils/sheetsSync';
 
 export const DEMO_USERS: User[] = [
   {
@@ -131,7 +132,7 @@ export const DEFAULT_CALL_SCRIPT = `1. GREETING (Warm & Clear)
 export const DEFAULT_SETTINGS: AppSettings = {
   autoAssignEnabled: true,
   roundRobinIndex: 0,
-  googleSheetsWebhookUrl: '',
+  googleSheetsWebhookUrl: FALLBACK_GOOGLE_SHEETS_WEBHOOK_URL,
   callScript: DEFAULT_CALL_SCRIPT,
   lastSyncedAt: null,
 };
@@ -164,9 +165,96 @@ var KAWSAR_POST_HEADERS = [
   'Post ID', 'Title / Note', 'Facebook Link', 'Website Link', 'Posted By', 'Timestamp'
 ];
 
+function doGet(e) {
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var masterSheet = ss.getSheetByName('Master_Data');
+    var logsSheet = ss.getSheetByName('Agent_Logs');
+    var kawsarSheet = ss.getSheetByName('Kawsar_Posts_Log');
+
+    var leads = [];
+    if (masterSheet && masterSheet.getLastRow() > 1) {
+      var mRows = masterSheet.getRange(2, 1, masterSheet.getLastRow() - 1, 10).getValues();
+      for (var i = 0; i < mRows.length; i++) {
+        var r = mRows[i];
+        if (!r[0]) continue;
+        leads.push({
+          id: String(r[0]),
+          customerName: String(r[1] || ''),
+          phone: String(r[2] || '').replace(/^'+/, ''),
+          facebookLink: String(r[3] || ''),
+          collectorName: String(r[4] || 'Farhan'),
+          assignedAgentName: String(r[5] || '') === 'Unassigned' ? null : String(r[5] || ''),
+          status: String(r[6] || 'Pending'),
+          followUpAt: r[7] ? String(r[7]) : null,
+          lastCallNotes: String(r[8] || ''),
+          updatedAt: r[9] ? new Date(r[9]).toISOString() : new Date().toISOString()
+        });
+      }
+    }
+
+    var callLogs = [];
+    if (logsSheet && logsSheet.getLastRow() > 1) {
+      var lRows = logsSheet.getRange(2, 1, logsSheet.getLastRow() - 1, 10).getValues();
+      for (var j = 0; j < lRows.length; j++) {
+        var lr = lRows[j];
+        if (!lr[0]) continue;
+        callLogs.push({
+          id: String(lr[0]),
+          leadId: String(lr[1] || ''),
+          customerName: String(lr[2] || ''),
+          phone: String(lr[3] || '').replace(/^'+/, ''),
+          agentName: String(lr[4] || ''),
+          previousStatus: String(lr[5] || 'Pending'),
+          newStatus: String(lr[6] || 'Pending'),
+          notes: String(lr[7] || ''),
+          followUpAt: lr[8] ? String(lr[8]) : null,
+          timestamp: lr[9] ? new Date(lr[9]).toISOString() : new Date().toISOString()
+        });
+      }
+    }
+
+    var contentPosts = [];
+    if (kawsarSheet && kawsarSheet.getLastRow() > 1) {
+      var kRows = kawsarSheet.getRange(2, 1, kawsarSheet.getLastRow() - 1, 6).getValues();
+      for (var k = 0; k < kRows.length; k++) {
+        var kr = kRows[k];
+        if (!kr[0]) continue;
+        contentPosts.push({
+          id: String(kr[0]),
+          note: String(kr[1] || ''),
+          facebookLink: String(kr[2] || ''),
+          websiteLink: String(kr[3] || ''),
+          posterName: String(kr[4] || 'Kawsar'),
+          createdAt: kr[5] ? new Date(kr[5]).toISOString() : new Date().toISOString()
+        });
+      }
+    }
+
+    return ContentService
+      .createTextOutput(JSON.stringify({
+        ok: true,
+        leads: leads,
+        callLogs: callLogs,
+        contentPosts: contentPosts,
+        syncedAt: new Date().toISOString()
+      }))
+      .setMimeType(ContentService.MimeType.JSON);
+  } catch (err) {
+    return ContentService
+      .createTextOutput(JSON.stringify({ ok: false, error: err.toString() }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
 function doPost(e) {
   try {
     var payload = JSON.parse(e.postData.contents);
+    if (payload.event === 'CONNECT_CHECK') {
+      return ContentService
+        .createTextOutput(JSON.stringify({ ok: true, connected: true, syncedAt: new Date().toISOString() }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
     var ss = SpreadsheetApp.getActiveSpreadsheet();
 
     // Ensure core tabs exist
