@@ -1,0 +1,203 @@
+{
+  "entities": {
+    "Lead": {
+      "title": "Lead",
+      "description": "A customer lead collected by Farhan or Naim and assigned to one of the 6 RunBD call center agents.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "customerName": { "type": "string", "maxLength": 200 },
+        "phone": { "type": "string", "maxLength": 32 },
+        "rawPhone": { "type": "string", "maxLength": 64 },
+        "facebookLink": { "type": "string", "maxLength": 500 },
+        "normalizedFacebookLink": { "type": "string", "maxLength": 500 },
+        "notes": { "type": "string", "maxLength": 2000 },
+        "collectorId": { "type": "string", "maxLength": 64 },
+        "collectorName": { "type": "string", "maxLength": 100 },
+        "assignedAgentId": { "type": "string", "maxLength": 64 },
+        "assignedAgentName": { "type": "string", "maxLength": 100 },
+        "status": {
+          "type": "string",
+          "enum": [
+            "Pending",
+            "Interested",
+            "Order Confirmed",
+            "Busy / Call Later",
+            "Not Interested",
+            "Switched Off / No Answer",
+            "Wrong Number"
+          ]
+        },
+        "followUpAt": { "type": "string", "maxLength": 64 },
+        "lastCallNotes": { "type": "string", "maxLength": 2000 },
+        "createdAt": { "type": "string", "format": "date-time", "maxLength": 64 },
+        "updatedAt": { "type": "string", "format": "date-time", "maxLength": 64 }
+      },
+      "required": [
+        "id",
+        "customerName",
+        "phone",
+        "rawPhone",
+        "facebookLink",
+        "normalizedFacebookLink",
+        "notes",
+        "collectorId",
+        "collectorName",
+        "assignedAgentId",
+        "assignedAgentName",
+        "status",
+        "followUpAt",
+        "lastCallNotes",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "CallLog": {
+      "title": "CallLog",
+      "description": "Individual call activity entry logged by a call center agent.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "leadId": { "type": "string", "maxLength": 128 },
+        "customerName": { "type": "string", "maxLength": 200 },
+        "phone": { "type": "string", "maxLength": 32 },
+        "agentId": { "type": "string", "maxLength": 64 },
+        "agentName": { "type": "string", "maxLength": 100 },
+        "previousStatus": { "type": "string", "maxLength": 64 },
+        "newStatus": { "type": "string", "maxLength": 64 },
+        "notes": { "type": "string", "maxLength": 2000 },
+        "followUpAt": { "type": "string", "maxLength": 64 },
+        "timestamp": { "type": "string", "format": "date-time", "maxLength": 64 }
+      },
+      "required": [
+        "id",
+        "leadId",
+        "customerName",
+        "phone",
+        "agentId",
+        "agentName",
+        "previousStatus",
+        "newStatus",
+        "notes",
+        "followUpAt",
+        "timestamp"
+      ]
+    },
+    "ContentPost": {
+      "title": "ContentPost",
+      "description": "Facebook and Website post links logged by Kawsar.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "facebookLink": { "type": "string", "maxLength": 1000 },
+        "normalizedFacebookLink": { "type": "string", "maxLength": 1000 },
+        "websiteLink": { "type": "string", "maxLength": 1000 },
+        "normalizedWebsiteLink": { "type": "string", "maxLength": 1000 },
+        "note": { "type": "string", "maxLength": 500 },
+        "posterId": { "type": "string", "maxLength": 64 },
+        "posterName": { "type": "string", "maxLength": 100 },
+        "createdAt": { "type": "string", "format": "date-time", "maxLength": 64 }
+      },
+      "required": [
+        "id",
+        "facebookLink",
+        "normalizedFacebookLink",
+        "websiteLink",
+        "normalizedWebsiteLink",
+        "note",
+        "posterId",
+        "posterName",
+        "createdAt"
+      ]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "System-wide audit trail of logins, lead creations, reassignments, and syncs.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "actorId": { "type": "string", "maxLength": 64 },
+        "actorName": { "type": "string", "maxLength": 100 },
+        "actorRole": { "type": "string", "enum": ["admin", "agent", "collector", "poster"] },
+        "action": { "type": "string", "maxLength": 64 },
+        "details": { "type": "string", "maxLength": 1000 },
+        "timestamp": { "type": "string", "format": "date-time", "maxLength": 64 }
+      },
+      "required": ["id", "actorId", "actorName", "actorRole", "action", "details", "timestamp"]
+    },
+    "DuplicateAttempt": {
+      "title": "DuplicateAttempt",
+      "description": "Record of blocked duplicate lead submissions by phone or Facebook link.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "collectorId": { "type": "string", "maxLength": 64 },
+        "collectorName": { "type": "string", "maxLength": 100 },
+        "attemptedName": { "type": "string", "maxLength": 200 },
+        "attemptedPhone": { "type": "string", "maxLength": 64 },
+        "attemptedFacebook": { "type": "string", "maxLength": 500 },
+        "matchedBy": { "type": "string", "enum": ["phone", "facebook"] },
+        "existingCollectorName": { "type": "string", "maxLength": 100 },
+        "existingDate": { "type": "string", "maxLength": 64 },
+        "timestamp": { "type": "string", "format": "date-time", "maxLength": 64 }
+      },
+      "required": [
+        "id",
+        "collectorId",
+        "collectorName",
+        "attemptedName",
+        "attemptedPhone",
+        "attemptedFacebook",
+        "matchedBy",
+        "existingCollectorName",
+        "existingDate",
+        "timestamp"
+      ]
+    },
+    "AppSettings": {
+      "title": "AppSettings",
+      "description": "Shared RunBD workspace settings including Round-Robin index, call script, and Google Sheets webhook URL.",
+      "type": "object",
+      "properties": {
+        "autoAssignEnabled": { "type": "boolean" },
+        "roundRobinIndex": { "type": "integer" },
+        "googleSheetsWebhookUrl": { "type": "string", "maxLength": 1000 },
+        "callScript": { "type": "string", "maxLength": 10000 },
+        "lastSyncedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": [
+        "autoAssignEnabled",
+        "roundRobinIndex",
+        "googleSheetsWebhookUrl",
+        "callScript",
+        "lastSyncedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/leads/{leadId}": {
+      "schema": { "$ref": "#/entities/Lead" },
+      "description": "Shared RunBD customer leads synced in real time between data collectors, call center agents, and admin."
+    },
+    "/callLogs/{callLogId}": {
+      "schema": { "$ref": "#/entities/CallLog" },
+      "description": "Individual call activity logs written by call center agents."
+    },
+    "/contentPosts/{postId}": {
+      "schema": { "$ref": "#/entities/ContentPost" },
+      "description": "Facebook and Website post links logged by Kawsar."
+    },
+    "/auditLogs/{auditLogId}": {
+      "schema": { "$ref": "#/entities/AuditLog" },
+      "description": "Operational audit logs across all RunBD team roles."
+    },
+    "/duplicateAttempts/{attemptId}": {
+      "schema": { "$ref": "#/entities/DuplicateAttempt" },
+      "description": "Blocked duplicate lead attempts logged by data collectors."
+    },
+    "/settings/{settingId}": {
+      "schema": { "$ref": "#/entities/AppSettings" },
+      "description": "Global workspace settings document (settings/global)."
+    }
+  }
+}

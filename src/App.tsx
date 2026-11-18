@@ -40,6 +40,21 @@ import {
   normalizePostUrl,
 } from './utils/leadLogic';
 import {
+  saveAuditLogToFirestore,
+  saveCallLogToFirestore,
+  saveContentPostToFirestore,
+  saveDuplicateAttemptToFirestore,
+  saveLeadsBatchToFirestore,
+  saveLeadToFirestore,
+  saveSettingsToFirestore,
+  subscribeToAuditLogs,
+  subscribeToCallLogs,
+  subscribeToContentPosts,
+  subscribeToDuplicateAttempts,
+  subscribeToLeads,
+  subscribeToSettings,
+} from './utils/firestoreSync';
+import {
   mergeRemoteCallLogs,
   mergeRemoteContentPosts,
   mergeRemoteLeads,
@@ -144,6 +159,44 @@ export default function App() {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
+  // Real-time Firebase Firestore subscriptions across all devices/laptops
+  useEffect(() => {
+    const unsubLeads = subscribeToLeads((remoteLeads) => {
+      setLeads(remoteLeads);
+    });
+    const unsubCallLogs = subscribeToCallLogs((remoteLogs) => {
+      setCallLogs(remoteLogs);
+    });
+    const unsubPosts = subscribeToContentPosts((remotePosts) => {
+      setContentPosts(remotePosts);
+    });
+    const unsubAudit = subscribeToAuditLogs((remoteAudit) => {
+      setAuditLogs(remoteAudit);
+    });
+    const unsubDuplicates = subscribeToDuplicateAttempts((remoteDups) => {
+      setDuplicateAttempts(remoteDups);
+    });
+    const unsubSettings = subscribeToSettings((remoteSettings) => {
+      setSettings((prev) => ({
+        ...prev,
+        ...remoteSettings,
+        googleSheetsWebhookUrl:
+          remoteSettings.googleSheetsWebhookUrl?.trim() ||
+          prev.googleSheetsWebhookUrl ||
+          DEFAULT_GOOGLE_SHEETS_WEBHOOK_URL,
+      }));
+    });
+
+    return () => {
+      unsubLeads();
+      unsubCallLogs();
+      unsubPosts();
+      unsubAudit();
+      unsubDuplicates();
+      unsubSettings();
+    };
+  }, []);
+
   const appendAudit = useCallback(
     (actor: User, action: AuditAction, details: string) => {
       const entry: AuditLog = {
@@ -156,6 +209,7 @@ export default function App() {
         timestamp: new Date().toISOString(),
       };
       setAuditLogs((prev) => [entry, ...prev]);
+      void saveAuditLogToFirestore(entry).catch(() => {});
     },
     []
   );
@@ -334,6 +388,7 @@ export default function App() {
       timestamp: new Date().toISOString(),
     };
     setDuplicateAttempts((prev) => [record, ...prev]);
+    void saveDuplicateAttemptToFirestore(record).catch(() => {});
     addToast(
       'warning',
       'Duplicate Lead Blocked',
@@ -403,8 +458,11 @@ export default function App() {
 
     const created = assignedLeads[0];
     const nextLeads = [created, ...leads];
+    const nextSettings: AppSettings = { ...settings, roundRobinIndex: nextIndex };
     setLeads(nextLeads);
-    setSettings((prev) => ({ ...prev, roundRobinIndex: nextIndex }));
+    setSettings(nextSettings);
+    void saveLeadToFirestore(created).catch(() => {});
+    void saveSettingsToFirestore(nextSettings).catch(() => {});
 
     appendAudit(
       currentUser,
@@ -508,8 +566,11 @@ export default function App() {
     );
 
     const nextLeads = [...assignedLeads, ...leads];
+    const nextSettings: AppSettings = { ...settings, roundRobinIndex: nextIndex };
     setLeads(nextLeads);
-    setSettings((prev) => ({ ...prev, roundRobinIndex: nextIndex }));
+    setSettings(nextSettings);
+    void saveLeadsBatchToFirestore(assignedLeads).catch(() => {});
+    void saveSettingsToFirestore(nextSettings).catch(() => {});
 
     appendAudit(
       currentUser,
@@ -606,6 +667,7 @@ export default function App() {
 
     const nextPosts = [created, ...contentPosts];
     setContentPosts(nextPosts);
+    void saveContentPostToFirestore(created).catch(() => {});
 
     const linkSummary = [
       fbUrl ? `FB: ${fbUrl}` : '',
@@ -676,6 +738,8 @@ export default function App() {
 
     setLeads(nextLeads);
     setCallLogs(nextCallLogs);
+    void saveLeadToFirestore(updatedLead).catch(() => {});
+    void saveCallLogToFirestore(newLog).catch(() => {});
 
     appendAudit(
       currentUser,
@@ -694,13 +758,17 @@ export default function App() {
   };
 
   const handleUpdateCallScript = (script: string) => {
-    setSettings((prev) => ({ ...prev, callScript: script }));
+    const nextSettings: AppSettings = { ...settings, callScript: script };
+    setSettings(nextSettings);
+    void saveSettingsToFirestore(nextSettings).catch(() => {});
     addToast('success', 'Call Script Saved', 'Your updated script is ready for reference.');
   };
 
   // Admin handlers
   const handleToggleAutoAssign = (enabled: boolean) => {
-    setSettings((prev) => ({ ...prev, autoAssignEnabled: enabled }));
+    const nextSettings: AppSettings = { ...settings, autoAssignEnabled: enabled };
+    setSettings(nextSettings);
+    void saveSettingsToFirestore(nextSettings).catch(() => {});
     if (currentUser) {
       appendAudit(
         currentUser,
@@ -732,6 +800,7 @@ export default function App() {
 
     const nextLeads = leads.map((l) => (l.id === leadId ? updated : l));
     setLeads(nextLeads);
+    void saveLeadToFirestore(updated).catch(() => {});
 
     appendAudit(
       currentUser,
@@ -756,7 +825,9 @@ export default function App() {
   };
 
   const handleSaveWebhookUrl = (url: string) => {
-    setSettings((prev) => ({ ...prev, googleSheetsWebhookUrl: url }));
+    const nextSettings: AppSettings = { ...settings, googleSheetsWebhookUrl: url };
+    setSettings(nextSettings);
+    void saveSettingsToFirestore(nextSettings).catch(() => {});
     setSyncStatus(url ? 'synced' : 'offline');
     if (currentUser) {
       appendAudit(

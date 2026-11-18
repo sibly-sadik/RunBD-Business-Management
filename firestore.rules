@@ -1,0 +1,326 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isNullableString(val, maxLen) {
+      return val == null || (val is string && val.size() <= maxLen);
+    }
+
+    function isValidCallStatus(status) {
+      return status in [
+        'Pending',
+        'Interested',
+        'Order Confirmed',
+        'Busy / Call Later',
+        'Not Interested',
+        'Switched Off / No Answer',
+        'Wrong Number'
+      ];
+    }
+
+    function isValidLead(data) {
+      return data.keys().hasAll([
+        'id',
+        'customerName',
+        'phone',
+        'rawPhone',
+        'facebookLink',
+        'normalizedFacebookLink',
+        'notes',
+        'collectorId',
+        'collectorName',
+        'assignedAgentId',
+        'assignedAgentName',
+        'status',
+        'followUpAt',
+        'lastCallNotes',
+        'createdAt',
+        'updatedAt'
+      ])
+      && data.keys().hasOnly([
+        'id',
+        'customerName',
+        'phone',
+        'rawPhone',
+        'facebookLink',
+        'normalizedFacebookLink',
+        'notes',
+        'collectorId',
+        'collectorName',
+        'assignedAgentId',
+        'assignedAgentName',
+        'status',
+        'followUpAt',
+        'lastCallNotes',
+        'createdAt',
+        'updatedAt'
+      ])
+      && isValidId(data.id)
+      && data.customerName is string && data.customerName.size() >= 1 && data.customerName.size() <= 200
+      && data.phone is string && data.phone.size() <= 32
+      && data.rawPhone is string && data.rawPhone.size() <= 64
+      && data.facebookLink is string && data.facebookLink.size() <= 500
+      && data.normalizedFacebookLink is string && data.normalizedFacebookLink.size() <= 500
+      && data.notes is string && data.notes.size() <= 2000
+      && data.collectorId is string && data.collectorId.size() <= 64
+      && data.collectorName is string && data.collectorName.size() <= 100
+      && isNullableString(data.assignedAgentId, 64)
+      && isNullableString(data.assignedAgentName, 100)
+      && isValidCallStatus(data.status)
+      && isNullableString(data.followUpAt, 64)
+      && data.lastCallNotes is string && data.lastCallNotes.size() <= 2000
+      && data.createdAt is string && data.createdAt.size() <= 64
+      && data.updatedAt is string && data.updatedAt.size() <= 64;
+    }
+
+    function isValidCallLog(data) {
+      return data.keys().hasAll([
+        'id',
+        'leadId',
+        'customerName',
+        'phone',
+        'agentId',
+        'agentName',
+        'previousStatus',
+        'newStatus',
+        'notes',
+        'followUpAt',
+        'timestamp'
+      ])
+      && data.keys().hasOnly([
+        'id',
+        'leadId',
+        'customerName',
+        'phone',
+        'agentId',
+        'agentName',
+        'previousStatus',
+        'newStatus',
+        'notes',
+        'followUpAt',
+        'timestamp'
+      ])
+      && isValidId(data.id)
+      && isValidId(data.leadId)
+      && data.customerName is string && data.customerName.size() <= 200
+      && data.phone is string && data.phone.size() <= 32
+      && data.agentId is string && data.agentId.size() <= 64
+      && data.agentName is string && data.agentName.size() <= 100
+      && isValidCallStatus(data.previousStatus)
+      && isValidCallStatus(data.newStatus)
+      && data.notes is string && data.notes.size() <= 2000
+      && isNullableString(data.followUpAt, 64)
+      && data.timestamp is string && data.timestamp.size() <= 64;
+    }
+
+    function isValidContentPost(data) {
+      return data.keys().hasAll([
+        'id',
+        'facebookLink',
+        'normalizedFacebookLink',
+        'websiteLink',
+        'normalizedWebsiteLink',
+        'note',
+        'posterId',
+        'posterName',
+        'createdAt'
+      ])
+      && data.keys().hasOnly([
+        'id',
+        'facebookLink',
+        'normalizedFacebookLink',
+        'websiteLink',
+        'normalizedWebsiteLink',
+        'note',
+        'posterId',
+        'posterName',
+        'createdAt'
+      ])
+      && isValidId(data.id)
+      && data.facebookLink is string && data.facebookLink.size() <= 1000
+      && data.normalizedFacebookLink is string && data.normalizedFacebookLink.size() <= 1000
+      && data.websiteLink is string && data.websiteLink.size() <= 1000
+      && data.normalizedWebsiteLink is string && data.normalizedWebsiteLink.size() <= 1000
+      && (data.facebookLink.size() > 0 || data.websiteLink.size() > 0)
+      && data.note is string && data.note.size() <= 500
+      && data.posterId is string && data.posterId.size() <= 64
+      && data.posterName is string && data.posterName.size() <= 100
+      && data.createdAt is string && data.createdAt.size() <= 64;
+    }
+
+    function isValidAuditLog(data) {
+      return data.keys().hasAll([
+        'id',
+        'actorId',
+        'actorName',
+        'actorRole',
+        'action',
+        'details',
+        'timestamp'
+      ])
+      && data.keys().hasOnly([
+        'id',
+        'actorId',
+        'actorName',
+        'actorRole',
+        'action',
+        'details',
+        'timestamp'
+      ])
+      && isValidId(data.id)
+      && data.actorId is string && data.actorId.size() <= 64
+      && data.actorName is string && data.actorName.size() <= 100
+      && data.actorRole in ['admin', 'agent', 'collector', 'poster']
+      && data.action is string && data.action.size() <= 64
+      && data.details is string && data.details.size() <= 1000
+      && data.timestamp is string && data.timestamp.size() <= 64;
+    }
+
+    function isValidDuplicateAttempt(data) {
+      return data.keys().hasAll([
+        'id',
+        'collectorId',
+        'collectorName',
+        'attemptedName',
+        'attemptedPhone',
+        'attemptedFacebook',
+        'matchedBy',
+        'existingCollectorName',
+        'existingDate',
+        'timestamp'
+      ])
+      && data.keys().hasOnly([
+        'id',
+        'collectorId',
+        'collectorName',
+        'attemptedName',
+        'attemptedPhone',
+        'attemptedFacebook',
+        'matchedBy',
+        'existingCollectorName',
+        'existingDate',
+        'timestamp'
+      ])
+      && isValidId(data.id)
+      && data.collectorId is string && data.collectorId.size() <= 64
+      && data.collectorName is string && data.collectorName.size() <= 100
+      && data.attemptedName is string && data.attemptedName.size() <= 200
+      && data.attemptedPhone is string && data.attemptedPhone.size() <= 64
+      && data.attemptedFacebook is string && data.attemptedFacebook.size() <= 500
+      && data.matchedBy in ['phone', 'facebook']
+      && data.existingCollectorName is string && data.existingCollectorName.size() <= 100
+      && data.existingDate is string && data.existingDate.size() <= 64
+      && data.timestamp is string && data.timestamp.size() <= 64;
+    }
+
+    function isValidSettings(data) {
+      return data.keys().hasAll([
+        'autoAssignEnabled',
+        'roundRobinIndex',
+        'googleSheetsWebhookUrl',
+        'callScript',
+        'lastSyncedAt'
+      ])
+      && data.keys().hasOnly([
+        'autoAssignEnabled',
+        'roundRobinIndex',
+        'googleSheetsWebhookUrl',
+        'callScript',
+        'lastSyncedAt'
+      ])
+      && data.autoAssignEnabled is bool
+      && data.roundRobinIndex is int && data.roundRobinIndex >= 0
+      && data.googleSheetsWebhookUrl is string && data.googleSheetsWebhookUrl.size() <= 1000
+      && data.callScript is string && data.callScript.size() <= 10000
+      && isNullableString(data.lastSyncedAt, 64);
+    }
+
+    // Connection probe document
+    match /test/connection {
+      allow get: if true;
+      allow write: if false;
+    }
+
+    // Shared RunBD Leads (synced in real time across Data Collectors, Call Agents, and Admin)
+    match /leads/{leadId} {
+      allow get: if isValidId(leadId);
+      allow list: if true;
+      allow create: if isValidId(leadId) && incoming().id == leadId && isValidLead(incoming());
+      allow update: if isValidId(leadId)
+        && isValidLead(incoming())
+        && incoming().id == existing().id
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'customerName',
+          'phone',
+          'rawPhone',
+          'facebookLink',
+          'normalizedFacebookLink',
+          'notes',
+          'assignedAgentId',
+          'assignedAgentName',
+          'status',
+          'followUpAt',
+          'lastCallNotes',
+          'updatedAt'
+        ]);
+      allow delete: if false;
+    }
+
+    // Call Center Activity Logs (append-only)
+    match /callLogs/{callLogId} {
+      allow get: if isValidId(callLogId);
+      allow list: if true;
+      allow create: if isValidId(callLogId) && incoming().id == callLogId && isValidCallLog(incoming());
+      allow update, delete: if false;
+    }
+
+    // Kawsar Content & Link Posts (append-only)
+    match /contentPosts/{postId} {
+      allow get: if isValidId(postId);
+      allow list: if true;
+      allow create: if isValidId(postId) && incoming().id == postId && isValidContentPost(incoming());
+      allow update, delete: if false;
+    }
+
+    // Audit Logs (append-only)
+    match /auditLogs/{auditLogId} {
+      allow get: if isValidId(auditLogId);
+      allow list: if true;
+      allow create: if isValidId(auditLogId) && incoming().id == auditLogId && isValidAuditLog(incoming());
+      allow update, delete: if false;
+    }
+
+    // Duplicate Attempts (append-only)
+    match /duplicateAttempts/{attemptId} {
+      allow get: if isValidId(attemptId);
+      allow list: if true;
+      allow create: if isValidId(attemptId) && incoming().id == attemptId && isValidDuplicateAttempt(incoming());
+      allow update, delete: if false;
+    }
+
+    // Global Workspace Settings
+    match /settings/{settingId} {
+      allow get: if settingId == 'global';
+      allow list: if false;
+      allow create, update: if settingId == 'global' && isValidSettings(incoming());
+      allow delete: if false;
+    }
+  }
+}
