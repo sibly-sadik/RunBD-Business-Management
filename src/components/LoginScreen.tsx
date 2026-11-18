@@ -15,6 +15,7 @@ import {
 import { DEMO_USERS } from '../data/seedData';
 import { User } from '../types';
 import { authenticateUser } from '../utils/leadLogic';
+import { AppFooter } from './AppFooter';
 
 interface LoginScreenProps {
   onLogin: (user: User) => void;
@@ -331,6 +332,7 @@ export function LoginScreen({ onLogin, theme, onToggleTheme }: LoginScreenProps)
           </section>
         </div>
       </main>
+      <AppFooter />
     </div>
   );
 }

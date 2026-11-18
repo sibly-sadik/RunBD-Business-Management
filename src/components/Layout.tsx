@@ -18,6 +18,7 @@ import {
   X,
 } from 'lucide-react';
 import { SyncStatus, User } from '../types';
+import { AppFooter } from './AppFooter';
 
 export type NavTab =
   | 'admin-overview'
@@ -307,6 +308,7 @@ export function Layout({
 
         {/* Page Viewport */}
         <main className="flex-1 p-4 sm:p-6 lg:p-8 max-w-7xl w-full mx-auto">{children}</main>
+        <AppFooter />
       </div>
     </div>
   );
