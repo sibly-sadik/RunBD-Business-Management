@@ -95,7 +95,6 @@ app.post('/api/auth/login', async (req, res) => {
       return;
     }
 
-    await getOrCreateUser(user.id, user.email, user.name, user.role);
     const token = createSessionToken(user);
     res.setHeader('Set-Cookie', buildSessionCookieHeader(req, token, 60 * 60 * 24 * 7));
     res.json({ user, token });

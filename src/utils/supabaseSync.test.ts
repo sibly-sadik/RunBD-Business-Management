@@ -121,3 +121,42 @@ test('Supabase Kawsar post mapper normalizes Facebook and Website links and dete
   assert.equal(isSchemaMissingError({ code: 'PGRST205', message: "Could not find the table 'public.leads' in the schema cache" }), true);
   assert.equal(isSchemaMissingError({ code: '23505', message: 'duplicate key value' }), false);
 });
+
+test('loginWithServer and restoreServerSession handle static Shared App HTML/404 and server 401 cleanly', async () => {
+  const { loginWithServer, restoreServerSession } = await import('./apiSync');
+  const originalFetch = globalThis.fetch;
+
+  try {
+    // 1. Static hosting returns HTML index.html (200 text/html) for /api/auth/login
+    globalThis.fetch = (async () =>
+      new Response('<!doctype html><html></html>', {
+        status: 200,
+        headers: { 'content-type': 'text/html' },
+      })) as typeof fetch;
+
+    const okLogin = await loginWithServer('naim@runbd', 'naim@/#312');
+    assert.equal(okLogin.ok, true);
+    assert.equal(okLogin.user?.id, 'collector-naim');
+
+    const badFallbackLogin = await loginWithServer('naim@runbd', 'wrong-pass');
+    assert.equal(badFallbackLogin.ok, false);
+
+    const restoredStatic = await restoreServerSession('collector-naim');
+    assert.equal(restoredStatic?.id, 'collector-naim');
+
+    // 2. Live Express server returns 401 JSON -> must stay rejected
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ error: 'Invalid credentials' }), {
+        status: 401,
+        headers: { 'content-type': 'application/json' },
+      })) as typeof fetch;
+
+    const serverRejected = await loginWithServer('naim@runbd', 'naim@/#312');
+    assert.equal(serverRejected.ok, false);
+
+    const serverSessionRejected = await restoreServerSession('collector-naim');
+    assert.equal(serverSessionRejected, null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

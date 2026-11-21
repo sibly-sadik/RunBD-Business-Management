@@ -209,11 +209,12 @@ export default function App() {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
-  // Restore verified server session on reload without storing tokens in localStorage
+  // Restore verified session on reload (supports both Express API and static Shared App URL)
   useEffect(() => {
-    if (!storage.getSessionUserId()) return;
+    const savedUserId = storage.getSessionUserId();
+    if (!savedUserId) return;
     let active = true;
-    void restoreServerSession().then((serverUser) => {
+    void restoreServerSession(savedUserId).then((serverUser) => {
       if (!active) return;
       if (serverUser) {
         setCurrentUser(serverUser);

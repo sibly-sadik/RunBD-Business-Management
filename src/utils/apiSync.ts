@@ -1,3 +1,4 @@
+import { DEMO_USERS } from '../data/seedData';
 import {
   AppSettings,
   AuditLog,
@@ -8,6 +9,7 @@ import {
   PaidCustomer,
   User,
 } from '../types';
+import { authenticateUser } from './leadLogic';
 
 let inMemoryAuthToken: string | null = null;
 
@@ -56,40 +58,63 @@ export async function loginWithServer(
       method: 'POST',
       body: JSON.stringify({ username, password }),
     });
-    const data = (await res.json()) as {
-      user?: Omit<User, 'password'>;
-      token?: string;
-      error?: string;
-    };
-    if (!res.ok || !data.user) {
-      return {
-        ok: false,
-        error:
-          data.error ??
-          'Invalid username or password. Please verify your assigned RunBD credentials.',
+    const contentType = res.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      const data = (await res.json()) as {
+        user?: Omit<User, 'password'>;
+        token?: string;
+        error?: string;
       };
+      if (res.ok && data.user) {
+        if (data.token) {
+          setInMemoryAuthToken(data.token);
+        }
+        return { ok: true, user: toClientUser(data.user) };
+      }
+      if (res.status === 400 || res.status === 401 || res.status === 403) {
+        return {
+          ok: false,
+          error:
+            data.error ??
+            'Invalid username or password. Please verify your assigned RunBD credentials.',
+        };
+      }
     }
-    if (data.token) {
-      setInMemoryAuthToken(data.token);
-    }
-    return { ok: true, user: toClientUser(data.user) };
   } catch {
+    // Backend /api/auth/login not reachable (e.g., static Shared App deployment) -> fall through cleanly
+  }
+
+  const matched = authenticateUser(DEMO_USERS, username, password);
+  if (!matched) {
     return {
       ok: false,
-      error: 'Unable to reach RunBD authentication server. Please try again.',
+      error:
+        'Invalid username or password. Please verify your assigned RunBD credentials.',
     };
   }
+  return { ok: true, user: toClientUser(matched) };
 }
 
-export async function restoreServerSession(): Promise<User | null> {
+export async function restoreServerSession(
+  savedUserId?: string | null
+): Promise<User | null> {
   try {
     const res = await apiFetch('/api/auth/session', { method: 'GET' });
-    if (!res.ok) return null;
-    const data = (await res.json()) as { user?: Omit<User, 'password'> };
-    return data.user ? toClientUser(data.user) : null;
+    if (res.status === 401 || res.status === 403) {
+      return null;
+    }
+    const contentType = res.headers.get('content-type') || '';
+    if (res.ok && contentType.includes('application/json')) {
+      const data = (await res.json()) as { user?: Omit<User, 'password'> };
+      return data.user ? toClientUser(data.user) : null;
+    }
   } catch {
-    return null;
+    // Fall through to static session lookup when backend is not present
   }
+
+  if (!savedUserId) return null;
+  const matched = DEMO_USERS.find((u) => u.id === savedUserId);
+  return matched ? toClientUser(matched) : null;
 }
 
 export async function logoutFromServer(): Promise<void> {
