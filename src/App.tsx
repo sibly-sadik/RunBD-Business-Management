@@ -51,29 +51,28 @@ import {
   normalizePostUrl,
   renewPaidCustomer,
 } from './utils/leadLogic';
-import { onFirestoreQuotaExceeded } from './firebase';
 import {
-  saveAuditLogToFirestore,
-  saveCallLogToFirestore,
-  saveContentPostToFirestore,
-  saveDuplicateAttemptToFirestore,
-  saveLeadsBatchToFirestore,
-  saveLeadToFirestore,
-  savePaidCustomersBatchToFirestore,
-  savePaidCustomerToFirestore,
-  saveSettingsToFirestore,
-  subscribeToAuditLogs,
-  subscribeToCallLogs,
-  subscribeToContentPosts,
-  subscribeToDuplicateAttempts,
-  subscribeToLeads,
-  subscribeToPaidCustomers,
-  subscribeToSettings,
-} from './utils/firestoreSync';
+  logoutFromServer,
+  restoreServerSession,
+} from './utils/apiSync';
+import {
+  checkLeadDuplicateInSupabase,
+  checkPostDuplicateInSupabase,
+  createLeadInSupabase,
+  createPostInSupabase,
+  fetchBootstrapFromSupabase,
+  importLeadsBatchInSupabase,
+  saveAuditLogInSupabase,
+  saveCallLogInSupabase,
+  saveDuplicateAttemptInSupabase,
+  saveSettingsInSupabase,
+  syncPulledRecordsToSupabase,
+  updateLeadInSupabase,
+  upsertPaidCustomerInSupabase,
+} from './utils/supabaseSync';
 import {
   detectLeadDuplicatesInList,
   detectPostDuplicatesInList,
-  isFirestoreDocIdSafe,
   isLegacyWebhookUrl,
   mergeRemoteCallLogs,
   mergeRemoteContentPosts,
@@ -109,15 +108,9 @@ function makeId(prefix: string): string {
 
 export default function App() {
   const [theme, setTheme] = useState<'dark' | 'light'>(() => storage.getTheme());
-  const [currentUser, setCurrentUser] = useState<User | null>(() => {
-    const savedId = storage.getSessionUserId();
-    if (!savedId) return null;
-    return DEMO_USERS.find((u) => u.id === savedId) ?? null;
-  });
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
 
-  const [activeTab, setActiveTab] = useState<NavTab>(() =>
-    currentUser ? defaultTabForRole(currentUser.role) : 'admin-overview'
-  );
+  const [activeTab, setActiveTab] = useState<NavTab>('admin-overview');
 
   const [leads, setLeads] = useState<Lead[]>(() => storage.getLeads());
   const [callLogs, setCallLogs] = useState<CallLog[]>(() => storage.getCallLogs());
@@ -216,91 +209,103 @@ export default function App() {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
-  const quotaToastShownRef = useRef(false);
-
-  // Notify once if Firestore free-tier daily quota is exceeded; app continues seamlessly via localStorage + Sheets
+  // Restore verified server session on reload without storing tokens in localStorage
   useEffect(() => {
-    return onFirestoreQuotaExceeded(() => {
-      if (!currentUser || quotaToastShownRef.current) return;
-      quotaToastShownRef.current = true;
-      addToast(
-        'warning',
-        'Firestore Daily Quota Reached',
-        'Cloud database quota resets tomorrow. Working safely via local storage & Google Sheets sync.'
-      );
+    if (!storage.getSessionUserId()) return;
+    let active = true;
+    void restoreServerSession().then((serverUser) => {
+      if (!active) return;
+      if (serverUser) {
+        setCurrentUser(serverUser);
+        setActiveTab(defaultTabForRole(serverUser.role));
+      } else {
+        storage.saveSessionUserId(null);
+      }
     });
-  }, [addToast, currentUser]);
+    return () => {
+      active = false;
+    };
+  }, []);
 
-  // Real-time Firebase Firestore subscriptions (authenticated & role/date-scoped to minimize read quota)
+  // Load role-scoped workspace data directly from Supabase PostgreSQL when signed in
   useEffect(() => {
     if (!currentUser) return;
+    let active = true;
+    const todayYmd = getLocalDateString();
 
-    const startOfToday = new Date();
-    startOfToday.setHours(0, 0, 0, 0);
-    // Scope all roles (including Admin) to a Today-centric window to avoid bulk-loading historical docs
-    const todayScopeOption = {
-      sinceIso: new Date(startOfToday.getTime() - 12 * 3600 * 1000).toISOString(),
-    };
+    void fetchBootstrapFromSupabase(currentUser.role, todayYmd).then((res) => {
+      if (!active) return;
+      if (!res.ok) {
+        if (res.schemaMissing && currentUser.role === 'admin') {
+          addToast(
+            'warning',
+            'Supabase Schema Setup Needed',
+            'Run supabase/schema.sql in Supabase SQL Editor (copy from Sync & Database Settings).'
+          );
+        }
+        return;
+      }
 
-    const unsubLeads = subscribeToLeads((remoteLeads) => {
-      setLeads((prev) => mergeRemoteLeads(prev, remoteLeads));
-    }, todayScopeOption);
-    const unsubCallLogs = subscribeToCallLogs((remoteLogs) => {
-      setCallLogs((prev) => mergeRemoteCallLogs(prev, remoteLogs));
-    }, todayScopeOption);
-    const unsubSettings = subscribeToSettings((remoteSettings) => {
-      const remoteUrl = remoteSettings.googleSheetsWebhookUrl?.trim() ?? '';
-      setSettings((prev) => ({
-        ...prev,
-        ...remoteSettings,
-        googleSheetsWebhookUrl:
-          remoteUrl && !isLegacyWebhookUrl(remoteUrl)
-            ? remoteUrl
-            : resolveWebhookUrl(
-                prev.googleSheetsWebhookUrl,
-                DEFAULT_GOOGLE_SHEETS_WEBHOOK_URL
-              ),
-      }));
+      const isAdmin = currentUser.role === 'admin';
+      if (res.leads) {
+        setLeads((prev) => {
+          const base = isAdmin ? prev : filterTodayLeads(prev);
+          const merged = mergeRemoteLeads(base, res.leads!);
+          leadsRef.current = merged;
+          return merged;
+        });
+      }
+      if (res.callLogs) {
+        setCallLogs((prev) => {
+          const base = isAdmin ? prev : filterTodayCallLogs(prev);
+          const merged = mergeRemoteCallLogs(base, res.callLogs!);
+          callLogsRef.current = merged;
+          return merged;
+        });
+      }
+      if (res.contentPosts) {
+        setContentPosts((prev) => {
+          const base = isAdmin ? prev : filterTodayPosts(prev);
+          const merged = mergeRemoteContentPosts(base, res.contentPosts!);
+          contentPostsRef.current = merged;
+          return merged;
+        });
+      }
+      if (res.paidCustomers) {
+        setPaidCustomers((prev) => {
+          const merged = mergeRemotePaidCustomers(prev, res.paidCustomers!);
+          paidCustomersRef.current = merged;
+          return merged;
+        });
+      }
+      if (res.duplicateAttempts) {
+        setDuplicateAttempts((prev) =>
+          mergeRemoteDuplicateAttempts(prev, res.duplicateAttempts!)
+        );
+      }
+      if (res.auditLogs && res.auditLogs.length > 0 && isAdmin) {
+        setAuditLogs(res.auditLogs);
+      }
+      if (res.settings) {
+        const remoteUrl = res.settings.googleSheetsWebhookUrl?.trim() ?? '';
+        setSettings((prev) => ({
+          ...prev,
+          ...res.settings,
+          googleSheetsWebhookUrl:
+            remoteUrl && !isLegacyWebhookUrl(remoteUrl)
+              ? remoteUrl
+              : resolveWebhookUrl(
+                  prev.googleSheetsWebhookUrl,
+                  DEFAULT_GOOGLE_SHEETS_WEBHOOK_URL
+                ),
+        }));
+      }
     });
 
-    const unsubPosts =
-      currentUser.role === 'admin' || currentUser.role === 'poster'
-        ? subscribeToContentPosts((remotePosts) => {
-            setContentPosts((prev) => mergeRemoteContentPosts(prev, remotePosts));
-          }, todayScopeOption)
-        : () => {};
-
-    const unsubAudit =
-      currentUser.role === 'admin'
-        ? subscribeToAuditLogs((remoteAudit) => {
-            setAuditLogs(remoteAudit);
-          })
-        : () => {};
-
-    const unsubDuplicates =
-      currentUser.role === 'admin' || currentUser.role === 'collector'
-        ? subscribeToDuplicateAttempts((remoteDups) => {
-            setDuplicateAttempts((prev) => mergeRemoteDuplicateAttempts(prev, remoteDups));
-          }, todayScopeOption)
-        : () => {};
-
-    const unsubPaidCustomers =
-      currentUser.role === 'admin' || currentUser.role === 'agent'
-        ? subscribeToPaidCustomers((remotePaid) => {
-            setPaidCustomers((prev) => mergeRemotePaidCustomers(prev, remotePaid));
-          })
-        : () => {};
-
     return () => {
-      unsubLeads();
-      unsubCallLogs();
-      unsubPosts();
-      unsubAudit();
-      unsubDuplicates();
-      unsubPaidCustomers();
-      unsubSettings();
+      active = false;
     };
-  }, [currentUser]);
+  }, [addToast, currentUser]);
 
   const appendAudit = useCallback(
     (actor: User, action: AuditAction, details: string) => {
@@ -314,7 +319,7 @@ export default function App() {
         timestamp: new Date().toISOString(),
       };
       setAuditLogs((prev) => [entry, ...prev]);
-      void saveAuditLogToFirestore(entry).catch(() => {});
+      void saveAuditLogInSupabase(entry).catch(() => {});
     },
     []
   );
@@ -421,47 +426,43 @@ export default function App() {
           ? mergeRemotePaidCustomers(basePaid, remotePaidCustomers)
           : basePaid;
 
-      // Persist newly pulled leads/logs/posts/paidCustomers from Google Sheets to Firestore so all laptops stay aligned
+      // Persist newly pulled leads/logs/posts/paidCustomers from Google Sheets to PostgreSQL
       const baseLeadMap = new Map(baseLeads.map((l) => [l.id, l]));
       const leadsToSave = mergedLeads.filter((lead) => {
-        if (!isFirestoreDocIdSafe(lead.id) || !lead.customerName.trim()) return false;
+        if (!lead.customerName.trim()) return false;
         const prev = baseLeadMap.get(lead.id);
         return !prev || prev.updatedAt !== lead.updatedAt;
       });
-      if (leadsToSave.length > 0) {
-        void saveLeadsBatchToFirestore(leadsToSave).catch(() => {});
-      }
 
       const baseLogIds = new Set(baseCallLogs.map((c) => c.id));
-      for (const log of mergedCallLogs) {
-        if (
-          !baseLogIds.has(log.id) &&
-          isFirestoreDocIdSafe(log.id) &&
-          isFirestoreDocIdSafe(log.leadId)
-        ) {
-          void saveCallLogToFirestore(log).catch(() => {});
-        }
-      }
+      const logsToSave = mergedCallLogs.filter((log) => !baseLogIds.has(log.id));
 
       const basePostIds = new Set(basePosts.map((p) => p.id));
-      for (const post of mergedPosts) {
-        if (
+      const postsToSave = mergedPosts.filter(
+        (post) =>
           !basePostIds.has(post.id) &&
-          isFirestoreDocIdSafe(post.id) &&
           (post.facebookLink.length > 0 || post.websiteLink.length > 0)
-        ) {
-          void saveContentPostToFirestore(post).catch(() => {});
-        }
-      }
+      );
 
       const basePaidMap = new Map(basePaid.map((c) => [c.id, c]));
       const paidToSave = mergedPaidCustomers.filter((customer) => {
-        if (!isFirestoreDocIdSafe(customer.id) || !customer.customerName.trim()) return false;
+        if (!customer.customerName.trim()) return false;
         const prev = basePaidMap.get(customer.id);
         return !prev || prev.updatedAt !== customer.updatedAt;
       });
-      if (paidToSave.length > 0) {
-        void savePaidCustomersBatchToFirestore(paidToSave).catch(() => {});
+
+      if (
+        leadsToSave.length > 0 ||
+        logsToSave.length > 0 ||
+        postsToSave.length > 0 ||
+        paidToSave.length > 0
+      ) {
+        void syncPulledRecordsToSupabase({
+          leads: leadsToSave,
+          callLogs: logsToSave,
+          contentPosts: postsToSave,
+          paidCustomers: paidToSave,
+        }).catch(() => {});
       }
 
       leadsRef.current = mergedLeads;
@@ -662,6 +663,7 @@ export default function App() {
     if (currentUser) {
       appendAudit(currentUser, 'LOGOUT', 'Signed out of session');
     }
+    void logoutFromServer();
     setCurrentUser(null);
     storage.saveSessionUserId(null);
     addToast('info', 'Signed out', 'Your session has been closed.');
@@ -673,7 +675,8 @@ export default function App() {
 
   // Data Collection handlers
   const handleRecordDuplicateAttempt = (
-    attempt: Omit<DuplicateAttempt, 'id' | 'timestamp'>
+    attempt: Omit<DuplicateAttempt, 'id' | 'timestamp'>,
+    existingLeadId = ''
   ) => {
     const record: DuplicateAttempt = {
       ...attempt,
@@ -681,7 +684,7 @@ export default function App() {
       timestamp: new Date().toISOString(),
     };
     setDuplicateAttempts((prev) => [record, ...prev]);
-    void saveDuplicateAttemptToFirestore(record).catch(() => {});
+    void saveDuplicateAttemptInSupabase(record, existingLeadId).catch(() => {});
     addToast(
       'warning',
       'Duplicate Lead Blocked',
@@ -744,6 +747,19 @@ export default function App() {
         ok: true,
         isDuplicate: true,
         duplicate: localDup,
+      };
+    }
+
+    // Fast (<100ms) indexed Supabase PostgreSQL duplicate check first
+    const dbDup = await checkLeadDuplicateInSupabase(normalizedPhone, '');
+    if (dbDup.ok && dbDup.isDuplicate && dbDup.existingLead) {
+      return {
+        ok: true,
+        isDuplicate: true,
+        duplicate: {
+          lead: dbDup.existingLead,
+          matchedBy: dbDup.matchedBy ?? 'phone',
+        },
       };
     }
 
@@ -828,6 +844,36 @@ export default function App() {
       };
     }
 
+    // Fast (<100ms) indexed duplicate check against Supabase PostgreSQL
+    const dbDup = await checkLeadDuplicateInSupabase(
+      normalizedPhone,
+      input.facebookLink.trim()
+    );
+    if (dbDup.ok && dbDup.isDuplicate && dbDup.existingLead) {
+      const matchedBy = dbDup.matchedBy ?? 'phone';
+      handleRecordDuplicateAttempt(
+        {
+          collectorId: currentUser.id,
+          collectorName: currentUser.name,
+          attemptedName: input.customerName,
+          attemptedPhone: input.rawPhone,
+          attemptedFacebook: input.facebookLink,
+          matchedBy,
+          existingCollectorName: dbDup.existingLead.collectorName,
+          existingDate: dbDup.existingLead.createdAt,
+        },
+        dbDup.existingLead.id
+      );
+      const agentLabel = dbDup.existingLead.assignedAgentName ?? 'Unassigned';
+      return {
+        ok: false,
+        error: `Duplicate Found: ${dbDup.existingLead.customerName} · Agent: ${agentLabel} · Status: ${dbDup.existingLead.status} · Collector: ${dbDup.existingLead.collectorName} (${formatShortDate(
+          dbDup.existingLead.createdAt
+        )})`,
+        duplicate: { lead: dbDup.existingLead, matchedBy },
+      };
+    }
+
     // On-demand lightweight live check against Google Sheets Master_Data without loading historical rows
     const webhookUrl = settings.googleSheetsWebhookUrl.trim();
     if (webhookUrl) {
@@ -855,16 +901,19 @@ export default function App() {
           sheetDup.existingLead
         );
         const matchedBy = sheetDup.matchedBy ?? 'phone';
-        handleRecordDuplicateAttempt({
-          collectorId: currentUser.id,
-          collectorName: currentUser.name,
-          attemptedName: input.customerName,
-          attemptedPhone: input.rawPhone,
-          attemptedFacebook: input.facebookLink,
-          matchedBy,
-          existingCollectorName: existingLead.collectorName,
-          existingDate: existingLead.createdAt,
-        });
+        handleRecordDuplicateAttempt(
+          {
+            collectorId: currentUser.id,
+            collectorName: currentUser.name,
+            attemptedName: input.customerName,
+            attemptedPhone: input.rawPhone,
+            attemptedFacebook: input.facebookLink,
+            matchedBy,
+            existingCollectorName: existingLead.collectorName,
+            existingDate: existingLead.createdAt,
+          },
+          existingLead.id
+        );
         const agentLabel = existingLead.assignedAgentName ?? 'Unassigned';
         return {
           ok: false,
@@ -903,13 +952,37 @@ export default function App() {
     );
 
     const created = assignedLeads[0];
+    const dbCreateRes = await createLeadInSupabase(created, nextIndex);
+    if (!dbCreateRes.ok && dbCreateRes.isDuplicate && dbCreateRes.existingLead) {
+      const matchedBy = dbCreateRes.matchedBy ?? 'phone';
+      handleRecordDuplicateAttempt(
+        {
+          collectorId: currentUser.id,
+          collectorName: currentUser.name,
+          attemptedName: input.customerName,
+          attemptedPhone: input.rawPhone,
+          attemptedFacebook: input.facebookLink,
+          matchedBy,
+          existingCollectorName: dbCreateRes.existingLead.collectorName,
+          existingDate: dbCreateRes.existingLead.createdAt,
+        },
+        dbCreateRes.existingLead.id
+      );
+      const agentLabel = dbCreateRes.existingLead.assignedAgentName ?? 'Unassigned';
+      return {
+        ok: false,
+        error: `Duplicate Found: ${dbCreateRes.existingLead.customerName} · Agent: ${agentLabel} · Status: ${dbCreateRes.existingLead.status} · Collector: ${dbCreateRes.existingLead.collectorName} (${formatShortDate(
+          dbCreateRes.existingLead.createdAt
+        )})`,
+        duplicate: { lead: dbCreateRes.existingLead, matchedBy },
+      };
+    }
+
     const nextLeads = [created, ...currentLeads];
     const nextSettings: AppSettings = { ...settings, roundRobinIndex: nextIndex };
     leadsRef.current = nextLeads;
     setLeads(nextLeads);
     setSettings(nextSettings);
-    void saveLeadToFirestore(created).catch(() => {});
-    void saveSettingsToFirestore(nextSettings).catch(() => {});
 
     appendAudit(
       currentUser,
@@ -984,15 +1057,41 @@ export default function App() {
       });
     }
 
-    // Live per-row check against Google Sheets Master_Data without loading all historical rows
+    // Indexed Supabase + live Google Sheets check per row without loading historical rows
+    const supabaseAcceptedRows: CsvPreviewRow[] = [];
+    for (const row of localAcceptedRows) {
+      const sbDup = await checkLeadDuplicateInSupabase(
+        row.normalizedPhone ?? row.rawPhone,
+        row.facebookLink
+      );
+      if (sbDup.ok && sbDup.isDuplicate && sbDup.existingLead) {
+        skippedCount++;
+        handleRecordDuplicateAttempt(
+          {
+            collectorId: currentUser.id,
+            collectorName: currentUser.name,
+            attemptedName: row.customerName,
+            attemptedPhone: row.rawPhone,
+            attemptedFacebook: row.facebookLink,
+            matchedBy: sbDup.matchedBy ?? 'phone',
+            existingCollectorName: sbDup.existingLead.collectorName,
+            existingDate: sbDup.existingLead.createdAt,
+          },
+          sbDup.existingLead.id
+        );
+      } else {
+        supabaseAcceptedRows.push(row);
+      }
+    }
+
     const acceptedRows: CsvPreviewRow[] = [];
     const webhookUrl = settings.googleSheetsWebhookUrl.trim();
     let checkFailureCount = 0;
     let firstCheckError = '';
-    if (webhookUrl && localAcceptedRows.length > 0) {
+    if (webhookUrl && supabaseAcceptedRows.length > 0) {
       const CONCURRENCY = 2;
-      for (let i = 0; i < localAcceptedRows.length; i += CONCURRENCY) {
-        const chunk = localAcceptedRows.slice(i, i + CONCURRENCY);
+      for (let i = 0; i < supabaseAcceptedRows.length; i += CONCURRENCY) {
+        const chunk = supabaseAcceptedRows.slice(i, i + CONCURRENCY);
         const results = await Promise.all(
           chunk.map((row) =>
             checkLeadDuplicateInSheets(
@@ -1039,7 +1138,7 @@ export default function App() {
         setSyncStatus('synced');
       }
     } else {
-      acceptedRows.push(...localAcceptedRows);
+      acceptedRows.push(...supabaseAcceptedRows);
     }
 
     if (acceptedRows.length === 0) {
@@ -1047,7 +1146,7 @@ export default function App() {
         addToast(
           'warning',
           'Import Blocked',
-          'All rows were duplicates already in Google Sheets or local database.'
+          'All rows were duplicates already in Google Sheets or Supabase database.'
         );
       }
       return;
@@ -1082,8 +1181,7 @@ export default function App() {
     leadsRef.current = nextLeads;
     setLeads(nextLeads);
     setSettings(nextSettings);
-    void saveLeadsBatchToFirestore(assignedLeads).catch(() => {});
-    void saveSettingsToFirestore(nextSettings).catch(() => {});
+    void importLeadsBatchInSupabase(assignedLeads, nextIndex).catch(() => {});
 
     appendAudit(
       currentUser,
@@ -1166,6 +1264,26 @@ export default function App() {
       };
     }
 
+    // Instant indexed duplicate check against Supabase kawsar_posts
+    const dbPostDup = await checkPostDuplicateInSupabase(trimmedFb, trimmedWeb);
+    if (dbPostDup.ok && dbPostDup.isDuplicate && dbPostDup.existingPost) {
+      const matchedField = dbPostDup.matchedField ?? 'Facebook Link';
+      addToast(
+        'warning',
+        `Duplicate ${matchedField} Blocked`,
+        `Already submitted by ${dbPostDup.existingPost.posterName} on ${formatShortDate(
+          dbPostDup.existingPost.createdAt
+        )}.`
+      );
+      return {
+        ok: false,
+        error: `Duplicate ${matchedField}: already submitted by ${dbPostDup.existingPost.posterName} on ${formatShortDate(
+          dbPostDup.existingPost.createdAt
+        )}.`,
+        duplicate: { post: dbPostDup.existingPost, matchedField },
+      };
+    }
+
     // On-demand lightweight live check against Google Sheets Kawsar_Posts_Log
     const webhookUrl = settings.googleSheetsWebhookUrl.trim();
     if (webhookUrl) {
@@ -1245,10 +1363,19 @@ export default function App() {
       createdAt: new Date().toISOString(),
     };
 
+    const dbPostRes = await createPostInSupabase(created);
+    if (!dbPostRes.ok && dbPostRes.isDuplicate && dbPostRes.existingPost) {
+      const matchedField = dbPostRes.matchedField ?? 'Facebook Link';
+      return {
+        ok: false,
+        error: `Duplicate ${matchedField}: already submitted by ${dbPostRes.existingPost.posterName}.`,
+        duplicate: { post: dbPostRes.existingPost, matchedField },
+      };
+    }
+
     const nextPosts = [created, ...currentPosts];
     contentPostsRef.current = nextPosts;
     setContentPosts(nextPosts);
-    void saveContentPostToFirestore(created).catch(() => {});
 
     const linkSummary = [
       fbUrl ? `FB: ${fbUrl}` : '',
@@ -1317,9 +1444,7 @@ export default function App() {
 
       paidCustomersRef.current = nextPaid;
       setPaidCustomers(nextPaid);
-      if (isFirestoreDocIdSafe(record.id)) {
-        void savePaidCustomerToFirestore(record).catch(() => {});
-      }
+      void upsertPaidCustomerInSupabase(record, lead.facebookLink).catch(() => {});
       return record;
     },
     [appendAudit]
@@ -1366,13 +1491,13 @@ export default function App() {
 
     setLeads(nextLeads);
     setCallLogs(nextCallLogs);
-    void saveLeadToFirestore(updatedLead).catch(() => {});
-    void saveCallLogToFirestore(newLog).catch(() => {});
 
     let paidCustomer: PaidCustomer | undefined;
     if (input.newStatus === 'Order Confirmed') {
       paidCustomer = upsertPaidCustomerForOrderConfirmed(updatedLead, currentUser);
     }
+
+    void saveCallLogInSupabase(updatedLead, newLog, paidCustomer).catch(() => {});
 
     appendAudit(
       currentUser,
@@ -1412,12 +1537,13 @@ export default function App() {
     const nextLeads = leadsRef.current.map((l) => (l.id === leadId ? updatedLead : l));
     leadsRef.current = nextLeads;
     setLeads(nextLeads);
-    void saveLeadToFirestore(updatedLead).catch(() => {});
 
     let paidCustomer: PaidCustomer | undefined;
     if (newStatus === 'Order Confirmed') {
       paidCustomer = upsertPaidCustomerForOrderConfirmed(updatedLead, currentUser);
     }
+
+    void updateLeadInSupabase(updatedLead, paidCustomer).catch(() => {});
 
     appendAudit(
       currentUser,
@@ -1454,9 +1580,7 @@ export default function App() {
     const nextPaid = basePaid.map((c) => (c.id === customerId ? renewed : c));
     paidCustomersRef.current = nextPaid;
     setPaidCustomers(nextPaid);
-    if (isFirestoreDocIdSafe(renewed.id)) {
-      void savePaidCustomerToFirestore(renewed).catch(() => {});
-    }
+    void upsertPaidCustomerInSupabase(renewed).catch(() => {});
 
     appendAudit(
       currentUser,
@@ -1498,9 +1622,7 @@ export default function App() {
     const nextPaid = basePaid.map((c) => (c.id === customerId ? updated : c));
     paidCustomersRef.current = nextPaid;
     setPaidCustomers(nextPaid);
-    if (isFirestoreDocIdSafe(updated.id)) {
-      void savePaidCustomerToFirestore(updated).catch(() => {});
-    }
+    void upsertPaidCustomerInSupabase(updated).catch(() => {});
 
     appendAudit(
       currentUser,
@@ -1525,7 +1647,7 @@ export default function App() {
   const handleUpdateCallScript = (script: string) => {
     const nextSettings: AppSettings = { ...settings, callScript: script };
     setSettings(nextSettings);
-    void saveSettingsToFirestore(nextSettings).catch(() => {});
+    void saveSettingsInSupabase(nextSettings).catch(() => {});
     addToast('success', 'Call Script Saved', 'Your updated script is ready for reference.');
   };
 
@@ -1533,7 +1655,7 @@ export default function App() {
   const handleToggleAutoAssign = (enabled: boolean) => {
     const nextSettings: AppSettings = { ...settings, autoAssignEnabled: enabled };
     setSettings(nextSettings);
-    void saveSettingsToFirestore(nextSettings).catch(() => {});
+    void saveSettingsInSupabase(nextSettings).catch(() => {});
     if (currentUser) {
       appendAudit(
         currentUser,
@@ -1566,7 +1688,7 @@ export default function App() {
     const nextLeads = leadsRef.current.map((l) => (l.id === leadId ? updated : l));
     leadsRef.current = nextLeads;
     setLeads(nextLeads);
-    void saveLeadToFirestore(updated).catch(() => {});
+    void updateLeadInSupabase(updated).catch(() => {});
 
     appendAudit(
       currentUser,
@@ -1593,7 +1715,7 @@ export default function App() {
   const handleSaveWebhookUrl = (url: string) => {
     const nextSettings: AppSettings = { ...settings, googleSheetsWebhookUrl: url };
     setSettings(nextSettings);
-    void saveSettingsToFirestore(nextSettings).catch(() => {});
+    void saveSettingsInSupabase(nextSettings).catch(() => {});
     setSyncStatus(url ? 'synced' : 'offline');
     if (currentUser) {
       appendAudit(

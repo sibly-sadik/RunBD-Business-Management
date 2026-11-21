@@ -5,6 +5,7 @@ import {
   CheckCircle2,
   Code2,
   Copy,
+  Database,
   DownloadCloud,
   FileSpreadsheet,
   RefreshCw,
@@ -13,6 +14,7 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
+import supabaseSchemaSql from '../../supabase/schema.sql?raw';
 import { GOOGLE_APPS_SCRIPT_CODE } from '../data/seedData';
 import { SyncStatus } from '../types';
 import { formatDateTime } from '../utils/leadLogic';
@@ -43,7 +45,9 @@ export function AdminSheetsView({
 }: AdminSheetsViewProps) {
   const [urlInput, setUrlInput] = useState(webhookUrl);
   const [scriptModalOpen, setScriptModalOpen] = useState(false);
+  const [sqlModalOpen, setSqlModalOpen] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [copiedSql, setCopiedSql] = useState(false);
   const [testing, setTesting] = useState(false);
   const [pulling, setPulling] = useState(false);
   const [clearingCache, setClearingCache] = useState(false);
@@ -99,26 +103,61 @@ export function AdminSheetsView({
     }
   };
 
+  const handleCopySupabaseSql = async () => {
+    try {
+      await navigator.clipboard.writeText(supabaseSchemaSql);
+      setCopiedSql(true);
+      setTimeout(() => setCopiedSql(false), 2500);
+    } catch {
+      setSqlModalOpen(true);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
           <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-slate-900 dark:text-white">
-            Google Sheets Real-Time Sync
+            Google Sheets Sync &amp; Database Settings
           </h1>
           <p className="text-sm text-slate-500 dark:text-slate-400 mt-0.5">
-            Connect a Google Apps Script Web App webhook to mirror leads, call logs, and daily summaries.
+            Supabase PostgreSQL primary storage with real-time Google Apps Script two-way sync.
           </p>
         </div>
 
-        <button
-          type="button"
-          onClick={() => setScriptModalOpen(true)}
-          className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-semibold text-slate-800 dark:text-slate-100 transition-colors whitespace-nowrap self-start cursor-pointer"
-        >
-          <Code2 className="w-4 h-4 text-emerald-500" />
-          <span>View Code.gs Script</span>
-        </button>
+        <div className="flex flex-wrap items-center gap-2.5 self-start">
+          <button
+            type="button"
+            data-testid="copy-supabase-sql-btn"
+            onClick={handleCopySupabaseSql}
+            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg border border-sky-500/40 bg-sky-500/10 hover:bg-sky-500/20 text-xs font-semibold text-sky-700 dark:text-sky-300 transition-colors whitespace-nowrap cursor-pointer"
+          >
+            {copiedSql ? (
+              <Check className="w-4 h-4 text-emerald-500" />
+            ) : (
+              <Database className="w-4 h-4 text-sky-500" />
+            )}
+            <span>{copiedSql ? 'Copied Supabase SQL' : 'Copy Supabase SQL'}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setSqlModalOpen(true)}
+            className="inline-flex items-center gap-2 px-3.5 py-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-semibold text-slate-800 dark:text-slate-100 transition-colors whitespace-nowrap cursor-pointer"
+          >
+            <Code2 className="w-4 h-4 text-sky-500" />
+            <span>View SQL</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setScriptModalOpen(true)}
+            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-semibold text-slate-800 dark:text-slate-100 transition-colors whitespace-nowrap cursor-pointer"
+          >
+            <Code2 className="w-4 h-4 text-emerald-500" />
+            <span>View Code.gs Script</span>
+          </button>
+        </div>
       </div>
 
       {/* Webhook Configuration Card */}
@@ -547,6 +586,56 @@ export function AdminSheetsView({
             <div className="p-5 overflow-auto bg-slate-950 text-slate-200">
               <pre className="text-xs font-mono leading-relaxed whitespace-pre">
                 <code>{GOOGLE_APPS_SCRIPT_CODE}</code>
+              </pre>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Supabase SQL Schema Modal */}
+      {sqlModalOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="supabase-sql-modal-title"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/75 backdrop-blur-xs"
+        >
+          <div className="w-full max-w-3xl max-h-[85vh] flex flex-col rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden">
+            <div className="px-6 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-4 shrink-0">
+              <div>
+                <h3
+                  id="supabase-sql-modal-title"
+                  className="text-base font-semibold text-slate-900 dark:text-white"
+                >
+                  Supabase PostgreSQL Schema (supabase/schema.sql)
+                </h3>
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                  Run in Supabase Dashboard → SQL Editor to provision all indexed tables.
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleCopySupabaseSql}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold transition-colors cursor-pointer"
+                >
+                  {copiedSql ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                  <span>{copiedSql ? 'Copied SQL' : 'Copy Supabase SQL'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSqlModalOpen(false)}
+                  aria-label="Close Supabase SQL modal"
+                  className="p-1.5 rounded-lg text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-700 dark:hover:text-slate-200 cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            <div className="p-5 overflow-auto bg-slate-950 text-slate-200">
+              <pre className="text-xs font-mono leading-relaxed whitespace-pre">
+                <code>{supabaseSchemaSql}</code>
               </pre>
             </div>
           </div>

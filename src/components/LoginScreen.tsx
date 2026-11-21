@@ -14,7 +14,7 @@ import {
 } from 'lucide-react';
 import { DEMO_USERS } from '../data/seedData';
 import { User } from '../types';
-import { authenticateUser } from '../utils/leadLogic';
+import { loginWithServer } from '../utils/apiSync';
 import { AppFooter } from './AppFooter';
 
 interface LoginScreenProps {
@@ -28,14 +28,16 @@ export function LoginScreen({ onLogin, theme, onToggleTheme }: LoginScreenProps)
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
 
   const adminUsers = DEMO_USERS.filter((u) => u.role === 'admin');
   const agentUsers = DEMO_USERS.filter((u) => u.role === 'agent');
   const collectorUsers = DEMO_USERS.filter((u) => u.role === 'collector');
   const posterUsers = DEMO_USERS.filter((u) => u.role === 'poster');
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submitting) return;
     setError('');
     const trimmed = username.trim();
     if (!trimmed || !password) {
@@ -43,13 +45,20 @@ export function LoginScreen({ onLogin, theme, onToggleTheme }: LoginScreenProps)
       return;
     }
 
-    const matched = authenticateUser(DEMO_USERS, trimmed, password);
-    if (!matched) {
-      setError('Invalid username or password. Please verify your assigned RunBD credentials.');
-      return;
+    setSubmitting(true);
+    try {
+      const res = await loginWithServer(trimmed, password);
+      if (!res.ok || !res.user) {
+        setError(
+          res.error ??
+            'Invalid username or password. Please verify your assigned RunBD credentials.'
+        );
+        return;
+      }
+      onLogin(res.user);
+    } finally {
+      setSubmitting(false);
     }
-
-    onLogin(matched);
   };
 
   const handleSelectUsername = (selectedUsername: string) => {
@@ -159,9 +168,10 @@ export function LoginScreen({ onLogin, theme, onToggleTheme }: LoginScreenProps)
 
                 <button
                   type="submit"
-                  className="w-full inline-flex items-center justify-center gap-2 py-2.5 px-4 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-emerald-500/50 cursor-pointer"
+                  disabled={submitting}
+                  className="w-full inline-flex items-center justify-center gap-2 py-2.5 px-4 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-white text-sm font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-emerald-500/50 cursor-pointer"
                 >
-                  <span>Sign In</span>
+                  <span>{submitting ? 'Signing In...' : 'Sign In'}</span>
                   <ArrowRight className="w-4 h-4" />
                 </button>
               </form>
