@@ -15,6 +15,7 @@ import {
   LogOut,
   Menu,
   Moon,
+  PhoneCall,
   RefreshCw,
   Sun,
   Users,
@@ -33,7 +34,8 @@ export type NavTab =
   | 'kawsar-posts'
   | 'admin-audit'
   | 'admin-sheets'
-  | 'agent-workspace';
+  | 'agent-workspace'
+  | 'agent-today-calls';
 
 interface LayoutProps {
   user: User;
@@ -45,6 +47,7 @@ interface LayoutProps {
   syncStatus: SyncStatus;
   quickStatLabel: string;
   quickStatValue: string;
+  todayCallsCount?: number;
   dueRenewals?: DueRenewalItem[];
   onMarkPaidCustomerRenewed?: (customerId: string) => void;
   children: React.ReactNode;
@@ -55,6 +58,7 @@ interface NavItem {
   label: string;
   icon: typeof BarChart3;
   badgeCount?: number;
+  showZeroBadge?: boolean;
 }
 
 export function Layout({
@@ -67,6 +71,7 @@ export function Layout({
   syncStatus,
   quickStatLabel,
   quickStatValue,
+  todayCallsCount = 0,
   dueRenewals = [],
   onMarkPaidCustomerRenewed,
   children,
@@ -115,6 +120,13 @@ export function Layout({
       : user.role === 'agent'
       ? [
           { id: 'agent-workspace', label: 'My Call Queue', icon: Headphones },
+          {
+            id: 'agent-today-calls',
+            label: 'Today calls',
+            icon: PhoneCall,
+            badgeCount: todayCallsCount,
+            showZeroBadge: true,
+          },
           {
             id: 'paid-customers',
             label: 'Paid Customers',
@@ -204,6 +216,7 @@ export function Layout({
             <button
               key={item.id}
               type="button"
+              data-testid={`nav-item-${item.id}`}
               onClick={() => handleNavClick(item.id)}
               className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors cursor-pointer ${
                 isActive
@@ -213,14 +226,21 @@ export function Layout({
             >
               <Icon className="w-4 h-4 shrink-0" />
               <span className="truncate flex-1 text-left">{item.label}</span>
-              {typeof item.badgeCount === 'number' && item.badgeCount > 0 && (
-                <span
-                  data-testid={`nav-badge-${item.id}`}
-                  className="ml-auto font-mono text-[11px] font-bold tabular-nums px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-700 dark:text-amber-300"
-                >
-                  {item.badgeCount}
-                </span>
-              )}
+              {typeof item.badgeCount === 'number' &&
+                (item.badgeCount > 0 || item.showZeroBadge) && (
+                  <span
+                    data-testid={`nav-badge-${item.id}`}
+                    className={`ml-auto font-mono text-[11px] font-bold tabular-nums px-1.5 py-0.5 rounded ${
+                      item.id === 'agent-today-calls'
+                        ? item.badgeCount > 0
+                          ? 'bg-emerald-500/20 text-emerald-700 dark:text-emerald-300'
+                          : 'bg-slate-200/80 dark:bg-slate-800 text-slate-600 dark:text-slate-300'
+                        : 'bg-amber-500/20 text-amber-700 dark:text-amber-300'
+                    }`}
+                  >
+                    {item.badgeCount}
+                  </span>
+                )}
             </button>
           );
         })}

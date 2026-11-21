@@ -500,6 +500,21 @@ export function filterTodayCallLogs(logs: CallLog[], now: Date = new Date()): Ca
 }
 
 /**
+ * Returns only call logs recorded Today (YYYY-MM-DD local date) by the specified agent,
+ * sorted newest-first by timestamp. Excludes previous-day logs and other agents' calls.
+ */
+export function getAgentTodayCallLogs(
+  logs: CallLog[],
+  agentId: string,
+  now: Date = new Date()
+): CallLog[] {
+  if (!agentId) return [];
+  return filterTodayCallLogs(logs, now)
+    .filter((c) => c.agentId === agentId)
+    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+}
+
+/**
  * Returns only content posts submitted today (YYYY-MM-DD local date).
  */
 export function filterTodayPosts(posts: ContentPost[], now: Date = new Date()): ContentPost[] {
@@ -522,7 +537,7 @@ export function filterTodayDuplicateAttempts(
  */
 export function getScheduledFollowUps(leads: Lead[], agentId: string): Lead[] {
   return leads
-    .filter((l) => l.assignedAgentId === agentId && Boolean(l.followUpAt))
+    .filter((l) => l.assignedAgentId === agentId && l.status !== 'Done' && Boolean(l.followUpAt))
     .filter((l) => !Number.isNaN(new Date(l.followUpAt as string).getTime()))
     .sort(
       (a, b) =>
@@ -633,6 +648,7 @@ export function computeCollectorStats(
  */
 export function formatShortDate(iso: string): string {
   const trimmed = String(iso ?? '').replace(/^'+/, '').trim();
+  if (!trimmed || trimmed === '1970-01-01T00:00:00.000Z') return 'Historical Sheet';
   const bareLocal = /^\d{4}-\d{2}-\d{2}$/.test(trimmed) ? parseYmdLocal(trimmed) : null;
   const dt = bareLocal ?? new Date(trimmed);
   if (Number.isNaN(dt.getTime())) return iso;
@@ -659,9 +675,11 @@ export function formatTime(iso: string): string {
  * Formats an ISO date string into date + time.
  */
 export function formatDateTime(iso: string): string {
-  const dt = new Date(iso);
+  const trimmed = String(iso ?? '').replace(/^'+/, '').trim();
+  if (!trimmed || trimmed === '1970-01-01T00:00:00.000Z') return 'Historical Sheet';
+  const dt = new Date(trimmed);
   if (Number.isNaN(dt.getTime())) return iso;
-  return `${formatShortDate(iso)}, ${formatTime(iso)}`;
+  return `${formatShortDate(trimmed)}, ${formatTime(trimmed)}`;
 }
 
 /**

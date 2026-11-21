@@ -4,6 +4,7 @@ import { AdminDashboardView } from './components/AdminDashboardView';
 import { AdminFinalDailySummaryView } from './components/AdminFinalDailySummaryView';
 import { AdminLeadsView } from './components/AdminLeadsView';
 import { AdminSheetsView } from './components/AdminSheetsView';
+import { AgentTodayCallsView } from './components/AgentTodayCallsView';
 import { AgentWorkspaceView } from './components/AgentWorkspaceView';
 import { DataCollectionView } from './components/DataCollectionView';
 import { KawsarPostsView } from './components/KawsarPostsView';
@@ -40,6 +41,7 @@ import {
   findDuplicateLead,
   findDuplicatePost,
   formatShortDate,
+  getAgentTodayCallLogs,
   getDueRenewalCustomers,
   getLocalDateString,
   getScheduledFollowUps,
@@ -75,6 +77,7 @@ import {
   isLegacyWebhookUrl,
   mergeRemoteCallLogs,
   mergeRemoteContentPosts,
+  mergeRemoteDuplicateAttempts,
   mergeRemoteLeads,
   mergeRemotePaidCustomers,
   resolveWebhookUrl,
@@ -277,7 +280,7 @@ export default function App() {
     const unsubDuplicates =
       currentUser.role === 'admin' || currentUser.role === 'collector'
         ? subscribeToDuplicateAttempts((remoteDups) => {
-            setDuplicateAttempts(remoteDups);
+            setDuplicateAttempts((prev) => mergeRemoteDuplicateAttempts(prev, remoteDups));
           }, todayScopeOption)
         : () => {};
 
@@ -729,18 +732,36 @@ export default function App() {
     }
 
     // On-demand lightweight live check against Google Sheets Master_Data without loading historical rows
-    if (settings.googleSheetsWebhookUrl.trim()) {
+    const webhookUrl = settings.googleSheetsWebhookUrl.trim();
+    if (webhookUrl) {
       const sheetDup = await checkLeadDuplicateInSheets(
-        settings.googleSheetsWebhookUrl,
+        webhookUrl,
         normalizedPhone,
-        input.facebookLink.trim()
+        input.facebookLink.trim(),
+        { timeoutMs: 15000 }
       );
+      if (!sheetDup.ok) {
+        const errMsg =
+          sheetDup.error ??
+          'Unable to verify lead uniqueness against Google Sheets Master_Data.';
+        console.error('[RunBD] Live Google Sheets lead duplicate check failed:', errMsg);
+        setSyncStatus('error');
+        addToast('error', 'Google Sheets Duplicate Check Failed', errMsg);
+        return {
+          ok: false,
+          error: `Live Google Sheets duplicate check failed: ${errMsg} Lead was NOT saved so duplicates are never missed.`,
+        };
+      }
       if (sheetDup.isDuplicate && sheetDup.existingLead) {
+        const existingPhone =
+          normalizeBdPhone(sheetDup.existingLead.phone) ||
+          sheetDup.existingLead.phone ||
+          normalizedPhone;
         const existingLead: Lead = {
           id: sheetDup.existingLead.id,
           customerName: sheetDup.existingLead.customerName,
-          phone: sheetDup.existingLead.phone || normalizedPhone,
-          rawPhone: sheetDup.existingLead.phone || normalizedPhone,
+          phone: existingPhone,
+          rawPhone: existingPhone,
           facebookLink: sheetDup.existingLead.facebookLink,
           normalizedFacebookLink: normalizeFacebookUrl(sheetDup.existingLead.facebookLink),
           notes: '',
@@ -776,6 +797,7 @@ export default function App() {
           duplicate: { lead: existingLead, matchedBy },
         };
       }
+      setSyncStatus('synced');
     }
 
     const nowIso = new Date().toISOString();
@@ -888,31 +910,30 @@ export default function App() {
     // Live per-row check against Google Sheets Master_Data without loading all historical rows
     const acceptedRows: CsvPreviewRow[] = [];
     const webhookUrl = settings.googleSheetsWebhookUrl.trim();
+    let checkFailureCount = 0;
+    let firstCheckError = '';
     if (webhookUrl && localAcceptedRows.length > 0) {
-      let endpointReachable = true;
-      const CONCURRENCY = 4;
+      const CONCURRENCY = 2;
       for (let i = 0; i < localAcceptedRows.length; i += CONCURRENCY) {
         const chunk = localAcceptedRows.slice(i, i + CONCURRENCY);
-        if (!endpointReachable) {
-          acceptedRows.push(...chunk);
-          continue;
-        }
         const results = await Promise.all(
           chunk.map((row) =>
             checkLeadDuplicateInSheets(
               webhookUrl,
               row.normalizedPhone ?? row.rawPhone,
               row.facebookLink,
-              { timeoutMs: 3500 }
+              { timeoutMs: 15000 }
             )
           )
         );
-        if (results.every((res) => !res.ok)) {
-          endpointReachable = false;
-        }
         chunk.forEach((row, idx) => {
           const checkRes = results[idx];
-          if (checkRes.isDuplicate && checkRes.existingLead) {
+          if (!checkRes.ok) {
+            checkFailureCount++;
+            if (!firstCheckError && checkRes.error) {
+              firstCheckError = checkRes.error;
+            }
+          } else if (checkRes.isDuplicate && checkRes.existingLead) {
             skippedCount++;
             handleRecordDuplicateAttempt({
               collectorId: currentUser.id,
@@ -929,16 +950,29 @@ export default function App() {
           }
         });
       }
+      if (checkFailureCount > 0) {
+        console.error('[RunBD] Bulk Google Sheets duplicate check error:', firstCheckError);
+        setSyncStatus('error');
+        addToast(
+          'error',
+          `Sheet Duplicate Check Failed (${checkFailureCount} row${checkFailureCount === 1 ? '' : 's'})`,
+          firstCheckError || 'Could not verify rows against Master_Data; unverified rows were skipped.'
+        );
+      } else {
+        setSyncStatus('synced');
+      }
     } else {
       acceptedRows.push(...localAcceptedRows);
     }
 
     if (acceptedRows.length === 0) {
-      addToast(
-        'warning',
-        'Import Blocked',
-        'All rows were duplicates already in Google Sheets or local database.'
-      );
+      if (checkFailureCount === 0) {
+        addToast(
+          'warning',
+          'Import Blocked',
+          'All rows were duplicates already in Google Sheets or local database.'
+        );
+      }
       return;
     }
 
@@ -1056,12 +1090,26 @@ export default function App() {
     }
 
     // On-demand lightweight live check against Google Sheets Kawsar_Posts_Log
-    if (settings.googleSheetsWebhookUrl.trim()) {
+    const webhookUrl = settings.googleSheetsWebhookUrl.trim();
+    if (webhookUrl) {
       const sheetPostDup = await checkPostDuplicateInSheets(
-        settings.googleSheetsWebhookUrl,
+        webhookUrl,
         trimmedFb,
-        trimmedWeb
+        trimmedWeb,
+        { timeoutMs: 15000 }
       );
+      if (!sheetPostDup.ok) {
+        const errMsg =
+          sheetPostDup.error ??
+          'Unable to verify link uniqueness against Google Sheets Kawsar_Posts_Log.';
+        console.error('[RunBD] Live Google Sheets post duplicate check failed:', errMsg);
+        setSyncStatus('error');
+        addToast('error', 'Google Sheets Link Check Failed', errMsg);
+        return {
+          ok: false,
+          error: `Live Google Sheets link check failed: ${errMsg} Entry was NOT saved.`,
+        };
+      }
       if (sheetPostDup.isDuplicate && sheetPostDup.existingPost) {
         const existingPost: ContentPost = {
           id: sheetPostDup.existingPost.id,
@@ -1094,6 +1142,7 @@ export default function App() {
           duplicate: { post: existingPost, matchedField },
         };
       }
+      setSyncStatus('synced');
     }
 
     const fbUrl = trimmedFb
@@ -1536,6 +1585,11 @@ export default function App() {
     return [];
   }, [currentUser, paidCustomers]);
 
+  const agentTodayCallsCount = useMemo(() => {
+    if (!currentUser || currentUser.role !== 'agent') return 0;
+    return getAgentTodayCallLogs(callLogs, currentUser.id).length;
+  }, [currentUser, callLogs]);
+
   // Top bar contextual quick stat per role (strict Today-only for Agents, Collectors, Poster; All-time for Admin)
   const quickStat = useMemo(() => {
     if (!currentUser) return { label: '', value: '' };
@@ -1584,6 +1638,7 @@ export default function App() {
         syncStatus={syncStatus}
         quickStatLabel={quickStat.label}
         quickStatValue={quickStat.value}
+        todayCallsCount={agentTodayCallsCount}
         dueRenewals={dueRenewals}
         onMarkPaidCustomerRenewed={handleMarkPaidCustomerRenewed}
       >
@@ -1682,8 +1737,17 @@ export default function App() {
             dueRenewals={dueRenewals}
             onMarkPaidCustomerRenewed={handleMarkPaidCustomerRenewed}
             onOpenPaidCustomers={() => setActiveTab('paid-customers')}
+            onOpenTodayCalls={() => setActiveTab('agent-today-calls')}
             onUpdateCallScript={handleUpdateCallScript}
             onLogCall={handleLogCall}
+          />
+        )}
+
+        {currentUser.role === 'agent' && activeTab === 'agent-today-calls' && (
+          <AgentTodayCallsView
+            agent={currentUser}
+            callLogs={callLogs}
+            onBackToQueue={() => setActiveTab('agent-workspace')}
           />
         )}
 

@@ -22,6 +22,7 @@ import {
   generateDailyReportCsv,
   generateFinalDailySummaryCsv,
   generatePaidCustomersCsv,
+  getAgentTodayCallLogs,
   getDueRenewalCustomers,
   getLeadCollectedYmd,
   getScheduledFollowUps,
@@ -35,7 +36,7 @@ import {
   renewPaidCustomer,
 } from './leadLogic';
 import { DEMO_USERS } from '../data/seedData';
-import { CallLog, ContentPost, DuplicateAttempt, Lead, PaidCustomer, User } from '../types';
+import { CALL_STATUSES, CallLog, ContentPost, DuplicateAttempt, Lead, PaidCustomer, User } from '../types';
 
 const mockAgents: User[] = [
   { id: 'a1', name: 'Tanjin', email: 'tanjin@runbd.com', password: '123', role: 'agent', title: 'Agent', avatarInitials: 'TJ' },
@@ -800,5 +801,126 @@ test('filterTodayLeads strictly checks collectedDate/date/createdAt (including b
     ['L-BARE-TODAY', 'L-ISO-TODAY']
   );
 });
+
+test('getAgentTodayCallLogs strictly isolates Today logs per agent and sorts newest-first', () => {
+  const now = new Date(2026, 10, 21, 16, 0, 0); // 2026-11-21
+  const todayMorning = new Date(2026, 10, 21, 9, 15, 0).toISOString();
+  const todayAfternoon = new Date(2026, 10, 21, 14, 30, 0).toISOString();
+  const yesterdayIso = new Date(2026, 10, 20, 18, 0, 0).toISOString();
+  const followUpIso = new Date(2026, 10, 22, 11, 0, 0).toISOString();
+
+  const logs: CallLog[] = [
+    {
+      id: 'CL-YEST-A1',
+      leadId: 'L-1',
+      customerName: 'Yesterday Lead',
+      phone: '01711000001',
+      agentId: 'a1',
+      agentName: 'Tanjin',
+      previousStatus: 'Pending',
+      newStatus: 'Interested',
+      notes: 'From yesterday',
+      followUpAt: null,
+      timestamp: yesterdayIso,
+    },
+    {
+      id: 'CL-TODAY-A2',
+      leadId: 'L-2',
+      customerName: 'Kathy Lead',
+      phone: '01711000002',
+      agentId: 'a2',
+      agentName: 'Kathy',
+      previousStatus: 'Pending',
+      newStatus: 'Order Confirmed',
+      notes: 'Other agent call today',
+      followUpAt: null,
+      timestamp: todayAfternoon,
+    },
+    {
+      id: 'CL-TODAY-A1-EARLY',
+      leadId: 'L-3',
+      customerName: 'First Call Today',
+      phone: '01711000003',
+      agentId: 'a1',
+      agentName: 'Tanjin',
+      previousStatus: 'Pending',
+      newStatus: 'Busy / Call Later',
+      notes: 'Call back tomorrow',
+      followUpAt: followUpIso,
+      timestamp: todayMorning,
+    },
+    {
+      id: 'CL-TODAY-A1-LATE',
+      leadId: 'L-4',
+      customerName: 'Second Call Today',
+      phone: '01711000004',
+      agentId: 'a1',
+      agentName: 'Tanjin',
+      previousStatus: 'Interested',
+      newStatus: 'Order Confirmed',
+      notes: 'Confirmed order',
+      followUpAt: null,
+      timestamp: todayAfternoon,
+    },
+    {
+      id: 'CL-INVALID-TS',
+      leadId: 'L-5',
+      customerName: 'Bad Date Lead',
+      phone: '01711000005',
+      agentId: 'a1',
+      agentName: 'Tanjin',
+      previousStatus: 'Pending',
+      newStatus: 'Pending',
+      notes: '',
+      followUpAt: null,
+      timestamp: '',
+    },
+  ];
+
+  const a1Today = getAgentTodayCallLogs(logs, 'a1', now);
+  assert.deepEqual(
+    a1Today.map((c) => c.id),
+    ['CL-TODAY-A1-LATE', 'CL-TODAY-A1-EARLY']
+  );
+  assert.equal(a1Today.length, 2);
+
+  const a2Today = getAgentTodayCallLogs(logs, 'a2', now);
+  assert.deepEqual(
+    a2Today.map((c) => c.id),
+    ['CL-TODAY-A2']
+  );
+
+  // Fresh day with no calls returns 0 for agent a3
+  assert.equal(getAgentTodayCallLogs(logs, 'a3', now).length, 0);
+});
+
+test('Done status is available in CALL_STATUSES and excludes leads from scheduled follow-ups', () => {
+  assert.equal(CALL_STATUSES.includes('Done'), true);
+
+  const leadsList: Lead[] = [
+    {
+      ...existingLeads[0],
+      id: 'L-DONE',
+      assignedAgentId: 'a1',
+      status: 'Done',
+      followUpAt: '2026-11-21T16:00:00.000Z',
+    },
+    {
+      ...existingLeads[0],
+      id: 'L-INT',
+      assignedAgentId: 'a1',
+      status: 'Interested',
+      followUpAt: '2026-11-21T17:00:00.000Z',
+    },
+  ];
+
+  const queue = getScheduledFollowUps(leadsList, 'a1');
+  assert.deepEqual(
+    queue.map((l) => l.id),
+    ['L-INT']
+  );
+});
+
+
 
 

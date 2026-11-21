@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { CallLog, ContentPost, Lead, PaidCustomer } from '../types';
-import { filterTodayLeads } from './leadLogic';
+import { CallLog, ContentPost, DuplicateAttempt, Lead, PaidCustomer } from '../types';
+import { extractPhoneCoreKey, filterTodayLeads, normalizeBdPhone } from './leadLogic';
 import {
   detectLeadDuplicatesInList,
   detectPostDuplicatesInList,
@@ -13,6 +13,7 @@ import {
   isLegacyWebhookUrl,
   mergeRemoteCallLogs,
   mergeRemoteContentPosts,
+  mergeRemoteDuplicateAttempts,
   mergeRemoteLeads,
   mergeRemotePaidCustomers,
   parseLeadDuplicateCheckResponse,
@@ -624,7 +625,172 @@ describe('on-demand duplicate checks & today-only pull filtering', () => {
       ['L-TODAY-ROW']
     );
   });
+
+  it('parses ok:false error payloads and numeric BD phone numbers cleanly in sheet duplicate checks', () => {
+    const leadErr = parseLeadDuplicateCheckResponse({
+      ok: false,
+      error: 'SpreadsheetApp permission denied',
+    });
+    assert.deepEqual(leadErr, {
+      ok: false,
+      isDuplicate: false,
+      error: 'SpreadsheetApp permission denied',
+    });
+
+    const postErr = parsePostDuplicateCheckResponse({
+      ok: false,
+      error: 'Kawsar_Posts_Log missing',
+    });
+    assert.deepEqual(postErr, {
+      ok: false,
+      isDuplicate: false,
+      error: 'Kawsar_Posts_Log missing',
+    });
+
+    const numericPhoneDup = parseLeadDuplicateCheckResponse({
+      ok: true,
+      isDuplicate: true,
+      matchedBy: 'phone',
+      lead: {
+        id: 'RBD-IMP-24421',
+        customerName: 'Sheet Customer',
+        phone: 1728774634,
+        collectorName: 'Naim',
+        assignedAgentName: 'Kathy',
+        status: 'Interested',
+        createdAt: '2026-11-20T04:35:32.000Z',
+      },
+    });
+    assert.equal(numericPhoneDup?.ok, true);
+    assert.equal(numericPhoneDup?.isDuplicate, true);
+    assert.equal(numericPhoneDup?.existingLead?.phone, '01728774634');
+  });
+
+  it('normalizes all BD phone variants consistently to 01XXXXXXXXX and merges duplicate alerts safely', () => {
+    const variants = [
+      '+880 1728-774634',
+      '8801728774634',
+      "'01728774634",
+      '01728774634',
+      '+88001728774634',
+      '1728774634',
+    ];
+    for (const v of variants) {
+      assert.equal(normalizeBdPhone(v), '01728774634');
+      assert.equal(extractPhoneCoreKey(v), '1728774634');
+    }
+
+    const localAlert: DuplicateAttempt = {
+      id: 'DUP-LOCAL-1',
+      collectorId: 'collector-farhan',
+      collectorName: 'Farhan',
+      attemptedName: 'Test Dup',
+      attemptedPhone: '+880 1728-774634',
+      attemptedFacebook: '',
+      matchedBy: 'phone',
+      existingCollectorName: 'Naim',
+      existingDate: '2026-11-20T04:35:32.000Z',
+      timestamp: '2026-11-21T08:00:00.000Z',
+    };
+    const mergedEmpty = mergeRemoteDuplicateAttempts([localAlert], []);
+    assert.equal(mergedEmpty.length, 1);
+    assert.equal(mergedEmpty[0].id, 'DUP-LOCAL-1');
+
+    const remoteAlert: DuplicateAttempt = {
+      ...localAlert,
+      id: 'DUP-REMOTE-2',
+      timestamp: '2026-11-21T09:00:00.000Z',
+    };
+    const mergedBoth = mergeRemoteDuplicateAttempts([localAlert], [remoteAlert]);
+    assert.deepEqual(
+      mergedBoth.map((d) => d.id),
+      ['DUP-REMOTE-2', 'DUP-LOCAL-1']
+    );
+  });
+
+  it('handles pull-style { ok: true, leads / contentPosts } fallback responses during duplicate checks without erroring', () => {
+    const pullStyleLeadsPayload = {
+      ok: true,
+      leads: [
+        {
+          id: 'RBD-SHEET-FRESH-2749',
+          customerName: 'Sheet Fresh Lead 2749',
+          phone: '01710002749',
+          facebookLink: 'https://facebook.com/sheet.fresh.2749',
+          collectorName: 'Naim',
+          assignedAgentName: 'Sakib',
+          status: 'Order Confirmed',
+          updatedAt: '2026-11-20T11:00:00.000Z',
+        },
+        {
+          id: 'RBD-SHEET-LIVE-1',
+          customerName: 'Sheet Customer A',
+          phone: '01988776655',
+          facebookLink: 'https://facebook.com/sheet.cust.a',
+          collectorName: 'Naim',
+          assignedAgentName: 'Tanjin',
+          status: 'Interested',
+          updatedAt: '2026-11-20T09:00:00.000Z',
+        },
+      ],
+    };
+
+    const phoneMatch = parseLeadDuplicateCheckResponse(pullStyleLeadsPayload, {
+      phone: '+880 1710-002749',
+      facebookLink: '',
+    });
+    assert.equal(phoneMatch?.ok, true);
+    assert.equal(phoneMatch?.isDuplicate, true);
+    assert.equal(phoneMatch?.matchedBy, 'phone');
+    assert.equal(phoneMatch?.existingLead?.id, 'RBD-SHEET-FRESH-2749');
+    assert.equal(phoneMatch?.existingLead?.assignedAgentName, 'Sakib');
+
+    const fbMatch = parseLeadDuplicateCheckResponse(pullStyleLeadsPayload, {
+      phone: '01899998888',
+      facebookLink: 'https://m.facebook.com/sheet.cust.a/?fbclid=xyz',
+    });
+    assert.equal(fbMatch?.ok, true);
+    assert.equal(fbMatch?.isDuplicate, true);
+    assert.equal(fbMatch?.matchedBy, 'facebook');
+    assert.equal(fbMatch?.existingLead?.id, 'RBD-SHEET-LIVE-1');
+
+    const uniqueLead = parseLeadDuplicateCheckResponse(pullStyleLeadsPayload, {
+      phone: '01855443322',
+      facebookLink: 'https://facebook.com/brand.new.person',
+    });
+    assert.deepEqual(uniqueLead, { ok: true, isDuplicate: false });
+
+    const pullStylePostsPayload = {
+      ok: true,
+      contentPosts: [
+        {
+          id: 'PST-55',
+          facebookLink: 'https://www.facebook.com/runbd/posts/55',
+          websiteLink: 'https://runbd.com/products/kit-55',
+          note: 'Kit 55 Promo',
+          posterName: 'Kawsar',
+          createdAt: '2026-11-20T10:00:00.000Z',
+        },
+      ],
+    };
+
+    const postMatch = parsePostDuplicateCheckResponse(pullStylePostsPayload, {
+      facebookLink: 'https://m.facebook.com/runbd/posts/55?ref=bookmarks',
+      websiteLink: '',
+    });
+    assert.equal(postMatch?.ok, true);
+    assert.equal(postMatch?.isDuplicate, true);
+    assert.equal(postMatch?.matchedField, 'Facebook Link');
+    assert.equal(postMatch?.existingPost?.id, 'PST-55');
+
+    const uniquePost = parsePostDuplicateCheckResponse(pullStylePostsPayload, {
+      facebookLink: 'https://facebook.com/runbd/posts/9999',
+      websiteLink: 'https://runbd.com/products/kit-9999',
+    });
+    assert.deepEqual(uniquePost, { ok: true, isDuplicate: false });
+  });
 });
+
 
 
 

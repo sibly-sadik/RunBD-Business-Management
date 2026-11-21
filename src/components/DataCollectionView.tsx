@@ -64,6 +64,10 @@ export function DataCollectionView({
     matchedBy: 'phone' | 'facebook';
     existingLead: Lead;
   } | null>(null);
+  const [sheetDuplicate, setSheetDuplicate] = useState<{
+    matchedBy: 'phone' | 'facebook';
+    lead: Lead;
+  } | null>(null);
 
   // Bulk CSV state
   const [csvFileName, setCsvFileName] = useState('');
@@ -76,6 +80,7 @@ export function DataCollectionView({
     if (!rawPhone.trim() && !facebookLink.trim()) return null;
     return findDuplicateLead(allLeads, rawPhone, facebookLink);
   }, [allLeads, rawPhone, facebookLink]);
+  const activeDuplicate = liveDuplicate ?? sheetDuplicate;
 
   const todayStr = getLocalDateString();
 
@@ -119,27 +124,27 @@ export function DataCollectionView({
       return;
     }
 
-    if (liveDuplicate) {
+    if (activeDuplicate) {
       onRecordDuplicateAttempt({
         collectorId: currentUser.id,
         collectorName: currentUser.name,
         attemptedName: customerName.trim(),
         attemptedPhone: rawPhone.trim(),
         attemptedFacebook: facebookLink.trim(),
-        matchedBy: liveDuplicate.matchedBy,
-        existingCollectorName: liveDuplicate.lead.collectorName,
-        existingDate: liveDuplicate.lead.createdAt,
+        matchedBy: activeDuplicate.matchedBy,
+        existingCollectorName: activeDuplicate.lead.collectorName,
+        existingDate: activeDuplicate.lead.createdAt,
       });
       setDuplicateModal({
-        matchedBy: liveDuplicate.matchedBy,
-        existingLead: liveDuplicate.lead,
+        matchedBy: activeDuplicate.matchedBy,
+        existingLead: activeDuplicate.lead,
       });
       setFormError(
-        `Duplicate Found: ${liveDuplicate.lead.customerName} · Agent: ${
-          liveDuplicate.lead.assignedAgentName ?? 'Unassigned'
-        } · Status: ${liveDuplicate.lead.status} · Collector: ${
-          liveDuplicate.lead.collectorName
-        } (${formatShortDate(liveDuplicate.lead.createdAt)})`
+        `Duplicate Found: ${activeDuplicate.lead.customerName} · Agent: ${
+          activeDuplicate.lead.assignedAgentName ?? 'Unassigned'
+        } · Status: ${activeDuplicate.lead.status} · Collector: ${
+          activeDuplicate.lead.collectorName
+        } (${formatShortDate(activeDuplicate.lead.createdAt)})`
       );
       return;
     }
@@ -155,6 +160,7 @@ export function DataCollectionView({
 
       if (!res.ok) {
         if (res.duplicate) {
+          setSheetDuplicate(res.duplicate);
           setDuplicateModal({
             matchedBy: res.duplicate.matchedBy,
             existingLead: res.duplicate.lead,
@@ -164,6 +170,7 @@ export function DataCollectionView({
         return;
       }
 
+      setSheetDuplicate(null);
       setCustomerName('');
       setRawPhone('');
       setFacebookLink('');
@@ -326,7 +333,7 @@ export function DataCollectionView({
             </span>
           </div>
 
-          {liveDuplicate && (
+          {activeDuplicate && (
             <div
               role="alert"
               data-testid="duplicate-warning-banner"
@@ -335,13 +342,13 @@ export function DataCollectionView({
               <AlertTriangle className="w-5 h-5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
               <div className="text-sm space-y-1">
                 <p className="font-semibold">
-                  Duplicate Found ({liveDuplicate.matchedBy === 'phone' ? 'Phone Number' : 'Facebook Link'}): Submission Blocked
+                  Duplicate Found ({activeDuplicate.matchedBy === 'phone' ? 'Phone Number' : 'Facebook Link'}): Submission Blocked
                 </p>
                 <p className="text-xs text-amber-800/90 dark:text-amber-200/90">
-                  Customer: <strong>{liveDuplicate.lead.customerName}</strong> · Assigned Agent:{' '}
-                  <strong>{liveDuplicate.lead.assignedAgentName ?? 'Unassigned'}</strong> · Status:{' '}
-                  <strong>{liveDuplicate.lead.status}</strong> · Collector:{' '}
-                  <strong>{liveDuplicate.lead.collectorName}</strong> ({formatShortDate(liveDuplicate.lead.createdAt)})
+                  Customer: <strong>{activeDuplicate.lead.customerName}</strong> · Assigned Agent:{' '}
+                  <strong>{activeDuplicate.lead.assignedAgentName ?? 'Unassigned'}</strong> · Status:{' '}
+                  <strong>{activeDuplicate.lead.status}</strong> · Collector:{' '}
+                  <strong>{activeDuplicate.lead.collectorName}</strong> ({formatShortDate(activeDuplicate.lead.createdAt)})
                 </p>
               </div>
             </div>
@@ -390,7 +397,11 @@ export function DataCollectionView({
                 type="tel"
                 placeholder="+8801712345678 or 01712345678"
                 value={rawPhone}
-                onChange={(e) => setRawPhone(e.target.value)}
+                onChange={(e) => {
+                  setRawPhone(e.target.value);
+                  setSheetDuplicate(null);
+                  setFormError('');
+                }}
                 className="w-full px-3.5 py-2.5 text-sm font-mono rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500"
               />
             </div>
@@ -407,7 +418,11 @@ export function DataCollectionView({
                 type="url"
                 placeholder="https://facebook.com/username"
                 value={facebookLink}
-                onChange={(e) => setFacebookLink(e.target.value)}
+                onChange={(e) => {
+                  setFacebookLink(e.target.value);
+                  setSheetDuplicate(null);
+                  setFormError('');
+                }}
                 className="w-full px-3.5 py-2.5 text-sm rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500"
               />
             </div>
@@ -429,9 +444,10 @@ export function DataCollectionView({
               />
             </div>
 
-            {formError && !liveDuplicate && (
+            {formError && !activeDuplicate && (
               <div
                 role="alert"
+                data-testid="lead-form-error"
                 className="md:col-span-2 rounded-lg bg-rose-50 dark:bg-rose-500/10 border border-rose-200 dark:border-rose-500/30 px-3.5 py-2.5 text-xs text-rose-700 dark:text-rose-300"
               >
                 {formError}
@@ -443,7 +459,7 @@ export function DataCollectionView({
                 type="submit"
                 disabled={submitting}
                 className={`inline-flex items-center gap-2 px-5 py-2.5 rounded-lg text-white text-sm font-semibold transition-colors disabled:opacity-60 cursor-pointer ${
-                  liveDuplicate
+                  activeDuplicate
                     ? 'bg-amber-600 hover:bg-amber-500'
                     : 'bg-emerald-600 hover:bg-emerald-500'
                 }`}
@@ -451,8 +467,8 @@ export function DataCollectionView({
                 <PlusCircle className="w-4 h-4" />
                 <span>
                   {submitting
-                    ? 'Checking & Saving...'
-                    : liveDuplicate
+                    ? 'Checking Google Sheets...'
+                    : activeDuplicate
                     ? 'Submission Blocked (Duplicate)'
                     : 'Submit Lead'}
                 </span>

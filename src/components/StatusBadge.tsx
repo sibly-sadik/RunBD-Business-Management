@@ -1,4 +1,5 @@
 import {
+  CheckCheck,
   CheckCircle2,
   Clock,
   PhoneMissed,
@@ -28,6 +29,12 @@ const STATUS_STYLES: Record<
     text: 'text-slate-700 dark:text-slate-300',
     border: 'border-slate-200 dark:border-slate-700',
     Icon: Clock,
+  },
+  Done: {
+    bg: 'bg-teal-50 dark:bg-teal-500/15',
+    text: 'text-teal-700 dark:text-teal-300',
+    border: 'border-teal-200 dark:border-teal-500/30',
+    Icon: CheckCheck,
   },
   Interested: {
     bg: 'bg-sky-50 dark:bg-sky-500/15',

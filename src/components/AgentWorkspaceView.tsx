@@ -16,12 +16,12 @@ import {
   buildTelUrl,
   buildWhatsAppUrl,
   DueRenewalItem,
-  filterTodayCallLogs,
   filterTodayLeads,
   formatBdPhoneDisplay,
   formatDateTime,
   formatShortDate,
   formatTime,
+  getAgentTodayCallLogs,
   getLocalDateString,
   getScheduledFollowUps,
   isFollowUpDueToday,
@@ -37,6 +37,7 @@ interface AgentWorkspaceViewProps {
   dueRenewals: DueRenewalItem[];
   onMarkPaidCustomerRenewed: (customerId: string) => void;
   onOpenPaidCustomers: () => void;
+  onOpenTodayCalls?: () => void;
   onUpdateCallScript: (script: string) => void;
   onLogCall: (input: {
     leadId: string;
@@ -54,10 +55,10 @@ export function AgentWorkspaceView({
   dueRenewals,
   onMarkPaidCustomerRenewed,
   onOpenPaidCustomers,
+  onOpenTodayCalls,
   onUpdateCallScript,
   onLogCall,
 }: AgentWorkspaceViewProps) {
-  const [activeSection, setActiveSection] = useState<'queue' | 'history'>('queue');
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<CallStatus | 'ALL'>('ALL');
   const [scriptOpen, setScriptOpen] = useState(false);
@@ -82,10 +83,7 @@ export function AgentWorkspaceView({
   );
 
   const myCallHistory = useMemo(
-    () =>
-      filterTodayCallLogs(callLogs)
-        .filter((c) => c.agentId === agent.id)
-        .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()),
+    () => getAgentTodayCallLogs(callLogs, agent.id),
     [callLogs, agent.id]
   );
 
@@ -163,6 +161,7 @@ export function AgentWorkspaceView({
 
     let followUpIso: string | null = null;
     if (
+      modalStatus !== 'Done' &&
       (highlightFollowUp || modalStatus === 'Switched Off / No Answer') &&
       modalFollowUpDate
     ) {
@@ -196,49 +195,30 @@ export function AgentWorkspaceView({
         onViewAllPaidCustomers={onOpenPaidCustomers}
       />
 
-      {/* Dedicated Agent Workspace Header & Section Tabs */}
+      {/* Dedicated Agent Workspace Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
           <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-slate-900 dark:text-white">
-            {agent.name}&apos;s Dedicated Workspace
+            My Call Queue &middot; {agent.name}
           </h1>
           <p className="text-sm text-slate-500 dark:text-slate-400 mt-0.5">
             Today ({todayStr}) &middot; Assigned leads, calls, and callbacks reset daily.
           </p>
         </div>
 
-        <div
-          role="tablist"
-          aria-label="Agent workspace sections"
-          className="inline-flex p-1 rounded-lg bg-slate-200/70 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 self-start"
-        >
+        {onOpenTodayCalls && (
           <button
             type="button"
-            role="tab"
-            aria-selected={activeSection === 'queue'}
-            onClick={() => setActiveSection('queue')}
-            className={`px-3.5 py-1.5 rounded-md text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer ${
-              activeSection === 'queue'
-                ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-xs'
-                : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
-            }`}
+            onClick={onOpenTodayCalls}
+            className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors self-start sm:self-auto cursor-pointer whitespace-nowrap"
           >
-            {agent.name}&apos;s Queue ({myLeads.length})
+            <PhoneCall className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+            <span>Today calls</span>
+            <span className="font-mono text-[11px] font-bold tabular-nums px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-700 dark:text-emerald-300">
+              {myCallsToday}
+            </span>
           </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeSection === 'history'}
-            onClick={() => setActiveSection('history')}
-            className={`px-3.5 py-1.5 rounded-md text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer ${
-              activeSection === 'history'
-                ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-xs'
-                : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
-            }`}
-          >
-            Today&apos;s Call Logs ({myCallHistory.length})
-          </button>
-        </div>
+        )}
       </div>
 
       {/* Personal Today-Only KPI Strip */}
@@ -288,8 +268,6 @@ export function AgentWorkspaceView({
         </div>
       </div>
 
-      {activeSection === 'queue' ? (
-        <>
       {/* Scheduled Follow-ups Queue */}
       <section
         data-testid="scheduled-followups-panel"
@@ -658,72 +636,6 @@ export function AgentWorkspaceView({
           </>
         )}
       </section>
-        </>
-      ) : (
-        <section className="glass-panel rounded-2xl overflow-hidden">
-          <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800">
-            <h2 className="text-base font-semibold text-slate-900 dark:text-white">
-              {agent.name}&apos;s Call Log History
-            </h2>
-            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5 tabular-nums">
-              {myCallHistory.length} call{myCallHistory.length === 1 ? '' : 's'} logged
-            </p>
-          </div>
-          {myCallHistory.length === 0 ? (
-            <div className="p-10 text-center text-sm text-slate-500 dark:text-slate-400">
-              No calls logged yet. Use &ldquo;Log Call&rdquo; on any assigned lead to record an
-              outcome.
-            </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse text-sm">
-                <thead>
-                  <tr className="bg-slate-50 dark:bg-slate-900/60 text-xs text-slate-500 dark:text-slate-400 border-b border-slate-200 dark:border-slate-800">
-                    <th className="py-3 px-4 font-semibold">Timestamp</th>
-                    <th className="py-3 px-4 font-semibold">Customer</th>
-                    <th className="py-3 px-4 font-semibold">Status Transition</th>
-                    <th className="py-3 px-4 font-semibold">Notes</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-200 dark:divide-slate-800">
-                  {myCallHistory.map((log) => (
-                    <tr
-                      key={log.id}
-                      className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40 transition-colors"
-                    >
-                      <td className="py-3 px-4 font-mono text-xs tabular-nums text-slate-500 dark:text-slate-400 whitespace-nowrap">
-                        {formatDateTime(log.timestamp)}
-                      </td>
-                      <td className="py-3 px-4">
-                        <div className="font-medium text-slate-900 dark:text-slate-100">
-                          {log.customerName}
-                        </div>
-                        <div className="text-xs font-mono text-slate-500 dark:text-slate-400">
-                          {formatBdPhoneDisplay(log.phone)}
-                        </div>
-                      </td>
-                      <td className="py-3 px-4">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-xs text-slate-500 dark:text-slate-400">
-                            {log.previousStatus}
-                          </span>
-                          <span className="text-xs text-slate-400" aria-hidden="true">
-                            →
-                          </span>
-                          <StatusBadge status={log.newStatus} compact />
-                        </div>
-                      </td>
-                      <td className="py-3 px-4 text-xs text-slate-600 dark:text-slate-300">
-                        {log.notes || '—'}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </section>
-      )}
 
       {/* Call Logging & Status Update Modal */}
       {activeLead && (
@@ -779,56 +691,72 @@ export function AgentWorkspaceView({
               </div>
 
               {/* Follow-up Scheduler */}
-              <div
-                className={`rounded-xl p-4 border transition-colors ${
-                  highlightFollowUp
-                    ? 'bg-amber-50/80 dark:bg-amber-500/10 border-amber-300 dark:border-amber-500/40'
-                    : 'bg-slate-50 dark:bg-slate-950/60 border-slate-200 dark:border-slate-800'
-                }`}
-              >
-                <div className="flex items-center justify-between mb-2.5">
-                  <span className="text-xs font-semibold text-slate-800 dark:text-slate-200">
-                    Follow-up Scheduler
-                  </span>
-                  {highlightFollowUp && (
-                    <span className="text-[11px] font-semibold text-amber-700 dark:text-amber-300">
-                      Recommended for {modalStatus}
+              {modalStatus === 'Done' ? (
+                <div
+                  data-testid="no-followup-notice"
+                  className="rounded-xl p-4 border bg-teal-50/80 dark:bg-teal-500/10 border-teal-200 dark:border-teal-500/30"
+                >
+                  <p className="text-xs font-semibold text-teal-800 dark:text-teal-300">
+                    No Follow-up Scheduled
+                  </p>
+                  <p className="text-[11px] text-teal-700/90 dark:text-teal-300/80 mt-0.5">
+                    Calls marked <span className="font-semibold">Done</span> are recorded directly
+                    in <span className="font-semibold">Today calls</span> without adding a
+                    follow-up schedule.
+                  </p>
+                </div>
+              ) : (
+                <div
+                  className={`rounded-xl p-4 border transition-colors ${
+                    highlightFollowUp
+                      ? 'bg-amber-50/80 dark:bg-amber-500/10 border-amber-300 dark:border-amber-500/40'
+                      : 'bg-slate-50 dark:bg-slate-950/60 border-slate-200 dark:border-slate-800'
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-2.5">
+                    <span className="text-xs font-semibold text-slate-800 dark:text-slate-200">
+                      Follow-up Scheduler
                     </span>
-                  )}
-                </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label
-                      htmlFor="followup-date"
-                      className="block text-[11px] text-slate-500 dark:text-slate-400 mb-1"
-                    >
-                      Date
-                    </label>
-                    <input
-                      id="followup-date"
-                      type="date"
-                      value={modalFollowUpDate}
-                      onChange={(e) => setModalFollowUpDate(e.target.value)}
-                      className="w-full px-3 py-2 text-xs font-mono rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-slate-900 dark:text-slate-100"
-                    />
+                    {highlightFollowUp && (
+                      <span className="text-[11px] font-semibold text-amber-700 dark:text-amber-300">
+                        Recommended for {modalStatus}
+                      </span>
+                    )}
                   </div>
-                  <div>
-                    <label
-                      htmlFor="followup-time"
-                      className="block text-[11px] text-slate-500 dark:text-slate-400 mb-1"
-                    >
-                      Time
-                    </label>
-                    <input
-                      id="followup-time"
-                      type="time"
-                      value={modalFollowUpTime}
-                      onChange={(e) => setModalFollowUpTime(e.target.value)}
-                      className="w-full px-3 py-2 text-xs font-mono rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-slate-900 dark:text-slate-100"
-                    />
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label
+                        htmlFor="followup-date"
+                        className="block text-[11px] text-slate-500 dark:text-slate-400 mb-1"
+                      >
+                        Date
+                      </label>
+                      <input
+                        id="followup-date"
+                        type="date"
+                        value={modalFollowUpDate}
+                        onChange={(e) => setModalFollowUpDate(e.target.value)}
+                        className="w-full px-3 py-2 text-xs font-mono rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-slate-900 dark:text-slate-100"
+                      />
+                    </div>
+                    <div>
+                      <label
+                        htmlFor="followup-time"
+                        className="block text-[11px] text-slate-500 dark:text-slate-400 mb-1"
+                      >
+                        Time
+                      </label>
+                      <input
+                        id="followup-time"
+                        type="time"
+                        value={modalFollowUpTime}
+                        onChange={(e) => setModalFollowUpTime(e.target.value)}
+                        className="w-full px-3 py-2 text-xs font-mono rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-slate-900 dark:text-slate-100"
+                      />
+                    </div>
                   </div>
                 </div>
-              </div>
+              )}
 
               <div>
                 <label

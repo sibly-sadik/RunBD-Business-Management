@@ -3,6 +3,7 @@ import {
   CallLog,
   CallStatus,
   ContentPost,
+  DuplicateAttempt,
   Lead,
   PaidCustomer,
   RenewalStatus,
@@ -202,30 +203,7 @@ export function filterPullPayloadByDate(
   };
 }
 
-/**
- * Parses an on-demand `?action=check_lead_duplicate` JSON response from Google Apps Script.
- */
-export function parseLeadDuplicateCheckResponse(
-  raw: unknown
-): LeadDuplicateCheckResult | null {
-  if (!raw || typeof raw !== 'object') return null;
-  const obj = raw as Record<string, unknown>;
-  if (typeof obj.isDuplicate !== 'boolean') return null;
-
-  if (!obj.isDuplicate) {
-    return { ok: true, isDuplicate: false };
-  }
-
-  const rawLead =
-    obj.lead && typeof obj.lead === 'object'
-      ? (obj.lead as Record<string, unknown>)
-      : obj.existingLead && typeof obj.existingLead === 'object'
-      ? (obj.existingLead as Record<string, unknown>)
-      : obj;
-
-  const matchedRaw = String(obj.matchedBy ?? rawLead.matchedBy ?? 'phone').toLowerCase();
-  const matchedBy: 'phone' | 'facebook' = matchedRaw.includes('face') ? 'facebook' : 'phone';
-
+function buildExistingLeadSummary(rawLead: Record<string, unknown>): NonNullable<LeadDuplicateCheckResult['existingLead']> {
   const agentRaw = String(
     rawLead.assignedAgentName ?? rawLead.assignedAgent ?? ''
   ).trim();
@@ -240,74 +218,233 @@ export function parseLeadDuplicateCheckResponse(
   );
 
   return {
-    ok: true,
-    isDuplicate: true,
-    matchedBy,
-    existingLead: {
-      id: typeof rawLead.id === 'string' && rawLead.id.trim() ? rawLead.id.trim() : 'SHEET-DUP',
-      customerName:
-        typeof rawLead.customerName === 'string' && rawLead.customerName.trim()
-          ? rawLead.customerName.trim()
-          : 'Existing Sheet Lead',
-      phone,
-      facebookLink: typeof rawLead.facebookLink === 'string' ? rawLead.facebookLink.trim() : '',
-      collectorName:
-        typeof rawLead.collectorName === 'string' && rawLead.collectorName.trim()
-          ? rawLead.collectorName.trim()
-          : typeof rawLead.collector === 'string' && rawLead.collector.trim()
-          ? rawLead.collector.trim()
-          : 'Unknown Collector',
-      assignedAgentName,
-      status: normalizeStatus(rawLead.status),
-      createdAt,
-    },
+    id: typeof rawLead.id === 'string' && rawLead.id.trim() ? rawLead.id.trim() : 'SHEET-DUP',
+    customerName:
+      typeof rawLead.customerName === 'string' && rawLead.customerName.trim()
+        ? rawLead.customerName.trim()
+        : 'Existing Sheet Lead',
+    phone,
+    facebookLink: typeof rawLead.facebookLink === 'string' ? rawLead.facebookLink.trim() : '',
+    collectorName:
+      typeof rawLead.collectorName === 'string' && rawLead.collectorName.trim()
+        ? rawLead.collectorName.trim()
+        : typeof rawLead.collector === 'string' && rawLead.collector.trim()
+        ? rawLead.collector.trim()
+        : 'Unknown Collector',
+    assignedAgentName,
+    status: normalizeStatus(rawLead.status),
+    createdAt,
+  };
+}
+
+function buildExistingPostSummary(rawPost: Record<string, unknown>): NonNullable<PostDuplicateCheckResult['existingPost']> {
+  return {
+    id: typeof rawPost.id === 'string' && rawPost.id.trim() ? rawPost.id.trim() : 'SHEET-PST-DUP',
+    note: typeof rawPost.note === 'string' ? rawPost.note.trim() : '',
+    facebookLink: typeof rawPost.facebookLink === 'string' ? rawPost.facebookLink.trim() : '',
+    websiteLink: typeof rawPost.websiteLink === 'string' ? rawPost.websiteLink.trim() : '',
+    posterName:
+      typeof rawPost.posterName === 'string' && rawPost.posterName.trim()
+        ? rawPost.posterName.trim()
+        : 'Kawsar',
+    createdAt: toValidTimestamp(rawPost.createdAt, HISTORICAL_FALLBACK_ISO),
   };
 }
 
 /**
+ * Parses an on-demand `?action=check_lead_duplicate` JSON response from Google Apps Script.
+ * Supports both dedicated `{ ok, isDuplicate, lead }` responses and pull-style `{ ok: true, leads: [...] }`
+ * responses from older Apps Script `doGet` deployments (checking ephemerally without storing rows).
+ */
+export function parseLeadDuplicateCheckResponse(
+  raw: unknown,
+  query?: { phone?: string; facebookLink?: string }
+): LeadDuplicateCheckResult | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const obj = raw as Record<string, unknown>;
+  if (obj.ok === false) {
+    return {
+      ok: false,
+      isDuplicate: false,
+      error:
+        typeof obj.error === 'string' && obj.error.trim()
+          ? obj.error.trim()
+          : 'Google Sheets Apps Script returned ok: false',
+    };
+  }
+
+  if (typeof obj.isDuplicate === 'boolean') {
+    if (!obj.isDuplicate) {
+      return { ok: true, isDuplicate: false };
+    }
+
+    const rawLead =
+      obj.lead && typeof obj.lead === 'object'
+        ? (obj.lead as Record<string, unknown>)
+        : obj.existingLead && typeof obj.existingLead === 'object'
+        ? (obj.existingLead as Record<string, unknown>)
+        : obj;
+
+    const matchedRaw = String(obj.matchedBy ?? rawLead.matchedBy ?? 'phone').toLowerCase();
+    const matchedBy: 'phone' | 'facebook' = matchedRaw.includes('face') ? 'facebook' : 'phone';
+
+    return {
+      ok: true,
+      isDuplicate: true,
+      matchedBy,
+      existingLead: buildExistingLeadSummary(rawLead),
+    };
+  }
+
+  // Fallback: Apps Script deployment returned a pull payload `{ ok: true, leads: [...] }`
+  const nestedData =
+    obj.data && typeof obj.data === 'object' ? (obj.data as Record<string, unknown>) : null;
+  const candidateLeads = Array.isArray(obj.leads)
+    ? obj.leads
+    : nestedData && Array.isArray(nestedData.leads)
+    ? nestedData.leads
+    : null;
+
+  if (!candidateLeads) return null;
+
+  const targetCorePhone = extractPhoneCoreKey(query?.phone ?? '');
+  const targetNormFb = normalizeFacebookUrl(query?.facebookLink ?? '');
+
+  for (const item of candidateLeads) {
+    if (!item || typeof item !== 'object') continue;
+    const row = item as Record<string, unknown>;
+    const rowCorePhone = extractPhoneCoreKey(safePhoneString(row.phone ?? row.rawPhone));
+    if (targetCorePhone && rowCorePhone && rowCorePhone === targetCorePhone) {
+      return {
+        ok: true,
+        isDuplicate: true,
+        matchedBy: 'phone',
+        existingLead: buildExistingLeadSummary(row),
+      };
+    }
+
+    const rowFbRaw =
+      typeof row.facebookLink === 'string'
+        ? row.facebookLink
+        : typeof row.normalizedFacebookLink === 'string'
+        ? row.normalizedFacebookLink
+        : '';
+    const rowNormFb = normalizeFacebookUrl(rowFbRaw);
+    if (targetNormFb && rowNormFb && rowNormFb === targetNormFb) {
+      return {
+        ok: true,
+        isDuplicate: true,
+        matchedBy: 'facebook',
+        existingLead: buildExistingLeadSummary(row),
+      };
+    }
+  }
+
+  return { ok: true, isDuplicate: false };
+}
+
+/**
  * Parses an on-demand `?action=check_post_duplicate` JSON response from Google Apps Script.
+ * Supports both dedicated `{ ok, isDuplicate, post }` responses and pull-style `{ ok: true, contentPosts: [...] }`
+ * responses from older Apps Script `doGet` deployments.
  */
 export function parsePostDuplicateCheckResponse(
-  raw: unknown
+  raw: unknown,
+  query?: { facebookLink?: string; websiteLink?: string }
 ): PostDuplicateCheckResult | null {
   if (!raw || typeof raw !== 'object') return null;
   const obj = raw as Record<string, unknown>;
-  if (typeof obj.isDuplicate !== 'boolean') return null;
-
-  if (!obj.isDuplicate) {
-    return { ok: true, isDuplicate: false };
+  if (obj.ok === false) {
+    return {
+      ok: false,
+      isDuplicate: false,
+      error:
+        typeof obj.error === 'string' && obj.error.trim()
+          ? obj.error.trim()
+          : 'Google Sheets Apps Script returned ok: false',
+    };
   }
 
-  const rawPost =
-    obj.post && typeof obj.post === 'object'
-      ? (obj.post as Record<string, unknown>)
-      : obj.existingPost && typeof obj.existingPost === 'object'
-      ? (obj.existingPost as Record<string, unknown>)
-      : obj;
+  if (typeof obj.isDuplicate === 'boolean') {
+    if (!obj.isDuplicate) {
+      return { ok: true, isDuplicate: false };
+    }
 
-  const matchedRaw = String(
-    obj.matchedField ?? rawPost.matchedField ?? 'Facebook Link'
-  ).toLowerCase();
-  const matchedField: 'Facebook Link' | 'Website Link' = matchedRaw.includes('web')
-    ? 'Website Link'
-    : 'Facebook Link';
+    const rawPost =
+      obj.post && typeof obj.post === 'object'
+        ? (obj.post as Record<string, unknown>)
+        : obj.existingPost && typeof obj.existingPost === 'object'
+        ? (obj.existingPost as Record<string, unknown>)
+        : obj;
 
-  return {
-    ok: true,
-    isDuplicate: true,
-    matchedField,
-    existingPost: {
-      id: typeof rawPost.id === 'string' && rawPost.id.trim() ? rawPost.id.trim() : 'SHEET-PST-DUP',
-      note: typeof rawPost.note === 'string' ? rawPost.note.trim() : '',
-      facebookLink: typeof rawPost.facebookLink === 'string' ? rawPost.facebookLink.trim() : '',
-      websiteLink: typeof rawPost.websiteLink === 'string' ? rawPost.websiteLink.trim() : '',
-      posterName:
-        typeof rawPost.posterName === 'string' && rawPost.posterName.trim()
-          ? rawPost.posterName.trim()
-          : 'Kawsar',
-      createdAt: toValidTimestamp(rawPost.createdAt, HISTORICAL_FALLBACK_ISO),
-    },
-  };
+    const matchedRaw = String(
+      obj.matchedField ?? rawPost.matchedField ?? 'Facebook Link'
+    ).toLowerCase();
+    const matchedField: 'Facebook Link' | 'Website Link' = matchedRaw.includes('web')
+      ? 'Website Link'
+      : 'Facebook Link';
+
+    return {
+      ok: true,
+      isDuplicate: true,
+      matchedField,
+      existingPost: buildExistingPostSummary(rawPost),
+    };
+  }
+
+  // Fallback: Apps Script deployment returned a pull payload `{ ok: true, contentPosts: [...] }`
+  const nestedData =
+    obj.data && typeof obj.data === 'object' ? (obj.data as Record<string, unknown>) : null;
+  const candidatePosts = Array.isArray(obj.contentPosts)
+    ? obj.contentPosts
+    : Array.isArray(obj.posts)
+    ? obj.posts
+    : nestedData && Array.isArray(nestedData.contentPosts)
+    ? nestedData.contentPosts
+    : null;
+
+  if (!candidatePosts) return null;
+
+  const targetFb = normalizePostUrl(query?.facebookLink ?? '');
+  const targetWeb = normalizePostUrl(query?.websiteLink ?? '');
+
+  for (const item of candidatePosts) {
+    if (!item || typeof item !== 'object') continue;
+    const row = item as Record<string, unknown>;
+    const rowFb = normalizePostUrl(
+      typeof row.facebookLink === 'string'
+        ? row.facebookLink
+        : typeof row.normalizedFacebookLink === 'string'
+        ? row.normalizedFacebookLink
+        : ''
+    );
+    const rowWeb = normalizePostUrl(
+      typeof row.websiteLink === 'string'
+        ? row.websiteLink
+        : typeof row.normalizedWebsiteLink === 'string'
+        ? row.normalizedWebsiteLink
+        : ''
+    );
+
+    if (targetFb && (targetFb === rowFb || targetFb === rowWeb)) {
+      return {
+        ok: true,
+        isDuplicate: true,
+        matchedField: 'Facebook Link',
+        existingPost: buildExistingPostSummary(row),
+      };
+    }
+    if (targetWeb && (targetWeb === rowWeb || targetWeb === rowFb)) {
+      return {
+        ok: true,
+        isDuplicate: true,
+        matchedField: 'Website Link',
+        existingPost: buildExistingPostSummary(row),
+      };
+    }
+  }
+
+  return { ok: true, isDuplicate: false };
 }
 
 function toValidTimestamp(value: unknown, fallback: string): string {
@@ -328,6 +465,9 @@ function toValidTimestamp(value: unknown, fallback: string): string {
 }
 
 function safePhoneString(value: unknown): string {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return String(Math.trunc(value));
+  }
   if (typeof value !== 'string') return '';
   return value.replace(/^'+/, '').trim();
 }
@@ -908,3 +1048,27 @@ export function detectPostDuplicatesInList(
 
   return flags;
 }
+
+/**
+ * Merges remote DuplicateAttempt records with local blocked attempts by ID
+ * so real-time Firestore snapshots never wipe locally recorded duplicate alerts.
+ */
+export function mergeRemoteDuplicateAttempts(
+  localAttempts: DuplicateAttempt[],
+  remoteAttempts: DuplicateAttempt[]
+): DuplicateAttempt[] {
+  if (!remoteAttempts.length) return localAttempts;
+  const byId = new Map<string, DuplicateAttempt>();
+  for (const item of localAttempts) {
+    byId.set(item.id, item);
+  }
+  for (const item of remoteAttempts) {
+    if (item && item.id) {
+      byId.set(item.id, item);
+    }
+  }
+  return Array.from(byId.values()).sort(
+    (a, b) => (Date.parse(b.timestamp) || 0) - (Date.parse(a.timestamp) || 0)
+  );
+}
+

@@ -182,10 +182,37 @@ var PAID_CUSTOMER_HEADERS = [
   'Confirmed Date', 'Renewal Date', 'Days Remaining', 'Renewal Status', 'Updated At'
 ];
 
-function extractPhoneCore_(raw) {
+function normalizeBdPhone_(raw) {
   var digits = String(raw || '').replace(/^'+/, '').replace(/\\D/g, '');
   if (!digits) return '';
-  return digits.replace(/^(00880|880|88)/, '').replace(/^0+/, '');
+  var normalized = digits;
+  if (digits.indexOf('0088001') === 0 && digits.length === 16) {
+    normalized = digits.slice(5);
+  } else if (digits.indexOf('00880') === 0 && digits.length === 15) {
+    normalized = digits.slice(4);
+  } else if (digits.indexOf('0088') === 0 && digits.length === 14) {
+    normalized = '0' + digits.slice(4);
+  } else if (digits.indexOf('88001') === 0 && digits.length === 14) {
+    normalized = digits.slice(3);
+  } else if (digits.indexOf('880') === 0 && digits.length === 13) {
+    normalized = digits.slice(2);
+  } else if (digits.indexOf('88') === 0 && digits.length === 12) {
+    normalized = '0' + digits.slice(2);
+  } else if (digits.indexOf('1') === 0 && digits.length === 10) {
+    normalized = '0' + digits;
+  }
+  if (/^01[3-9]\\d{8}$/.test(normalized)) {
+    return normalized;
+  }
+  return '';
+}
+
+function extractPhoneCore_(raw) {
+  var canonical = normalizeBdPhone_(raw);
+  if (canonical) return canonical.slice(1);
+  var digits = String(raw || '').replace(/^'+/, '').replace(/\\D/g, '');
+  if (!digits) return '';
+  return digits.replace(/^(00880|0088|880|88)/, '').replace(/^0+/, '');
 }
 
 function normalizeFb_(raw) {
@@ -197,6 +224,15 @@ function normalizeFb_(raw) {
   if (cleaned.indexOf('profile.php') !== -1) {
     var m = cleaned.match(/id=(\\d+)/);
     if (m) return 'facebook.com/profile.php?id=' + m[1];
+  }
+  if (cleaned.indexOf('permalink.php') !== -1 || cleaned.indexOf('story.php') !== -1) {
+    var storyMatch = cleaned.match(/story_fbid=([^&#]+)/);
+    var pageMatch = cleaned.match(/(?:^|[?&])id=([^&#]+)/);
+    var pathPart = cleaned.split('?')[0].split('#')[0].replace(/\\/+$/, '');
+    var qParts = [];
+    if (storyMatch && storyMatch[1]) qParts.push('story_fbid=' + storyMatch[1]);
+    if (pageMatch && pageMatch[1]) qParts.push('id=' + pageMatch[1]);
+    if (qParts.length > 0) return pathPart + '?' + qParts.join('&');
   }
   return cleaned.split('?')[0].split('#')[0].replace(/\\/+$/, '');
 }
@@ -244,15 +280,17 @@ function doGet(e) {
 
     // 1. Lightweight on-demand Lead Duplicate Check
     if (action === 'check_lead_duplicate') {
-      var targetPhone = extractPhoneCore_(params.phone || '');
+      var targetCanonicalPhone = normalizeBdPhone_(params.phone || '');
+      var targetPhone = targetCanonicalPhone ? targetCanonicalPhone.slice(1) : extractPhoneCore_(params.phone || '');
       var targetFb = normalizeFb_(params.facebookLink || '');
 
       if (masterSheet && masterSheet.getLastRow() > 1 && (targetPhone || targetFb)) {
-        var colCount = Math.max(10, masterSheet.getLastColumn());
+        var colCount = Math.max(11, masterSheet.getLastColumn());
         var rows = masterSheet.getRange(2, 1, masterSheet.getLastRow() - 1, colCount).getValues();
         for (var i = 0; i < rows.length; i++) {
           var r = rows[i];
           var rowPhoneRaw = String(r[2] || '').replace(/^'+/, '').trim();
+          var rowNormalizedPhone = normalizeBdPhone_(rowPhoneRaw) || rowPhoneRaw;
           var rowFbRaw = String(r[3] || '').trim();
           var phoneMatch = targetPhone && extractPhoneCore_(rowPhoneRaw) === targetPhone;
           var fbMatch = targetFb && normalizeFb_(rowFbRaw) === targetFb;
@@ -265,13 +303,13 @@ function doGet(e) {
               lead: {
                 id: r[0] ? String(r[0]).trim() : ('SHEET-ROW-' + (i + 2)),
                 customerName: String(r[1] || 'Existing Customer').trim(),
-                phone: rowPhoneRaw,
+                phone: rowNormalizedPhone,
                 facebookLink: rowFbRaw,
                 collectorName: String(r[4] || 'Unknown').trim(),
                 assignedAgentName: String(r[5] || '') === 'Unassigned' ? null : String(r[5] || '').trim(),
                 status: String(r[6] || 'Pending').trim(),
-                updatedAt: r[9] ? new Date(r[9]).toISOString() : new Date().toISOString(),
-                createdAt: r[10] ? new Date(r[10]).toISOString() : (r[9] ? new Date(r[9]).toISOString() : new Date().toISOString())
+                updatedAt: r[9] ? new Date(r[9]).toISOString() : '',
+                createdAt: r[10] ? new Date(r[10]).toISOString() : ''
               }
             });
           }

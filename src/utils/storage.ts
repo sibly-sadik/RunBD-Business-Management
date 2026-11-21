@@ -7,7 +7,7 @@ import {
   Lead,
   PaidCustomer,
 } from '../types';
-import { FinalDailySummary, getLocalDateString } from './leadLogic';
+import { FinalDailySummary, getLocalDateString, normalizeBdPhone } from './leadLogic';
 import {
   filterPullPayloadByDate,
   getDefaultWebhookUrl,
@@ -297,7 +297,7 @@ export async function pullFromGoogleSheetsWebhook(
   }
 
   const controller = new AbortController();
-  const timeoutMs = options?.timeoutMs ?? 8000;
+  const timeoutMs = options?.timeoutMs ?? 15000;
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
@@ -334,6 +334,29 @@ export async function pullFromGoogleSheetsWebhook(
   }
 }
 
+function describeWebhookFetchError(err: unknown, timeoutMs: number): string {
+  if (err instanceof Error) {
+    if (err.name === 'AbortError') {
+      return `Google Sheets webhook timed out after ${Math.round(timeoutMs / 1000)}s.`;
+    }
+    if (err instanceof TypeError) {
+      return 'Network or CORS error reaching Google Sheets webhook. Verify internet connection and Apps Script Web App "Anyone" access.';
+    }
+    return err.message;
+  }
+  return 'Unable to reach Google Sheets webhook';
+}
+
+function isHtmlAuthOrErrorPage(text: string): boolean {
+  const lower = text.trim().slice(0, 500).toLowerCase();
+  return (
+    lower.startsWith('<!doctype') ||
+    lower.startsWith('<html') ||
+    lower.includes('accounts.google.com') ||
+    lower.includes('google apps script')
+  );
+}
+
 /**
  * Performs an on-demand lightweight duplicate check against Google Sheets `Master_Data`
  * (`GET ?action=check_lead_duplicate&phone=...&facebookLink=...`) without pulling all rows.
@@ -349,19 +372,25 @@ export async function checkLeadDuplicateInSheets(
     return { ok: false, isDuplicate: false, error: 'No webhook URL configured' };
   }
 
+  const canonicalPhone = normalizeBdPhone(phone) ?? phone.trim();
+  const trimmedFb = facebookLink.trim();
+  if (!canonicalPhone && !trimmedFb) {
+    return { ok: true, isDuplicate: false };
+  }
+
   let targetUrl: string;
   try {
     const parsed = new URL(trimmed);
     parsed.searchParams.set('action', 'check_lead_duplicate');
-    parsed.searchParams.set('phone', phone.trim());
-    parsed.searchParams.set('facebookLink', facebookLink.trim());
+    parsed.searchParams.set('phone', canonicalPhone);
+    parsed.searchParams.set('facebookLink', trimmedFb);
     targetUrl = parsed.toString();
   } catch {
     return { ok: false, isDuplicate: false, error: 'Invalid webhook URL format' };
   }
 
   const controller = new AbortController();
-  const timeoutMs = options?.timeoutMs ?? 4000;
+  const timeoutMs = options?.timeoutMs ?? 15000;
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
@@ -371,25 +400,41 @@ export async function checkLeadDuplicateInSheets(
       signal: controller.signal,
     });
     if (!res.ok) {
-      return { ok: false, isDuplicate: false, error: `HTTP ${res.status}` };
+      const error = `Google Sheets webhook returned HTTP ${res.status}. Verify Web App deployment ("Execute as: Me", "Who has access: Anyone").`;
+      console.error('[RunBD Sheets Lead Check Error]', error);
+      return { ok: false, isDuplicate: false, error };
     }
     const text = await res.text();
     let json: unknown;
     try {
       json = JSON.parse(text);
     } catch {
-      return { ok: false, isDuplicate: false, error: 'Response is not JSON' };
+      const error = isHtmlAuthOrErrorPage(text)
+        ? 'Google Sheets webhook returned HTML instead of JSON (Apps Script permission/login screen). Ensure deployment is set to "Execute as: Me" and "Who has access: Anyone".'
+        : 'Google Sheets webhook returned an invalid non-JSON response.';
+      console.error('[RunBD Sheets Lead Check Parse Error]', error, text.slice(0, 200));
+      return { ok: false, isDuplicate: false, error };
     }
-    const parsedResult = parseLeadDuplicateCheckResponse(json);
+    const parsedResult = parseLeadDuplicateCheckResponse(json, {
+      phone: canonicalPhone,
+      facebookLink: trimmedFb,
+    });
     if (!parsedResult) {
-      return { ok: false, isDuplicate: false, error: 'Unsupported check response' };
+      const error = 'Unsupported duplicate check response format from Google Apps Script.';
+      console.error('[RunBD Sheets Lead Check Format Error]', json);
+      return { ok: false, isDuplicate: false, error };
+    }
+    if (!parsedResult.ok) {
+      console.error('[RunBD Sheets Lead Check Script Error]', parsedResult.error);
     }
     return parsedResult;
   } catch (err) {
+    const error = describeWebhookFetchError(err, timeoutMs);
+    console.error('[RunBD Sheets Lead Check Network Error]', error, err);
     return {
       ok: false,
       isDuplicate: false,
-      error: err instanceof Error ? err.message : 'Unable to query sheet duplicate check',
+      error,
     };
   } finally {
     clearTimeout(timer);
@@ -411,19 +456,25 @@ export async function checkPostDuplicateInSheets(
     return { ok: false, isDuplicate: false, error: 'No webhook URL configured' };
   }
 
+  const trimmedFb = facebookLink.trim();
+  const trimmedWeb = websiteLink.trim();
+  if (!trimmedFb && !trimmedWeb) {
+    return { ok: true, isDuplicate: false };
+  }
+
   let targetUrl: string;
   try {
     const parsed = new URL(trimmed);
     parsed.searchParams.set('action', 'check_post_duplicate');
-    parsed.searchParams.set('facebookLink', facebookLink.trim());
-    parsed.searchParams.set('websiteLink', websiteLink.trim());
+    parsed.searchParams.set('facebookLink', trimmedFb);
+    parsed.searchParams.set('websiteLink', trimmedWeb);
     targetUrl = parsed.toString();
   } catch {
     return { ok: false, isDuplicate: false, error: 'Invalid webhook URL format' };
   }
 
   const controller = new AbortController();
-  const timeoutMs = options?.timeoutMs ?? 4000;
+  const timeoutMs = options?.timeoutMs ?? 15000;
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
@@ -433,25 +484,41 @@ export async function checkPostDuplicateInSheets(
       signal: controller.signal,
     });
     if (!res.ok) {
-      return { ok: false, isDuplicate: false, error: `HTTP ${res.status}` };
+      const error = `Google Sheets webhook returned HTTP ${res.status}. Verify Web App deployment ("Execute as: Me", "Who has access: Anyone").`;
+      console.error('[RunBD Sheets Post Check Error]', error);
+      return { ok: false, isDuplicate: false, error };
     }
     const text = await res.text();
     let json: unknown;
     try {
       json = JSON.parse(text);
     } catch {
-      return { ok: false, isDuplicate: false, error: 'Response is not JSON' };
+      const error = isHtmlAuthOrErrorPage(text)
+        ? 'Google Sheets webhook returned HTML instead of JSON (Apps Script permission/login screen). Ensure deployment is set to "Execute as: Me" and "Who has access: Anyone".'
+        : 'Google Sheets webhook returned an invalid non-JSON response.';
+      console.error('[RunBD Sheets Post Check Parse Error]', error, text.slice(0, 200));
+      return { ok: false, isDuplicate: false, error };
     }
-    const parsedResult = parsePostDuplicateCheckResponse(json);
+    const parsedResult = parsePostDuplicateCheckResponse(json, {
+      facebookLink: trimmedFb,
+      websiteLink: trimmedWeb,
+    });
     if (!parsedResult) {
-      return { ok: false, isDuplicate: false, error: 'Unsupported check response' };
+      const error = 'Unsupported post duplicate check response format from Google Apps Script.';
+      console.error('[RunBD Sheets Post Check Format Error]', json);
+      return { ok: false, isDuplicate: false, error };
+    }
+    if (!parsedResult.ok) {
+      console.error('[RunBD Sheets Post Check Script Error]', parsedResult.error);
     }
     return parsedResult;
   } catch (err) {
+    const error = describeWebhookFetchError(err, timeoutMs);
+    console.error('[RunBD Sheets Post Check Network Error]', error, err);
     return {
       ok: false,
       isDuplicate: false,
-      error: err instanceof Error ? err.message : 'Unable to query sheet duplicate check',
+      error,
     };
   } finally {
     clearTimeout(timer);

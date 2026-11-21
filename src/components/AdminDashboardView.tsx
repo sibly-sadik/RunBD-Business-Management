@@ -41,6 +41,7 @@ interface AdminDashboardViewProps {
 
 const DONUT_COLORS: Record<CallStatus, string> = {
   'Order Confirmed': '#10b981', // emerald-500
+  Done: '#14b8a6', // teal-500
   Interested: '#0ea5e9', // sky-500
   'Busy / Call Later': '#f59e0b', // amber-500
   Pending: '#64748b', // slate-500

@@ -2,6 +2,7 @@ export type UserRole = 'admin' | 'agent' | 'collector' | 'poster';
 
 export type CallStatus =
   | 'Pending'
+  | 'Done'
   | 'Interested'
   | 'Order Confirmed'
   | 'Busy / Call Later'
@@ -11,6 +12,7 @@ export type CallStatus =
 
 export const CALL_STATUSES: CallStatus[] = [
   'Pending',
+  'Done',
   'Interested',
   'Order Confirmed',
   'Busy / Call Later',
