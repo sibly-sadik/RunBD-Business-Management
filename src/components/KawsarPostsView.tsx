@@ -27,11 +27,17 @@ interface KawsarPostsViewProps {
     facebookLink: string;
     websiteLink: string;
     note: string;
-  }) => {
-    ok: boolean;
-    error?: string;
-    duplicate?: { post: ContentPost; matchedField: 'Facebook Link' | 'Website Link' };
-  };
+  }) =>
+    | Promise<{
+        ok: boolean;
+        error?: string;
+        duplicate?: { post: ContentPost; matchedField: 'Facebook Link' | 'Website Link' };
+      }>
+    | {
+        ok: boolean;
+        error?: string;
+        duplicate?: { post: ContentPost; matchedField: 'Facebook Link' | 'Website Link' };
+      };
 }
 
 type LinkFilter = 'ALL' | 'FACEBOOK' | 'WEBSITE' | 'BOTH';
@@ -46,6 +52,7 @@ export function KawsarPostsView({
   const [websiteLink, setWebsiteLink] = useState('');
   const [note, setNote] = useState('');
   const [formError, setFormError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
   const [duplicateModal, setDuplicateModal] = useState<{
     post: ContentPost;
     matchedField: 'Facebook Link' | 'Website Link';
@@ -79,9 +86,9 @@ export function KawsarPostsView({
     });
   }, [posts, searchQuery, linkFilter]);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!onAddPost) return;
+    if (!onAddPost || submitting) return;
     setFormError('');
 
     const trimmedFb = facebookLink.trim();
@@ -113,32 +120,37 @@ export function KawsarPostsView({
       return;
     }
 
-    const res = onAddPost({
-      facebookLink: trimmedFb
-        ? /^https?:\/\//i.test(trimmedFb)
-          ? trimmedFb
-          : `https://${trimmedFb}`
-        : '',
-      websiteLink: trimmedWeb
-        ? /^https?:\/\//i.test(trimmedWeb)
-          ? trimmedWeb
-          : `https://${trimmedWeb}`
-        : '',
-      note: note.trim(),
-    });
+    setSubmitting(true);
+    try {
+      const res = await onAddPost({
+        facebookLink: trimmedFb
+          ? /^https?:\/\//i.test(trimmedFb)
+            ? trimmedFb
+            : `https://${trimmedFb}`
+          : '',
+        websiteLink: trimmedWeb
+          ? /^https?:\/\//i.test(trimmedWeb)
+            ? trimmedWeb
+            : `https://${trimmedWeb}`
+          : '',
+        note: note.trim(),
+      });
 
-    if (!res.ok) {
-      if (res.duplicate) {
-        setDuplicateModal(res.duplicate);
-      } else if (res.error) {
-        setFormError(res.error);
+      if (!res.ok) {
+        if (res.duplicate) {
+          setDuplicateModal(res.duplicate);
+        } else if (res.error) {
+          setFormError(res.error);
+        }
+        return;
       }
-      return;
-    }
 
-    setFacebookLink('');
-    setWebsiteLink('');
-    setNote('');
+      setFacebookLink('');
+      setWebsiteLink('');
+      setNote('');
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
@@ -234,19 +246,21 @@ export function KawsarPostsView({
           {liveDuplicate && (
             <div
               role="alert"
+              data-testid="kawsar-duplicate-warning"
               className="mt-4 flex items-start gap-3 p-3.5 rounded-xl bg-amber-50 dark:bg-amber-500/10 border border-amber-300 dark:border-amber-500/30 text-amber-900 dark:text-amber-200"
             >
               <AlertTriangle className="w-5 h-5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
               <div className="text-xs leading-relaxed">
                 <p className="font-semibold">
-                  Duplicate {liveDuplicate.matchedField} Found: Already submitted on{' '}
-                  {formatDateTime(liveDuplicate.post.createdAt)}.
+                  Duplicate {liveDuplicate.matchedField} Found: Already submitted by{' '}
+                  {liveDuplicate.post.posterName} on {formatDateTime(liveDuplicate.post.createdAt)}.
                 </p>
-                {liveDuplicate.post.note && (
-                  <p className="mt-0.5 text-amber-800/80 dark:text-amber-300/80">
-                    Existing Entry: {liveDuplicate.post.note}
-                  </p>
-                )}
+                <p className="mt-0.5 text-amber-800/80 dark:text-amber-300/80 break-all">
+                  {liveDuplicate.post.note ? `${liveDuplicate.post.note} · ` : ''}
+                  {liveDuplicate.matchedField === 'Facebook Link'
+                    ? liveDuplicate.post.facebookLink
+                    : liveDuplicate.post.websiteLink}
+                </p>
               </div>
             </div>
           )}
@@ -329,14 +343,21 @@ export function KawsarPostsView({
             <div className="md:col-span-3 flex items-end">
               <button
                 type="submit"
-                className={`w-full inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-lg text-sm font-semibold transition-colors cursor-pointer ${
+                disabled={submitting}
+                className={`w-full inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-lg text-sm font-semibold transition-colors disabled:opacity-60 cursor-pointer ${
                   liveDuplicate
                     ? 'bg-amber-600/90 hover:bg-amber-600 text-white'
                     : 'bg-emerald-600 hover:bg-emerald-500 text-white'
                 }`}
               >
                 <PlusCircle className="w-4 h-4 shrink-0" />
-                <span>{liveDuplicate ? 'Blocked (Duplicate)' : 'Submit Entry'}</span>
+                <span>
+                  {submitting
+                    ? 'Checking & Saving...'
+                    : liveDuplicate
+                    ? 'Blocked (Duplicate)'
+                    : 'Submit Entry'}
+                </span>
               </button>
             </div>
           </form>

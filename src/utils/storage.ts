@@ -202,7 +202,8 @@ export interface PullSheetsResult {
  * via a GET request to the Apps Script Web App (`doGet`).
  */
 export async function pullFromGoogleSheetsWebhook(
-  webhookUrl: string
+  webhookUrl: string,
+  options?: { timeoutMs?: number }
 ): Promise<PullSheetsResult> {
   const trimmed = webhookUrl.trim();
   if (!trimmed) {
@@ -219,16 +220,14 @@ export async function pullFromGoogleSheetsWebhook(
   }
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 8000);
+  const timeoutMs = options?.timeoutMs ?? 8000;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const res = await fetch(targetUrl, {
       method: 'GET',
       redirect: 'follow',
       signal: controller.signal,
-      headers: {
-        Accept: 'application/json',
-      },
     });
     if (!res.ok) {
       return { ok: false, pulledData: false, error: `HTTP ${res.status}` };

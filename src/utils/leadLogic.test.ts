@@ -53,17 +53,20 @@ const existingLeads: Lead[] = [
   },
 ];
 
-test('normalizeBdPhone treats +8801, 8801, and 01 as identical canonical 01XXXXXXXXX', () => {
+test('normalizeBdPhone treats +8801, 8801, 0088, +88, and 01 as identical canonical 01XXXXXXXXX', () => {
   assert.equal(normalizeBdPhone('+8801711223344'), '01711223344');
   assert.equal(normalizeBdPhone('8801711223344'), '01711223344');
+  assert.equal(normalizeBdPhone('008801711223344'), '01711223344');
+  assert.equal(normalizeBdPhone('0088 01711-223344'), '01711223344');
   assert.equal(normalizeBdPhone('01711223344'), '01711223344');
   assert.equal(normalizeBdPhone('+88 01711-223344'), '01711223344');
+  assert.equal(normalizeBdPhone('881711223344'), '01711223344');
   assert.equal(normalizeBdPhone('1711223344'), '01711223344');
   assert.equal(normalizeBdPhone('01211223344'), null); // invalid BD operator prefix 012
   assert.equal(normalizeBdPhone('12345'), null);
 });
 
-test('normalizeFacebookUrl standardizes protocol, subdomain, and trailing slashes', () => {
+test('normalizeFacebookUrl standardizes protocol, repeated subdomains, permalinks, and trailing slashes', () => {
   assert.equal(
     normalizeFacebookUrl('https://www.facebook.com/Rafiqul.Islam.BD/?ref=bookmarks'),
     'facebook.com/rafiqul.islam.bd'
@@ -73,8 +76,16 @@ test('normalizeFacebookUrl standardizes protocol, subdomain, and trailing slashe
     'facebook.com/rafiqul.islam.bd'
   );
   assert.equal(
+    normalizeFacebookUrl('https://www.m.facebook.com/rafiqul.islam.bd/?mibextid=ZbWKwL'),
+    'facebook.com/rafiqul.islam.bd'
+  );
+  assert.equal(
     normalizeFacebookUrl('https://facebook.com/profile.php?id=10008452100&sk=about'),
     'facebook.com/profile.php?id=10008452100'
+  );
+  assert.equal(
+    normalizeFacebookUrl('https://www.facebook.com/permalink.php?story_fbid=998877&id=112233&ref=share'),
+    'facebook.com/permalink.php?story_fbid=998877&id=112233'
   );
 });
 

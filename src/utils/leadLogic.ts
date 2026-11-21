@@ -41,6 +41,8 @@ export function normalizeBdPhone(raw: string): string | null {
     normalized = digits.slice(5); // 01XXXXXXXXX
   } else if (digits.startsWith('00880') && digits.length === 15) {
     normalized = digits.slice(4); // 01XXXXXXXXX
+  } else if (digits.startsWith('0088') && digits.length === 14) {
+    normalized = '0' + digits.slice(4); // 01XXXXXXXXX
   } else if (digits.startsWith('88001') && digits.length === 14) {
     normalized = digits.slice(3); // 01XXXXXXXXX
   } else if (digits.startsWith('880') && digits.length === 13) {
@@ -110,13 +112,25 @@ export function normalizeFacebookUrl(raw: string): string {
 
   let cleaned = trimmed
     .replace(/^https?:\/\//, '')
-    .replace(/^(www\.|m\.|mobile\.|web\.|mbasic\.)/, '')
+    .replace(/^(www\.|m\.|mobile\.|web\.|mbasic\.|touch\.)+/g, '')
     .replace(/^(fb\.com|fb\.me)\//, 'facebook.com/');
 
   if (cleaned.includes('profile.php')) {
     const match = cleaned.match(/id=(\d+)/);
     if (match) {
       return `facebook.com/profile.php?id=${match[1]}`;
+    }
+  }
+
+  if (cleaned.includes('permalink.php') || cleaned.includes('story.php')) {
+    const storyFbid = cleaned.match(/story_fbid=([^&#]+)/)?.[1];
+    const pageId = cleaned.match(/(?:^|[?&])id=([^&#]+)/)?.[1];
+    const pathPart = cleaned.split('?')[0].split('#')[0].replace(/\/+$/, '');
+    const params: string[] = [];
+    if (storyFbid) params.push(`story_fbid=${storyFbid}`);
+    if (pageId) params.push(`id=${pageId}`);
+    if (params.length > 0) {
+      return `${pathPart}?${params.join('&')}`;
     }
   }
 
@@ -237,6 +251,7 @@ export function parseCsvLeads(csvText: string, existingLeads: Lead[]): CsvPrevie
     const existingDup = findDuplicateLead(existingLeads, rawPhone, facebookLink);
     if (existingDup) {
       const addedDate = formatShortDate(existingDup.lead.createdAt);
+      const agentLabel = existingDup.lead.assignedAgentName ?? 'Unassigned';
       return {
         rowNumber,
         customerName,
@@ -244,7 +259,7 @@ export function parseCsvLeads(csvText: string, existingLeads: Lead[]): CsvPrevie
         normalizedPhone,
         facebookLink,
         status: 'duplicate',
-        reason: `Duplicate (${existingDup.matchedBy === 'phone' ? 'Phone' : 'Facebook'}): Added by ${existingDup.lead.collectorName} on ${addedDate}`,
+        reason: `Duplicate (${existingDup.matchedBy === 'phone' ? 'Phone' : 'Facebook'}): ${existingDup.lead.customerName} · Agent: ${agentLabel} · Status: ${existingDup.lead.status} · Collector: ${existingDup.lead.collectorName} (${addedDate})`,
       };
     }
 
@@ -660,6 +675,11 @@ const TRACKING_QUERY_PARAMS = new Set([
   'fbclid',
   'gclid',
   'ref',
+  'refsrc',
+  'rdid',
+  'share_url',
+  'sfnsn',
+  '__tn__',
   'mibextid',
   'utm_source',
   'utm_medium',
@@ -667,6 +687,14 @@ const TRACKING_QUERY_PARAMS = new Set([
   'utm_term',
   'utm_content',
 ]);
+
+function isTrackingQueryParam(key: string): boolean {
+  return (
+    TRACKING_QUERY_PARAMS.has(key) ||
+    key.startsWith('utm_') ||
+    key.startsWith('__cft__')
+  );
+}
 
 /**
  * Normalizes any Facebook or Website URL for strict duplicate comparison:
@@ -680,7 +708,7 @@ export function normalizePostUrl(raw: string): string {
   const withProto = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
   try {
     const parsed = new URL(withProto);
-    let host = parsed.hostname.toLowerCase().replace(/^(www\.|m\.|mbasic\.)/, '');
+    let host = parsed.hostname.toLowerCase().replace(/^(www\.|m\.|mobile\.|mbasic\.|touch\.)+/g, '');
     if (host === 'fb.me' || host === 'fb.com') {
       host = 'facebook.com';
     }
@@ -689,7 +717,7 @@ export function normalizePostUrl(raw: string): string {
     const keptParams: Array<[string, string]> = [];
     parsed.searchParams.forEach((value, key) => {
       const lowerKey = key.toLowerCase();
-      if (!TRACKING_QUERY_PARAMS.has(lowerKey)) {
+      if (!isTrackingQueryParam(lowerKey)) {
         keptParams.push([lowerKey, value]);
       }
     });
@@ -704,7 +732,8 @@ export function normalizePostUrl(raw: string): string {
     return trimmed
       .toLowerCase()
       .replace(/^https?:\/\//, '')
-      .replace(/^(www\.|m\.|mbasic\.)/, '')
+      .replace(/^(www\.|m\.|mobile\.|mbasic\.|touch\.)+/g, '')
+      .split('#')[0]
       .replace(/\/+$/, '');
   }
 }

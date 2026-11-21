@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AdminAuditView } from './components/AdminAuditView';
 import { AdminDashboardView } from './components/AdminDashboardView';
 import { AdminFinalDailySummaryView } from './components/AdminFinalDailySummaryView';
@@ -55,9 +55,13 @@ import {
   subscribeToSettings,
 } from './utils/firestoreSync';
 import {
+  detectLeadDuplicatesInList,
+  detectPostDuplicatesInList,
+  isFirestoreDocIdSafe,
   mergeRemoteCallLogs,
   mergeRemoteContentPosts,
   mergeRemoteLeads,
+  SheetDuplicateReport,
 } from './utils/sheetsSync';
 import {
   DEFAULT_GOOGLE_SHEETS_WEBHOOK_URL,
@@ -106,7 +110,26 @@ export default function App() {
   const [syncStatus, setSyncStatus] = useState<SyncStatus>(() =>
     storage.getSettings().googleSheetsWebhookUrl ? 'synced' : 'offline'
   );
+  const [sheetDuplicateReport, setSheetDuplicateReport] = useState<SheetDuplicateReport | null>(
+    null
+  );
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
+
+  const leadsRef = useRef(leads);
+  const callLogsRef = useRef(callLogs);
+  const contentPostsRef = useRef(contentPosts);
+
+  useEffect(() => {
+    leadsRef.current = leads;
+  }, [leads]);
+
+  useEffect(() => {
+    callLogsRef.current = callLogs;
+  }, [callLogs]);
+
+  useEffect(() => {
+    contentPostsRef.current = contentPosts;
+  }, [contentPosts]);
 
   // Sync theme class onto <html>
   useEffect(() => {
@@ -162,13 +185,13 @@ export default function App() {
   // Real-time Firebase Firestore subscriptions across all devices/laptops
   useEffect(() => {
     const unsubLeads = subscribeToLeads((remoteLeads) => {
-      setLeads(remoteLeads);
+      setLeads((prev) => mergeRemoteLeads(prev, remoteLeads));
     });
     const unsubCallLogs = subscribeToCallLogs((remoteLogs) => {
-      setCallLogs(remoteLogs);
+      setCallLogs((prev) => mergeRemoteCallLogs(prev, remoteLogs));
     });
     const unsubPosts = subscribeToContentPosts((remotePosts) => {
-      setContentPosts(remotePosts);
+      setContentPosts((prev) => mergeRemoteContentPosts(prev, remotePosts));
     });
     const unsubAudit = subscribeToAuditLogs((remoteAudit) => {
       setAuditLogs(remoteAudit);
@@ -270,6 +293,80 @@ export default function App() {
     [buildDailySummary, contentPosts]
   );
 
+  const applyPulledSheetData = useCallback(
+    (
+      remoteLeads: Partial<Lead>[],
+      remoteCallLogs: Partial<CallLog>[],
+      remotePosts: Partial<ContentPost>[]
+    ) => {
+      const baseLeads = mergeRemoteLeads(leadsRef.current, storage.getLeads());
+      const baseCallLogs = mergeRemoteCallLogs(callLogsRef.current, storage.getCallLogs());
+      const basePosts = mergeRemoteContentPosts(
+        contentPostsRef.current,
+        storage.getContentPosts()
+      );
+
+      const mergedLeads =
+        remoteLeads.length > 0 ? mergeRemoteLeads(baseLeads, remoteLeads) : baseLeads;
+      const mergedCallLogs =
+        remoteCallLogs.length > 0
+          ? mergeRemoteCallLogs(baseCallLogs, remoteCallLogs)
+          : baseCallLogs;
+      const mergedPosts =
+        remotePosts.length > 0 ? mergeRemoteContentPosts(basePosts, remotePosts) : basePosts;
+
+      // Persist newly pulled leads/logs/posts from Google Sheets to Firestore so all laptops stay aligned
+      const baseLeadMap = new Map(baseLeads.map((l) => [l.id, l]));
+      const leadsToSave = mergedLeads.filter((lead) => {
+        if (!isFirestoreDocIdSafe(lead.id) || !lead.customerName.trim()) return false;
+        const prev = baseLeadMap.get(lead.id);
+        return !prev || prev.updatedAt !== lead.updatedAt;
+      });
+      if (leadsToSave.length > 0) {
+        void saveLeadsBatchToFirestore(leadsToSave).catch(() => {});
+      }
+
+      const baseLogIds = new Set(baseCallLogs.map((c) => c.id));
+      for (const log of mergedCallLogs) {
+        if (
+          !baseLogIds.has(log.id) &&
+          isFirestoreDocIdSafe(log.id) &&
+          isFirestoreDocIdSafe(log.leadId)
+        ) {
+          void saveCallLogToFirestore(log).catch(() => {});
+        }
+      }
+
+      const basePostIds = new Set(basePosts.map((p) => p.id));
+      for (const post of mergedPosts) {
+        if (
+          !basePostIds.has(post.id) &&
+          isFirestoreDocIdSafe(post.id) &&
+          (post.facebookLink.length > 0 || post.websiteLink.length > 0)
+        ) {
+          void saveContentPostToFirestore(post).catch(() => {});
+        }
+      }
+
+      leadsRef.current = mergedLeads;
+      callLogsRef.current = mergedCallLogs;
+      contentPostsRef.current = mergedPosts;
+      setLeads(mergedLeads);
+      setCallLogs(mergedCallLogs);
+      setContentPosts(mergedPosts);
+
+      const report: SheetDuplicateReport = {
+        checkedAt: new Date().toISOString(),
+        leadDuplicates: detectLeadDuplicatesInList(mergedLeads),
+        postDuplicates: detectPostDuplicatesInList(mergedPosts),
+      };
+      setSheetDuplicateReport(report);
+
+      return { mergedLeads, mergedCallLogs, mergedPosts, report };
+    },
+    []
+  );
+
   const syncFromSheets = useCallback(
     async (webhookUrl: string, options?: { notify?: boolean }) => {
       const targetUrl = webhookUrl.trim();
@@ -284,15 +381,9 @@ export default function App() {
       if (pullRes.ok && pullRes.pulledData && pullRes.data) {
         const { leads: remoteLeads, callLogs: remoteCallLogs, contentPosts: remotePosts } =
           pullRes.data;
-        if (remoteLeads.length > 0) {
-          setLeads((prev) => mergeRemoteLeads(prev, remoteLeads));
-        }
-        if (remoteCallLogs.length > 0) {
-          setCallLogs((prev) => mergeRemoteCallLogs(prev, remoteCallLogs));
-        }
-        if (remotePosts.length > 0) {
-          setContentPosts((prev) => mergeRemoteContentPosts(prev, remotePosts));
-        }
+        const { report } = applyPulledSheetData(remoteLeads, remoteCallLogs, remotePosts);
+        const dupTotal = report.leadDuplicates.length + report.postDuplicates.length;
+
         setSyncStatus('synced');
         setSettings((prev) => ({ ...prev, lastSyncedAt: new Date().toISOString() }));
         if (options?.notify) {
@@ -301,6 +392,13 @@ export default function App() {
             'Synced from Google Sheets',
             `Pulled ${remoteLeads.length} leads, ${remoteCallLogs.length} call logs, and ${remotePosts.length} posts.`
           );
+          if (dupTotal > 0) {
+            addToast(
+              'warning',
+              'Sheet Duplicates Flagged',
+              `Found ${report.leadDuplicates.length} duplicate lead(s) and ${report.postDuplicates.length} duplicate link(s) in synced data.`
+            );
+          }
         }
         return { ok: true, pulledData: true };
       }
@@ -341,8 +439,45 @@ export default function App() {
       }
       return { ok: false, pulledData: false };
     },
-    [addToast]
+    [addToast, applyPulledSheetData]
   );
+
+  const getFreshLeadsForDuplicateCheck = useCallback(async (): Promise<Lead[]> => {
+    const localMerged = mergeRemoteLeads(leadsRef.current, storage.getLeads());
+    const webhookUrl = settings.googleSheetsWebhookUrl.trim();
+    if (!webhookUrl) return localMerged;
+
+    const pullRes = await pullFromGoogleSheetsWebhook(webhookUrl, { timeoutMs: 2500 });
+    if (pullRes.ok && pullRes.pulledData && pullRes.data) {
+      const { mergedLeads } = applyPulledSheetData(
+        pullRes.data.leads,
+        pullRes.data.callLogs,
+        pullRes.data.contentPosts
+      );
+      return mergedLeads;
+    }
+    return localMerged;
+  }, [applyPulledSheetData, settings.googleSheetsWebhookUrl]);
+
+  const getFreshPostsForDuplicateCheck = useCallback(async (): Promise<ContentPost[]> => {
+    const localMerged = mergeRemoteContentPosts(
+      contentPostsRef.current,
+      storage.getContentPosts()
+    );
+    const webhookUrl = settings.googleSheetsWebhookUrl.trim();
+    if (!webhookUrl) return localMerged;
+
+    const pullRes = await pullFromGoogleSheetsWebhook(webhookUrl, { timeoutMs: 2500 });
+    if (pullRes.ok && pullRes.pulledData && pullRes.data) {
+      const { mergedPosts } = applyPulledSheetData(
+        pullRes.data.leads,
+        pullRes.data.callLogs,
+        pullRes.data.contentPosts
+      );
+      return mergedPosts;
+    }
+    return localMerged;
+  }, [applyPulledSheetData, settings.googleSheetsWebhookUrl]);
 
   // Automatically connect and pull latest data on initial app load
   useEffect(() => {
@@ -398,12 +533,16 @@ export default function App() {
     );
   };
 
-  const handleAddSingleLead = (input: {
+  const handleAddSingleLead = async (input: {
     customerName: string;
     rawPhone: string;
     facebookLink: string;
     notes: string;
-  }): { ok: boolean; error?: string } => {
+  }): Promise<{
+    ok: boolean;
+    error?: string;
+    duplicate?: { lead: Lead; matchedBy: 'phone' | 'facebook' };
+  }> => {
     if (!currentUser) return { ok: false, error: 'Not authenticated' };
 
     const normalizedPhone = normalizeBdPhone(input.rawPhone);
@@ -411,7 +550,8 @@ export default function App() {
       return { ok: false, error: 'Invalid Bangladeshi phone number.' };
     }
 
-    const dup = findDuplicateLead(leads, input.rawPhone, input.facebookLink);
+    const freshLeads = await getFreshLeadsForDuplicateCheck();
+    const dup = findDuplicateLead(freshLeads, input.rawPhone, input.facebookLink);
     if (dup) {
       handleRecordDuplicateAttempt({
         collectorId: currentUser.id,
@@ -423,11 +563,13 @@ export default function App() {
         existingCollectorName: dup.lead.collectorName,
         existingDate: dup.lead.createdAt,
       });
+      const agentLabel = dup.lead.assignedAgentName ?? 'Unassigned';
       return {
         ok: false,
-        error: `Duplicate Found: Already added by ${dup.lead.collectorName} on ${formatShortDate(
+        error: `Duplicate Found: ${dup.lead.customerName} · Agent: ${agentLabel} · Status: ${dup.lead.status} · Collector: ${dup.lead.collectorName} (${formatShortDate(
           dup.lead.createdAt
-        )}`,
+        )})`,
+        duplicate: dup,
       };
     }
 
@@ -457,8 +599,9 @@ export default function App() {
     );
 
     const created = assignedLeads[0];
-    const nextLeads = [created, ...leads];
+    const nextLeads = [created, ...freshLeads];
     const nextSettings: AppSettings = { ...settings, roundRobinIndex: nextIndex };
+    leadsRef.current = nextLeads;
     setLeads(nextLeads);
     setSettings(nextSettings);
     void saveLeadToFirestore(created).catch(() => {});
@@ -484,17 +627,18 @@ export default function App() {
       settings.googleSheetsWebhookUrl,
       { event: 'LEAD_UPSERT', lead: created },
       nextLeads,
-      callLogs
+      callLogsRef.current
     );
 
     return { ok: true };
   };
 
-  const handleImportBulkLeads = (validRows: CsvPreviewRow[]) => {
+  const handleImportBulkLeads = async (validRows: CsvPreviewRow[]) => {
     if (!currentUser || validRows.length === 0) return;
 
+    const freshLeads = await getFreshLeadsForDuplicateCheck();
     const nowIso = new Date().toISOString();
-    const workingLeads = [...leads];
+    const workingLeads = [...freshLeads];
     const acceptedRows: CsvPreviewRow[] = [];
     let skippedCount = 0;
 
@@ -537,7 +681,11 @@ export default function App() {
     }
 
     if (acceptedRows.length === 0) {
-      addToast('warning', 'Import Blocked', 'All rows were duplicates already in the database.');
+      addToast(
+        'warning',
+        'Import Blocked',
+        'All rows were duplicates already in Google Sheets or local database.'
+      );
       return;
     }
 
@@ -565,8 +713,9 @@ export default function App() {
       settings.autoAssignEnabled
     );
 
-    const nextLeads = [...assignedLeads, ...leads];
+    const nextLeads = [...assignedLeads, ...freshLeads];
     const nextSettings: AppSettings = { ...settings, roundRobinIndex: nextIndex };
+    leadsRef.current = nextLeads;
     setLeads(nextLeads);
     setSettings(nextSettings);
     void saveLeadsBatchToFirestore(assignedLeads).catch(() => {});
@@ -577,35 +726,42 @@ export default function App() {
       'BULK_IMPORT',
       `Imported ${assignedLeads.length} valid leads via CSV (${
         settings.autoAssignEnabled ? 'Round-Robin distributed' : 'Unassigned'
-      })`
+      })${skippedCount > 0 ? `, blocked ${skippedCount} duplicate(s)` : ''}`
     );
 
     addToast(
       'success',
       `Imported ${assignedLeads.length} Leads`,
-      settings.autoAssignEnabled
+      skippedCount > 0
+        ? `Blocked ${skippedCount} duplicate row(s) found against existing/sheet records.`
+        : settings.autoAssignEnabled
         ? 'Distributed equally across the 6 call center agents.'
         : 'Added to the unassigned queue.'
     );
 
     void triggerRealtimeSync(
       settings.googleSheetsWebhookUrl,
-      { event: 'FULL_SYNC', leads: nextLeads, callLogs, contentPosts },
+      {
+        event: 'FULL_SYNC',
+        leads: nextLeads,
+        callLogs: callLogsRef.current,
+        contentPosts: contentPostsRef.current,
+      },
       nextLeads,
-      callLogs
+      callLogsRef.current
     );
   };
 
   // Kawsar Content & Link Poster handler
-  const handleAddContentPost = (input: {
+  const handleAddContentPost = async (input: {
     facebookLink: string;
     websiteLink: string;
     note: string;
-  }): {
+  }): Promise<{
     ok: boolean;
     error?: string;
     duplicate?: { post: ContentPost; matchedField: 'Facebook Link' | 'Website Link' };
-  } => {
+  }> => {
     if (!currentUser) return { ok: false, error: 'Not authenticated' };
 
     const trimmedFb = input.facebookLink.trim();
@@ -626,16 +782,17 @@ export default function App() {
       return { ok: false, error: 'Please enter a valid Website URL.' };
     }
 
-    const dup = findDuplicatePost(contentPosts, trimmedFb, trimmedWeb);
+    const freshPosts = await getFreshPostsForDuplicateCheck();
+    const dup = findDuplicatePost(freshPosts, trimmedFb, trimmedWeb);
     if (dup) {
       addToast(
         'warning',
         `Duplicate ${dup.matchedField} Blocked`,
-        `Already submitted on ${formatShortDate(dup.post.createdAt)}.`
+        `Already submitted by ${dup.post.posterName} on ${formatShortDate(dup.post.createdAt)}.`
       );
       return {
         ok: false,
-        error: `Duplicate ${dup.matchedField}: already submitted on ${formatShortDate(
+        error: `Duplicate ${dup.matchedField}: already submitted by ${dup.post.posterName} on ${formatShortDate(
           dup.post.createdAt
         )}.`,
         duplicate: dup,
@@ -665,7 +822,8 @@ export default function App() {
       createdAt: new Date().toISOString(),
     };
 
-    const nextPosts = [created, ...contentPosts];
+    const nextPosts = [created, ...freshPosts];
+    contentPostsRef.current = nextPosts;
     setContentPosts(nextPosts);
     void saveContentPostToFirestore(created).catch(() => {});
 
@@ -691,8 +849,8 @@ export default function App() {
     void triggerRealtimeSync(
       settings.googleSheetsWebhookUrl,
       { event: 'KAWSAR_POST_LOGGED', post: created },
-      leads,
-      callLogs,
+      leadsRef.current,
+      callLogsRef.current,
       nextPosts
     );
 
@@ -1007,6 +1165,13 @@ export default function App() {
             defaultWebhookUrl={DEFAULT_GOOGLE_SHEETS_WEBHOOK_URL}
             lastSyncedAt={settings.lastSyncedAt}
             syncStatus={syncStatus}
+            sheetDuplicateReport={
+              sheetDuplicateReport ?? {
+                checkedAt: settings.lastSyncedAt ?? new Date().toISOString(),
+                leadDuplicates: detectLeadDuplicatesInList(leads),
+                postDuplicates: detectPostDuplicatesInList(contentPosts),
+              }
+            }
             onSaveWebhookUrl={handleSaveWebhookUrl}
             onTestAndSync={handleTestAndSyncSheets}
             onPullLatest={async (url) => {

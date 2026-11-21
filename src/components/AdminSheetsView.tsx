@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import {
+  AlertTriangle,
   Check,
+  CheckCircle2,
   Code2,
   Copy,
   DownloadCloud,
@@ -13,12 +15,14 @@ import {
 import { GOOGLE_APPS_SCRIPT_CODE } from '../data/seedData';
 import { SyncStatus } from '../types';
 import { formatDateTime } from '../utils/leadLogic';
+import { SheetDuplicateReport } from '../utils/sheetsSync';
 
 interface AdminSheetsViewProps {
   webhookUrl: string;
   defaultWebhookUrl: string;
   lastSyncedAt: string | null;
   syncStatus: SyncStatus;
+  sheetDuplicateReport: SheetDuplicateReport;
   onSaveWebhookUrl: (url: string) => void;
   onTestAndSync: (url: string) => Promise<void>;
   onPullLatest: (url: string) => Promise<void>;
@@ -29,6 +33,7 @@ export function AdminSheetsView({
   defaultWebhookUrl,
   lastSyncedAt,
   syncStatus,
+  sheetDuplicateReport,
   onSaveWebhookUrl,
   onTestAndSync,
   onPullLatest,
@@ -202,6 +207,153 @@ export function AdminSheetsView({
             )}
           </div>
         </form>
+      </section>
+
+      {/* Sheet Duplicate Audit (Master_Data & Kawsar_Posts_Log) */}
+      <section
+        data-testid="sheet-duplicate-report"
+        className="glass-panel rounded-2xl p-5 sm:p-6 space-y-4"
+      >
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 pb-3 border-b border-slate-200 dark:border-slate-800">
+          <div className="flex items-center gap-2.5">
+            {sheetDuplicateReport.leadDuplicates.length +
+              sheetDuplicateReport.postDuplicates.length >
+            0 ? (
+              <AlertTriangle className="w-5 h-5 text-amber-500 shrink-0" />
+            ) : (
+              <CheckCircle2 className="w-5 h-5 text-emerald-500 shrink-0" />
+            )}
+            <div>
+              <h2 className="text-sm font-semibold text-slate-900 dark:text-white">
+                Sheet Duplicate Check (Master_Data &amp; Kawsar_Posts_Log)
+              </h2>
+              <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                Last checked {formatDateTime(sheetDuplicateReport.checkedAt)}
+              </p>
+            </div>
+          </div>
+
+          <span
+            className={`text-xs font-semibold whitespace-nowrap ${
+              sheetDuplicateReport.leadDuplicates.length +
+                sheetDuplicateReport.postDuplicates.length >
+              0
+                ? 'text-amber-600 dark:text-amber-400'
+                : 'text-emerald-600 dark:text-emerald-400'
+            }`}
+          >
+            {sheetDuplicateReport.leadDuplicates.length +
+              sheetDuplicateReport.postDuplicates.length >
+            0
+              ? `${
+                  sheetDuplicateReport.leadDuplicates.length +
+                  sheetDuplicateReport.postDuplicates.length
+                } Flagged Entry(s)`
+              : '0 Duplicates Flagged'}
+          </span>
+        </div>
+
+        {sheetDuplicateReport.leadDuplicates.length === 0 &&
+        sheetDuplicateReport.postDuplicates.length === 0 ? (
+          <p className="text-xs text-slate-600 dark:text-slate-300">
+            All synced phone numbers, Facebook profile URLs, and Kawsar post links are unique across
+            active records.
+          </p>
+        ) : (
+          <div className="space-y-4">
+            {sheetDuplicateReport.leadDuplicates.length > 0 && (
+              <div className="space-y-2">
+                <h3 className="text-xs font-semibold text-amber-700 dark:text-amber-300">
+                  Flagged Lead Duplicates in Master_Data ({sheetDuplicateReport.leadDuplicates.length})
+                </h3>
+                <div className="overflow-x-auto rounded-xl border border-amber-300/60 dark:border-amber-500/30">
+                  <table className="w-full text-left border-collapse text-xs">
+                    <thead>
+                      <tr className="bg-amber-50/80 dark:bg-amber-500/10 text-slate-600 dark:text-slate-300 border-b border-amber-200/70 dark:border-amber-500/20">
+                        <th className="py-2 px-3 font-semibold">Match</th>
+                        <th className="py-2 px-3 font-semibold">Customer Name</th>
+                        <th className="py-2 px-3 font-semibold">Phone / Link</th>
+                        <th className="py-2 px-3 font-semibold">Assigned Agent</th>
+                        <th className="py-2 px-3 font-semibold">Status</th>
+                        <th className="py-2 px-3 font-semibold">Collector</th>
+                        <th className="py-2 px-3 font-semibold">IDs</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-200 dark:divide-slate-800">
+                      {sheetDuplicateReport.leadDuplicates.map((flag, i) => (
+                        <tr key={`${flag.duplicateLeadId}-${flag.matchedBy}-${i}`}>
+                          <td className="py-2 px-3 font-medium text-amber-700 dark:text-amber-300 whitespace-nowrap">
+                            {flag.matchedBy === 'phone' ? 'Phone' : 'Facebook URL'}
+                          </td>
+                          <td className="py-2 px-3 font-medium text-slate-900 dark:text-slate-100">
+                            {flag.customerName}
+                          </td>
+                          <td className="py-2 px-3 font-mono text-slate-700 dark:text-slate-300">
+                            {flag.matchedBy === 'phone' ? flag.phone : flag.facebookLink}
+                          </td>
+                          <td className="py-2 px-3 text-slate-700 dark:text-slate-300">
+                            {flag.assignedAgentName ?? 'Unassigned'}
+                          </td>
+                          <td className="py-2 px-3 text-slate-700 dark:text-slate-300 whitespace-nowrap">
+                            {flag.status}
+                          </td>
+                          <td className="py-2 px-3 text-slate-700 dark:text-slate-300">
+                            {flag.collectorName}
+                          </td>
+                          <td className="py-2 px-3 font-mono text-[11px] text-slate-500 dark:text-slate-400">
+                            {flag.duplicateLeadId} (orig: {flag.originalLeadId})
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {sheetDuplicateReport.postDuplicates.length > 0 && (
+              <div className="space-y-2">
+                <h3 className="text-xs font-semibold text-amber-700 dark:text-amber-300">
+                  Flagged Link Duplicates in Kawsar_Posts_Log ({sheetDuplicateReport.postDuplicates.length})
+                </h3>
+                <div className="overflow-x-auto rounded-xl border border-amber-300/60 dark:border-amber-500/30">
+                  <table className="w-full text-left border-collapse text-xs">
+                    <thead>
+                      <tr className="bg-amber-50/80 dark:bg-amber-500/10 text-slate-600 dark:text-slate-300 border-b border-amber-200/70 dark:border-amber-500/20">
+                        <th className="py-2 px-3 font-semibold">Field</th>
+                        <th className="py-2 px-3 font-semibold">Duplicate URL</th>
+                        <th className="py-2 px-3 font-semibold">Poster</th>
+                        <th className="py-2 px-3 font-semibold">Note</th>
+                        <th className="py-2 px-3 font-semibold">IDs</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-200 dark:divide-slate-800">
+                      {sheetDuplicateReport.postDuplicates.map((flag, i) => (
+                        <tr key={`${flag.duplicatePostId}-${flag.matchedField}-${i}`}>
+                          <td className="py-2 px-3 font-medium text-amber-700 dark:text-amber-300 whitespace-nowrap">
+                            {flag.matchedField}
+                          </td>
+                          <td className="py-2 px-3 font-mono text-slate-700 dark:text-slate-300 break-all">
+                            {flag.url}
+                          </td>
+                          <td className="py-2 px-3 text-slate-700 dark:text-slate-300">
+                            {flag.posterName}
+                          </td>
+                          <td className="py-2 px-3 text-slate-700 dark:text-slate-300">
+                            {flag.note || '—'}
+                          </td>
+                          <td className="py-2 px-3 font-mono text-[11px] text-slate-500 dark:text-slate-400">
+                            {flag.duplicatePostId} (orig: {flag.originalPostId})
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </section>
 
       {/* Core & Dedicated Agent Tabs Overview */}

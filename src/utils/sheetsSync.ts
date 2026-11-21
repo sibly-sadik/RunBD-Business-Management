@@ -1,5 +1,10 @@
 import { CALL_STATUSES, CallLog, CallStatus, ContentPost, Lead } from '../types';
-import { normalizeBdPhone, normalizeFacebookUrl, normalizePostUrl } from './leadLogic';
+import {
+  extractPhoneCoreKey,
+  normalizeBdPhone,
+  normalizeFacebookUrl,
+  normalizePostUrl,
+} from './leadLogic';
 
 export const FALLBACK_GOOGLE_SHEETS_WEBHOOK_URL =
   'https://script.google.com/macros/s/AKfycbwqMl23Bi200Idn267ySCDpKBY30b1FdYC8OWPOPK90neBvSPwWyn7Eq-VqV8ublfUD/exec';
@@ -57,6 +62,34 @@ export interface ParsedPullPayload {
   contentPosts: Partial<ContentPost>[];
 }
 
+export interface SheetLeadDuplicateFlag {
+  duplicateLeadId: string;
+  originalLeadId: string;
+  customerName: string;
+  originalCustomerName: string;
+  phone: string;
+  facebookLink: string;
+  matchedBy: 'phone' | 'facebook';
+  collectorName: string;
+  assignedAgentName: string | null;
+  status: CallStatus;
+}
+
+export interface SheetPostDuplicateFlag {
+  duplicatePostId: string;
+  originalPostId: string;
+  matchedField: 'Facebook Link' | 'Website Link';
+  url: string;
+  posterName: string;
+  note: string;
+}
+
+export interface SheetDuplicateReport {
+  checkedAt: string;
+  leadDuplicates: SheetLeadDuplicateFlag[];
+  postDuplicates: SheetPostDuplicateFlag[];
+}
+
 /**
  * Validates and extracts structured arrays from a Google Apps Script `doGet` JSON response.
  * Returns null if the response does not match an expected JSON payload.
@@ -92,10 +125,59 @@ function safePhoneString(value: unknown): string {
   return value.replace(/^'+/, '').trim();
 }
 
+function resolveCollectorIdFromName(name: string, explicitId?: unknown): string {
+  if (typeof explicitId === 'string' && explicitId.trim()) {
+    return explicitId.trim();
+  }
+  const lower = name.trim().toLowerCase();
+  if (lower === 'naim') return 'collector-naim';
+  if (lower === 'farhan') return 'collector-farhan';
+  if (lower.includes('jahid') || lower === 'admin') return 'admin-1';
+  if (!lower) return 'collector-farhan';
+  return `collector-${lower.replace(/[^a-z0-9]+/g, '-')}`;
+}
+
+function resolveAgentIdFromName(name: string | null, explicitId?: unknown): string | null {
+  if (typeof explicitId === 'string' && explicitId.trim()) {
+    return explicitId.trim();
+  }
+  if (!name) return null;
+  return `agent-${name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+}
+
+export function isFirestoreDocIdSafe(id: string): boolean {
+  return /^[a-zA-Z0-9_-]{1,128}$/.test(id);
+}
+
 /**
- * Merges remote leads pulled from Google Sheets into local leads.
- * - Preserves local unsynced leads.
- * - Updates matching leads when the remote record has a newer or equal `updatedAt`.
+ * Builds a deterministic Firestore-safe fallback ID if a row in Google Sheets
+ * was entered manually without an ID in Column A.
+ */
+function buildDeterministicLeadId(r: Partial<Lead>, index: number): string {
+  const core = extractPhoneCoreKey(safePhoneString(r.rawPhone ?? r.phone));
+  if (core) return `SHEET-PH-${core}`.slice(0, 120);
+  const fb = normalizeFacebookUrl(typeof r.facebookLink === 'string' ? r.facebookLink : '')
+    .replace(/[^a-z0-9]+/gi, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48);
+  if (fb) return `SHEET-FB-${fb}`;
+  return `SHEET-ROW-${index + 2}`;
+}
+
+function buildDeterministicPostId(r: Partial<ContentPost>, index: number): string {
+  const fb = normalizePostUrl(typeof r.facebookLink === 'string' ? r.facebookLink : '');
+  const web = normalizePostUrl(typeof r.websiteLink === 'string' ? r.websiteLink : '');
+  const rawSlug = (fb || web)
+    .replace(/[^a-z0-9]+/gi, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48);
+  if (rawSlug) return `SHEET-PST-${rawSlug}`;
+  return `SHEET-PST-ROW-${index + 2}`;
+}
+
+/**
+ * Merges remote leads pulled from Google Sheets into local leads,
+ * deduplicating cleanly by unique `id` and normalizing phone & Facebook fields.
  */
 export function mergeRemoteLeads(
   localLeads: Lead[],
@@ -110,13 +192,17 @@ export function mergeRemoteLeads(
 
   const nowIso = new Date().toISOString();
 
-  for (const r of remoteLeads) {
-    const id = typeof r.id === 'string' ? r.id.trim() : '';
-    if (!id) continue;
-
+  remoteLeads.forEach((r, idx) => {
     const rawPhone = safePhoneString(r.rawPhone ?? r.phone);
     const phone = normalizeBdPhone(rawPhone) || rawPhone;
     const facebookLink = typeof r.facebookLink === 'string' ? r.facebookLink.trim() : '';
+    const customerName = r.customerName?.trim() || '';
+
+    // Skip completely empty sheet rows
+    const explicitId = typeof r.id === 'string' ? r.id.trim() : '';
+    if (!explicitId && !phone && !facebookLink && !customerName) return;
+
+    const id = explicitId || buildDeterministicLeadId(r, idx);
     const normalizedFacebookLink =
       r.normalizedFacebookLink?.trim() || normalizeFacebookUrl(facebookLink);
     const updatedAt = toValidTimestamp(r.updatedAt, nowIso);
@@ -127,22 +213,32 @@ export function mergeRemoteLeads(
       const existingTime = Date.parse(existing.updatedAt || existing.createdAt) || 0;
       const remoteTime = Date.parse(updatedAt) || 0;
       if (remoteTime >= existingTime) {
+        const assignedName =
+          r.assignedAgentName !== undefined
+            ? r.assignedAgentName &&
+              String(r.assignedAgentName).trim().toLowerCase() !== 'unassigned'
+              ? String(r.assignedAgentName).trim()
+              : null
+            : existing.assignedAgentName;
+        const assignedAgentId =
+          r.assignedAgentId !== undefined
+            ? r.assignedAgentId
+            : assignedName !== existing.assignedAgentName
+            ? resolveAgentIdFromName(assignedName)
+            : existing.assignedAgentId;
+
         byId.set(id, {
           ...existing,
-          customerName: r.customerName?.trim() || existing.customerName,
+          customerName: customerName || existing.customerName,
           phone: phone || existing.phone,
           rawPhone: rawPhone || existing.rawPhone,
           facebookLink: facebookLink || existing.facebookLink,
           normalizedFacebookLink:
             normalizedFacebookLink || existing.normalizedFacebookLink,
-          collectorId: r.collectorId ?? existing.collectorId,
-          collectorName: r.collectorName?.trim() || existing.collectorName,
-          assignedAgentId:
-            r.assignedAgentId !== undefined ? r.assignedAgentId : existing.assignedAgentId,
-          assignedAgentName:
-            r.assignedAgentName !== undefined
-              ? r.assignedAgentName
-              : existing.assignedAgentName,
+          collectorId: existing.collectorId,
+          collectorName: existing.collectorName,
+          assignedAgentId,
+          assignedAgentName: assignedName,
           status: r.status ? normalizeStatus(r.status) : existing.status,
           followUpAt: r.followUpAt !== undefined ? r.followUpAt || null : existing.followUpAt,
           notes: r.notes !== undefined ? r.notes : existing.notes,
@@ -152,6 +248,10 @@ export function mergeRemoteLeads(
         });
       }
     } else {
+      const collectorName =
+        typeof r.collectorName === 'string' && r.collectorName.trim()
+          ? r.collectorName.trim()
+          : 'Farhan';
       const assignedName =
         typeof r.assignedAgentName === 'string' &&
         r.assignedAgentName.trim() &&
@@ -161,23 +261,15 @@ export function mergeRemoteLeads(
 
       byId.set(id, {
         id,
-        customerName: r.customerName?.trim() || 'Unknown Customer',
+        customerName: customerName || 'Unknown Customer',
         phone,
         rawPhone,
         facebookLink,
         normalizedFacebookLink,
         notes: typeof r.notes === 'string' ? r.notes : '',
-        collectorId: typeof r.collectorId === 'string' ? r.collectorId : 'collector-farhan',
-        collectorName:
-          typeof r.collectorName === 'string' && r.collectorName.trim()
-            ? r.collectorName.trim()
-            : 'Farhan',
-        assignedAgentId:
-          typeof r.assignedAgentId === 'string'
-            ? r.assignedAgentId
-            : assignedName
-            ? `agent-${assignedName.toLowerCase()}`
-            : null,
+        collectorId: resolveCollectorIdFromName(collectorName, r.collectorId),
+        collectorName,
+        assignedAgentId: resolveAgentIdFromName(assignedName, r.assignedAgentId),
         assignedAgentName: assignedName,
         status: normalizeStatus(r.status),
         followUpAt:
@@ -187,7 +279,7 @@ export function mergeRemoteLeads(
         updatedAt,
       });
     }
-  }
+  });
 
   return Array.from(byId.values()).sort(
     (a, b) => (Date.parse(b.createdAt) || 0) - (Date.parse(a.createdAt) || 0)
@@ -195,7 +287,7 @@ export function mergeRemoteLeads(
 }
 
 /**
- * Merges remote call logs pulled from Google Sheets into local call logs by ID.
+ * Merges remote call logs pulled from Google Sheets into local call logs by unique `id`.
  */
 export function mergeRemoteCallLogs(
   localLogs: CallLog[],
@@ -240,7 +332,7 @@ export function mergeRemoteCallLogs(
 }
 
 /**
- * Merges remote Kawsar content posts pulled from Google Sheets into local posts by ID.
+ * Merges remote Kawsar content posts pulled from Google Sheets into local posts by unique `id`.
  */
 export function mergeRemoteContentPosts(
   localPosts: ContentPost[],
@@ -255,13 +347,14 @@ export function mergeRemoteContentPosts(
 
   const nowIso = new Date().toISOString();
 
-  for (const r of remotePosts) {
-    const id = typeof r.id === 'string' ? r.id.trim() : '';
-    if (!id || byId.has(id)) continue;
-
+  remotePosts.forEach((r, idx) => {
     const facebookLink = typeof r.facebookLink === 'string' ? r.facebookLink.trim() : '';
     const websiteLink = typeof r.websiteLink === 'string' ? r.websiteLink.trim() : '';
-    if (!facebookLink && !websiteLink) continue;
+    if (!facebookLink && !websiteLink) return;
+
+    const explicitId = typeof r.id === 'string' ? r.id.trim() : '';
+    const id = explicitId || buildDeterministicPostId(r, idx);
+    if (byId.has(id)) return;
 
     byId.set(id, {
       id,
@@ -281,9 +374,147 @@ export function mergeRemoteContentPosts(
           : 'Kawsar',
       createdAt: toValidTimestamp(r.createdAt, nowIso),
     });
-  }
+  });
 
   return Array.from(byId.values()).sort(
     (a, b) => (Date.parse(b.createdAt) || 0) - (Date.parse(a.createdAt) || 0)
   );
+}
+
+/**
+ * Detects duplicate phone numbers or Facebook URLs across distinct `id` records
+ * (e.g., manual duplicate rows added directly inside Google Sheets `Master_Data`).
+ * Checks earliest-created record as the original and flags newer duplicates.
+ */
+export function detectLeadDuplicatesInList(leads: Lead[]): SheetLeadDuplicateFlag[] {
+  if (leads.length < 2) return [];
+
+  const chronological = [...leads].sort(
+    (a, b) => (Date.parse(a.createdAt) || 0) - (Date.parse(b.createdAt) || 0)
+  );
+
+  const seenPhone = new Map<string, Lead>();
+  const seenFb = new Map<string, Lead>();
+  const flags: SheetLeadDuplicateFlag[] = [];
+  const flaggedPairs = new Set<string>();
+
+  for (const lead of chronological) {
+    const corePhone = extractPhoneCoreKey(lead.phone || lead.rawPhone);
+    const normFb = lead.normalizedFacebookLink || normalizeFacebookUrl(lead.facebookLink);
+
+    if (corePhone) {
+      const orig = seenPhone.get(corePhone);
+      if (orig && orig.id !== lead.id) {
+        const key = `${lead.id}:${orig.id}:phone`;
+        if (!flaggedPairs.has(key)) {
+          flaggedPairs.add(key);
+          flags.push({
+            duplicateLeadId: lead.id,
+            originalLeadId: orig.id,
+            customerName: lead.customerName,
+            originalCustomerName: orig.customerName,
+            phone: lead.phone || lead.rawPhone,
+            facebookLink: lead.facebookLink,
+            matchedBy: 'phone',
+            collectorName: lead.collectorName,
+            assignedAgentName: lead.assignedAgentName,
+            status: lead.status,
+          });
+        }
+      } else if (!orig) {
+        seenPhone.set(corePhone, lead);
+      }
+    }
+
+    if (normFb) {
+      const orig = seenFb.get(normFb);
+      if (orig && orig.id !== lead.id) {
+        const key = `${lead.id}:${orig.id}:facebook`;
+        if (!flaggedPairs.has(key)) {
+          flaggedPairs.add(key);
+          flags.push({
+            duplicateLeadId: lead.id,
+            originalLeadId: orig.id,
+            customerName: lead.customerName,
+            originalCustomerName: orig.customerName,
+            phone: lead.phone || lead.rawPhone,
+            facebookLink: lead.facebookLink,
+            matchedBy: 'facebook',
+            collectorName: lead.collectorName,
+            assignedAgentName: lead.assignedAgentName,
+            status: lead.status,
+          });
+        }
+      } else if (!orig) {
+        seenFb.set(normFb, lead);
+      }
+    }
+  }
+
+  return flags;
+}
+
+/**
+ * Detects duplicate Facebook Links or Website Links across distinct `id` records
+ * (e.g., manual duplicate rows added directly inside Google Sheets `Kawsar_Posts_Log`).
+ */
+export function detectPostDuplicatesInList(
+  posts: ContentPost[]
+): SheetPostDuplicateFlag[] {
+  if (posts.length < 2) return [];
+
+  const chronological = [...posts].sort(
+    (a, b) => (Date.parse(a.createdAt) || 0) - (Date.parse(b.createdAt) || 0)
+  );
+
+  const seenUrls = new Map<string, { post: ContentPost; field: 'Facebook Link' | 'Website Link' }>();
+  const flags: SheetPostDuplicateFlag[] = [];
+  const flaggedKeys = new Set<string>();
+
+  for (const post of chronological) {
+    const fbNorm = post.normalizedFacebookLink || normalizePostUrl(post.facebookLink || '');
+    const webNorm = post.normalizedWebsiteLink || normalizePostUrl(post.websiteLink || '');
+
+    if (fbNorm) {
+      const orig = seenUrls.get(fbNorm);
+      if (orig && orig.post.id !== post.id) {
+        const key = `${post.id}:${orig.post.id}:fb`;
+        if (!flaggedKeys.has(key)) {
+          flaggedKeys.add(key);
+          flags.push({
+            duplicatePostId: post.id,
+            originalPostId: orig.post.id,
+            matchedField: 'Facebook Link',
+            url: post.facebookLink,
+            posterName: post.posterName,
+            note: post.note,
+          });
+        }
+      } else if (!orig) {
+        seenUrls.set(fbNorm, { post, field: 'Facebook Link' });
+      }
+    }
+
+    if (webNorm) {
+      const orig = seenUrls.get(webNorm);
+      if (orig && orig.post.id !== post.id) {
+        const key = `${post.id}:${orig.post.id}:web`;
+        if (!flaggedKeys.has(key)) {
+          flaggedKeys.add(key);
+          flags.push({
+            duplicatePostId: post.id,
+            originalPostId: orig.post.id,
+            matchedField: 'Website Link',
+            url: post.websiteLink,
+            posterName: post.posterName,
+            note: post.note,
+          });
+        }
+      } else if (!orig) {
+        seenUrls.set(webNorm, { post, field: 'Website Link' });
+      }
+    }
+  }
+
+  return flags;
 }

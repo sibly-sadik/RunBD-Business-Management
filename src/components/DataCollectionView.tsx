@@ -31,8 +31,12 @@ interface DataCollectionViewProps {
     rawPhone: string;
     facebookLink: string;
     notes: string;
-  }) => { ok: boolean; error?: string };
-  onImportBulkLeads: (validRows: CsvPreviewRow[]) => void;
+  }) => Promise<{
+    ok: boolean;
+    error?: string;
+    duplicate?: { lead: Lead; matchedBy: 'phone' | 'facebook' };
+  }>;
+  onImportBulkLeads: (validRows: CsvPreviewRow[]) => Promise<void> | void;
   onRecordDuplicateAttempt: (attempt: Omit<DuplicateAttempt, 'id' | 'timestamp'>) => void;
 }
 
@@ -51,6 +55,8 @@ export function DataCollectionView({
   const [facebookLink, setFacebookLink] = useState('');
   const [notes, setNotes] = useState('');
   const [formError, setFormError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [importingCsv, setImportingCsv] = useState(false);
   const [duplicateModal, setDuplicateModal] = useState<{
     matchedBy: 'phone' | 'facebook';
     existingLead: Lead;
@@ -89,8 +95,9 @@ export function DataCollectionView({
     );
   }, [duplicateAttempts, currentUser]);
 
-  const handleSingleSubmit = (e: React.FormEvent) => {
+  const handleSingleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submitting) return;
     setFormError('');
 
     if (!customerName.trim()) {
@@ -121,29 +128,42 @@ export function DataCollectionView({
         existingLead: liveDuplicate.lead,
       });
       setFormError(
-        `Duplicate Found: Already added by ${liveDuplicate.lead.collectorName} on ${formatShortDate(
-          liveDuplicate.lead.createdAt
-        )}`
+        `Duplicate Found: ${liveDuplicate.lead.customerName} · Agent: ${
+          liveDuplicate.lead.assignedAgentName ?? 'Unassigned'
+        } · Status: ${liveDuplicate.lead.status} · Collector: ${
+          liveDuplicate.lead.collectorName
+        } (${formatShortDate(liveDuplicate.lead.createdAt)})`
       );
       return;
     }
 
-    const res = onAddSingleLead({
-      customerName: customerName.trim(),
-      rawPhone: rawPhone.trim(),
-      facebookLink: facebookLink.trim(),
-      notes: notes.trim(),
-    });
+    setSubmitting(true);
+    try {
+      const res = await onAddSingleLead({
+        customerName: customerName.trim(),
+        rawPhone: rawPhone.trim(),
+        facebookLink: facebookLink.trim(),
+        notes: notes.trim(),
+      });
 
-    if (!res.ok) {
-      setFormError(res.error ?? 'Could not add lead.');
-      return;
+      if (!res.ok) {
+        if (res.duplicate) {
+          setDuplicateModal({
+            matchedBy: res.duplicate.matchedBy,
+            existingLead: res.duplicate.lead,
+          });
+        }
+        setFormError(res.error ?? 'Could not add lead.');
+        return;
+      }
+
+      setCustomerName('');
+      setRawPhone('');
+      setFacebookLink('');
+      setNotes('');
+    } finally {
+      setSubmitting(false);
     }
-
-    setCustomerName('');
-    setRawPhone('');
-    setFacebookLink('');
-    setNotes('');
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -187,12 +207,17 @@ export function DataCollectionView({
     [csvPreview]
   );
 
-  const handleConfirmImport = () => {
-    if (validCsvRows.length === 0) return;
-    onImportBulkLeads(validCsvRows);
-    setCsvPreview([]);
-    setCsvFileName('');
-    if (fileInputRef.current) fileInputRef.current.value = '';
+  const handleConfirmImport = async () => {
+    if (validCsvRows.length === 0 || importingCsv) return;
+    setImportingCsv(true);
+    try {
+      await onImportBulkLeads(validCsvRows);
+      setCsvPreview([]);
+      setCsvFileName('');
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    } finally {
+      setImportingCsv(false);
+    }
   };
 
   return (
@@ -265,13 +290,15 @@ export function DataCollectionView({
               className="mt-4 flex items-start gap-3 rounded-xl bg-amber-50 dark:bg-amber-500/10 border border-amber-300 dark:border-amber-500/40 px-4 py-3 text-amber-900 dark:text-amber-200"
             >
               <AlertTriangle className="w-5 h-5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
-              <div className="text-sm">
+              <div className="text-sm space-y-1">
                 <p className="font-semibold">
-                  Duplicate Found: Already added by {liveDuplicate.lead.collectorName} on{' '}
-                  {formatShortDate(liveDuplicate.lead.createdAt)}
+                  Duplicate Found ({liveDuplicate.matchedBy === 'phone' ? 'Phone Number' : 'Facebook Link'}): Submission Blocked
                 </p>
-                <p className="text-xs text-amber-800/80 dark:text-amber-300/80 mt-0.5">
-                  Matched by {liveDuplicate.matchedBy === 'phone' ? 'Normalized Phone Number' : 'Facebook Profile Link'} ({liveDuplicate.lead.customerName} · {liveDuplicate.lead.phone}). Submission is blocked.
+                <p className="text-xs text-amber-800/90 dark:text-amber-200/90">
+                  Customer: <strong>{liveDuplicate.lead.customerName}</strong> · Assigned Agent:{' '}
+                  <strong>{liveDuplicate.lead.assignedAgentName ?? 'Unassigned'}</strong> · Status:{' '}
+                  <strong>{liveDuplicate.lead.status}</strong> · Collector:{' '}
+                  <strong>{liveDuplicate.lead.collectorName}</strong> ({formatShortDate(liveDuplicate.lead.createdAt)})
                 </p>
               </div>
             </div>
@@ -371,14 +398,21 @@ export function DataCollectionView({
             <div className="md:col-span-2 flex items-center justify-end pt-2">
               <button
                 type="submit"
-                className={`inline-flex items-center gap-2 px-5 py-2.5 rounded-lg text-white text-sm font-semibold transition-colors cursor-pointer ${
+                disabled={submitting}
+                className={`inline-flex items-center gap-2 px-5 py-2.5 rounded-lg text-white text-sm font-semibold transition-colors disabled:opacity-60 cursor-pointer ${
                   liveDuplicate
                     ? 'bg-amber-600 hover:bg-amber-500'
                     : 'bg-emerald-600 hover:bg-emerald-500'
                 }`}
               >
                 <PlusCircle className="w-4 h-4" />
-                <span>{liveDuplicate ? 'Submission Blocked (Duplicate)' : 'Submit Lead'}</span>
+                <span>
+                  {submitting
+                    ? 'Checking & Saving...'
+                    : liveDuplicate
+                    ? 'Submission Blocked (Duplicate)'
+                    : 'Submit Lead'}
+                </span>
               </button>
             </div>
           </form>
@@ -446,12 +480,16 @@ export function DataCollectionView({
                 </div>
                 <button
                   type="button"
-                  disabled={validCsvRows.length === 0}
+                  disabled={validCsvRows.length === 0 || importingCsv}
                   onClick={handleConfirmImport}
                   className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-semibold transition-colors cursor-pointer"
                 >
                   <CheckCircle2 className="w-4 h-4" />
-                  <span>Import {validCsvRows.length} Valid Lead{validCsvRows.length === 1 ? '' : 's'}</span>
+                  <span>
+                    {importingCsv
+                      ? 'Checking Sheets & Importing...'
+                      : `Import ${validCsvRows.length} Valid Lead${validCsvRows.length === 1 ? '' : 's'}`}
+                  </span>
                 </button>
               </div>
 
@@ -666,23 +704,33 @@ export function DataCollectionView({
                 already exists in the RunBD database.
               </p>
 
-              <div className="rounded-xl p-4 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 space-y-2 text-xs">
+              <div className="rounded-xl p-4 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 space-y-2.5 text-xs">
                 <div className="flex justify-between gap-2">
-                  <span className="text-slate-500 dark:text-slate-400">Existing Customer</span>
+                  <span className="text-slate-500 dark:text-slate-400">Customer Name</span>
                   <span className="font-semibold text-slate-900 dark:text-slate-100">
                     {duplicateModal.existingLead.customerName}
+                  </span>
+                </div>
+                <div className="flex justify-between gap-2">
+                  <span className="text-slate-500 dark:text-slate-400">Assigned Agent</span>
+                  <span className="font-semibold text-slate-900 dark:text-slate-100">
+                    {duplicateModal.existingLead.assignedAgentName ?? 'Unassigned'}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-slate-500 dark:text-slate-400">Status</span>
+                  <StatusBadge status={duplicateModal.existingLead.status} compact />
+                </div>
+                <div className="flex justify-between gap-2">
+                  <span className="text-slate-500 dark:text-slate-400">Collector</span>
+                  <span className="font-semibold text-amber-700 dark:text-amber-300">
+                    {duplicateModal.existingLead.collectorName}
                   </span>
                 </div>
                 <div className="flex justify-between gap-2">
                   <span className="text-slate-500 dark:text-slate-400">Normalized Phone</span>
                   <span className="font-mono text-slate-900 dark:text-slate-100">
                     {formatBdPhoneDisplay(duplicateModal.existingLead.phone)}
-                  </span>
-                </div>
-                <div className="flex justify-between gap-2">
-                  <span className="text-slate-500 dark:text-slate-400">Originally Added By</span>
-                  <span className="font-semibold text-amber-700 dark:text-amber-300">
-                    {duplicateModal.existingLead.collectorName}
                   </span>
                 </div>
                 <div className="flex justify-between gap-2">

@@ -177,12 +177,16 @@ function doGet(e) {
       var mRows = masterSheet.getRange(2, 1, masterSheet.getLastRow() - 1, 10).getValues();
       for (var i = 0; i < mRows.length; i++) {
         var r = mRows[i];
-        if (!r[0]) continue;
+        var rowPhone = String(r[2] || '').replace(/^'+/, '').trim();
+        var rowFb = String(r[3] || '').trim();
+        var rowName = String(r[1] || '').trim();
+        if (!r[0] && !rowPhone && !rowFb && !rowName) continue;
+        var rowId = r[0] ? String(r[0]).trim() : ('SHEET-ROW-' + (i + 2));
         leads.push({
-          id: String(r[0]),
-          customerName: String(r[1] || ''),
-          phone: String(r[2] || '').replace(/^'+/, ''),
-          facebookLink: String(r[3] || ''),
+          id: rowId,
+          customerName: rowName,
+          phone: rowPhone,
+          facebookLink: rowFb,
           collectorName: String(r[4] || 'Farhan'),
           assignedAgentName: String(r[5] || '') === 'Unassigned' ? null : String(r[5] || ''),
           status: String(r[6] || 'Pending'),
@@ -219,12 +223,15 @@ function doGet(e) {
       var kRows = kawsarSheet.getRange(2, 1, kawsarSheet.getLastRow() - 1, 6).getValues();
       for (var k = 0; k < kRows.length; k++) {
         var kr = kRows[k];
-        if (!kr[0]) continue;
+        var postFb = String(kr[2] || '').trim();
+        var postWeb = String(kr[3] || '').trim();
+        if (!kr[0] && !postFb && !postWeb) continue;
+        var postId = kr[0] ? String(kr[0]).trim() : ('SHEET-PST-' + (k + 2));
         contentPosts.push({
-          id: String(kr[0]),
+          id: postId,
           note: String(kr[1] || ''),
-          facebookLink: String(kr[2] || ''),
-          websiteLink: String(kr[3] || ''),
+          facebookLink: postFb,
+          websiteLink: postWeb,
           posterName: String(kr[4] || 'Kawsar'),
           createdAt: kr[5] ? new Date(kr[5]).toISOString() : new Date().toISOString()
         });
