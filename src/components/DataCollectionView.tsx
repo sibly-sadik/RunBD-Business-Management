@@ -5,7 +5,9 @@ import {
   Download,
   ExternalLink,
   FileUp,
+  Loader2,
   PlusCircle,
+  Search,
   ShieldAlert,
   Upload,
   X,
@@ -29,6 +31,12 @@ interface DataCollectionViewProps {
   allLeads: Lead[];
   duplicateAttempts: DuplicateAttempt[];
   autoAssignEnabled: boolean;
+  onCheckPhoneDuplicate?: (rawPhone: string) => Promise<{
+    ok: boolean;
+    isDuplicate: boolean;
+    duplicate?: { lead: Lead; matchedBy: 'phone' | 'facebook' };
+    error?: string;
+  }>;
   onAddSingleLead: (input: {
     customerName: string;
     rawPhone: string;
@@ -48,6 +56,7 @@ export function DataCollectionView({
   allLeads,
   duplicateAttempts,
   autoAssignEnabled,
+  onCheckPhoneDuplicate,
   onAddSingleLead,
   onImportBulkLeads,
   onRecordDuplicateAttempt,
@@ -68,6 +77,15 @@ export function DataCollectionView({
     matchedBy: 'phone' | 'facebook';
     lead: Lead;
   } | null>(null);
+  const [phoneCheck, setPhoneCheck] = useState<{
+    status: 'idle' | 'checking' | 'available' | 'duplicate' | 'error';
+    phone: string;
+    message?: string;
+  }>({ status: 'idle', phone: '' });
+  const phoneCheckReqRef = useRef(0);
+  const inFlightPhoneRef = useRef('');
+  const recordedDupPhoneRef = useRef('');
+  const submitBtnRef = useRef<HTMLButtonElement>(null);
 
   // Bulk CSV state
   const [csvFileName, setCsvFileName] = useState('');
@@ -107,9 +125,147 @@ export function DataCollectionView({
     );
   }, [duplicateAttempts, currentUser]);
 
+  const flagDuplicateFound = (
+    dup: { matchedBy: 'phone' | 'facebook'; lead: Lead },
+    checkedPhone: string
+  ) => {
+    setSheetDuplicate(dup);
+    setPhoneCheck({
+      status: 'duplicate',
+      phone: checkedPhone,
+      message: `Duplicate found — already registered to ${dup.lead.customerName}.`,
+    });
+    if (recordedDupPhoneRef.current !== checkedPhone) {
+      recordedDupPhoneRef.current = checkedPhone;
+      onRecordDuplicateAttempt({
+        collectorId: currentUser.id,
+        collectorName: currentUser.name,
+        attemptedName: customerName.trim(),
+        attemptedPhone: rawPhone.trim(),
+        attemptedFacebook: facebookLink.trim(),
+        matchedBy: dup.matchedBy,
+        existingCollectorName: dup.lead.collectorName,
+        existingDate: dup.lead.createdAt,
+      });
+    }
+    setDuplicateModal({
+      matchedBy: dup.matchedBy,
+      existingLead: dup.lead,
+    });
+    setFormError(
+      `Duplicate Found: ${dup.lead.customerName} · Agent: ${
+        dup.lead.assignedAgentName ?? 'Unassigned'
+      } · Status: ${dup.lead.status} · Collector: ${
+        dup.lead.collectorName
+      } (${formatShortDate(dup.lead.createdAt)})`
+    );
+  };
+
+  const runEarlyPhoneCheck = async (trigger: 'blur' | 'button') => {
+    const targetPhone = normalizeBdPhone(rawPhone);
+    if (!targetPhone) {
+      if (trigger === 'button') {
+        setPhoneCheck({
+          status: 'error',
+          phone: rawPhone.trim(),
+          message:
+            'Enter a valid Bangladeshi phone number (e.g. 01712345678) before checking.',
+        });
+      }
+      return;
+    }
+
+    if (inFlightPhoneRef.current === targetPhone) {
+      return;
+    }
+
+    if (
+      trigger === 'blur' &&
+      phoneCheck.phone === targetPhone &&
+      phoneCheck.status !== 'idle'
+    ) {
+      return;
+    }
+
+    if (
+      trigger === 'button' &&
+      phoneCheck.phone === targetPhone &&
+      phoneCheck.status === 'duplicate' &&
+      activeDuplicate
+    ) {
+      setDuplicateModal({
+        matchedBy: activeDuplicate.matchedBy,
+        existingLead: activeDuplicate.lead,
+      });
+      return;
+    }
+
+    const localPhoneDup = findDuplicateLead(allLeads, targetPhone, '');
+    if (localPhoneDup) {
+      flagDuplicateFound(localPhoneDup, targetPhone);
+      return;
+    }
+
+    if (!onCheckPhoneDuplicate) {
+      return;
+    }
+
+    const reqId = ++phoneCheckReqRef.current;
+    inFlightPhoneRef.current = targetPhone;
+    setPhoneCheck({
+      status: 'checking',
+      phone: targetPhone,
+      message: 'Checking Sheet...',
+    });
+
+    try {
+      const res = await onCheckPhoneDuplicate(rawPhone);
+      if (phoneCheckReqRef.current !== reqId) return;
+
+      if (!res.ok) {
+        setPhoneCheck({
+          status: 'error',
+          phone: targetPhone,
+          message:
+            res.error ??
+            'Could not verify number with Google Sheets. Number was not marked available.',
+        });
+        return;
+      }
+
+      if (res.isDuplicate && res.duplicate) {
+        flagDuplicateFound(res.duplicate, targetPhone);
+        return;
+      }
+
+      setSheetDuplicate(null);
+      setPhoneCheck({
+        status: 'available',
+        phone: targetPhone,
+        message: 'Available — Not a duplicate in Sheet',
+      });
+    } catch (err) {
+      if (phoneCheckReqRef.current !== reqId) return;
+      setPhoneCheck({
+        status: 'error',
+        phone: targetPhone,
+        message:
+          err instanceof Error && err.message
+            ? err.message
+            : 'Could not verify number with Google Sheets.',
+      });
+    } finally {
+      if (inFlightPhoneRef.current === targetPhone) {
+        inFlightPhoneRef.current = '';
+      }
+    }
+  };
+
   const handleSingleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (submitting) return;
+    phoneCheckReqRef.current += 1;
+    inFlightPhoneRef.current = '';
     setFormError('');
 
     if (!customerName.trim()) {
@@ -170,6 +326,10 @@ export function DataCollectionView({
         return;
       }
 
+      phoneCheckReqRef.current += 1;
+      inFlightPhoneRef.current = '';
+      recordedDupPhoneRef.current = '';
+      setPhoneCheck({ status: 'idle', phone: '' });
       setSheetDuplicate(null);
       setCustomerName('');
       setRawPhone('');
@@ -392,18 +552,91 @@ export function DataCollectionView({
                   </span>
                 )}
               </div>
-              <input
-                id="lead-phone"
-                type="tel"
-                placeholder="+8801712345678 or 01712345678"
-                value={rawPhone}
-                onChange={(e) => {
-                  setRawPhone(e.target.value);
-                  setSheetDuplicate(null);
-                  setFormError('');
-                }}
-                className="w-full px-3.5 py-2.5 text-sm font-mono rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500"
-              />
+              <div className="flex flex-col sm:flex-row sm:items-stretch gap-2">
+                <input
+                  id="lead-phone"
+                  type="tel"
+                  placeholder="+8801712345678 or 01712345678"
+                  value={rawPhone}
+                  onChange={(e) => {
+                    phoneCheckReqRef.current += 1;
+                    inFlightPhoneRef.current = '';
+                    recordedDupPhoneRef.current = '';
+                    setRawPhone(e.target.value);
+                    setSheetDuplicate(null);
+                    setPhoneCheck({ status: 'idle', phone: '' });
+                    setFormError('');
+                  }}
+                  onBlur={(e) => {
+                    if (e.relatedTarget === submitBtnRef.current) return;
+                    void runEarlyPhoneCheck('blur');
+                  }}
+                  className="min-w-0 flex-1 px-3.5 py-2.5 text-sm font-mono rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500"
+                />
+                <button
+                  type="button"
+                  data-testid="check-phone-button"
+                  disabled={phoneCheck.status === 'checking' || submitting}
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => void runEarlyPhoneCheck('button')}
+                  className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0 disabled:opacity-60 cursor-pointer"
+                >
+                  {phoneCheck.status === 'checking' ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-600 dark:text-emerald-400" />
+                      <span>Checking Sheet...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Search className="w-3.5 h-3.5 text-slate-500 dark:text-slate-400" />
+                      <span>Check Number</span>
+                    </>
+                  )}
+                </button>
+              </div>
+
+              {phoneCheck.status === 'checking' && (
+                <p
+                  data-testid="phone-check-loading"
+                  className="mt-1.5 inline-flex items-center gap-1.5 text-xs font-medium text-slate-600 dark:text-slate-300"
+                >
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-600 dark:text-emerald-400 shrink-0" />
+                  <span>Checking Sheet for existing leads...</span>
+                </p>
+              )}
+
+              {phoneCheck.status === 'available' && !activeDuplicate && (
+                <p
+                  data-testid="phone-check-available"
+                  className="mt-1.5 inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-700 dark:text-emerald-400"
+                >
+                  <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                  <span>{phoneCheck.message ?? 'Available — Not a duplicate in Sheet'}</span>
+                </p>
+              )}
+
+              {phoneCheck.status === 'error' && (
+                <p
+                  role="alert"
+                  data-testid="phone-check-error"
+                  className="mt-1.5 flex items-start gap-1.5 text-xs font-medium text-rose-600 dark:text-rose-400"
+                >
+                  <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                  <span>{phoneCheck.message}</span>
+                </p>
+              )}
+
+              {phoneCheck.status === 'duplicate' && activeDuplicate && (
+                <p
+                  data-testid="phone-check-duplicate"
+                  className="mt-1.5 flex items-start gap-1.5 text-xs font-semibold text-amber-700 dark:text-amber-400"
+                >
+                  <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                  <span>
+                    Duplicate found in Sheet/database ({activeDuplicate.lead.customerName}) — submission blocked.
+                  </span>
+                </p>
+              )}
             </div>
 
             <div>
@@ -420,7 +653,9 @@ export function DataCollectionView({
                 value={facebookLink}
                 onChange={(e) => {
                   setFacebookLink(e.target.value);
-                  setSheetDuplicate(null);
+                  setSheetDuplicate((prev) =>
+                    prev?.matchedBy === 'facebook' ? null : prev
+                  );
                   setFormError('');
                 }}
                 className="w-full px-3.5 py-2.5 text-sm rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500"
@@ -456,6 +691,7 @@ export function DataCollectionView({
 
             <div className="md:col-span-2 flex items-center justify-end pt-2">
               <button
+                ref={submitBtnRef}
                 type="submit"
                 disabled={submitting}
                 className={`inline-flex items-center gap-2 px-5 py-2.5 rounded-lg text-white text-sm font-semibold transition-colors disabled:opacity-60 cursor-pointer ${

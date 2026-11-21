@@ -691,6 +691,103 @@ export default function App() {
     );
   };
 
+  const buildLeadFromSheetSummary = (
+    fallbackPhone: string,
+    summary: NonNullable<Awaited<ReturnType<typeof checkLeadDuplicateInSheets>>['existingLead']>
+  ): Lead => {
+    const existingPhone =
+      normalizeBdPhone(summary.phone) || summary.phone || fallbackPhone;
+    return {
+      id: summary.id,
+      customerName: summary.customerName,
+      phone: existingPhone,
+      rawPhone: existingPhone,
+      facebookLink: summary.facebookLink,
+      normalizedFacebookLink: normalizeFacebookUrl(summary.facebookLink),
+      notes: '',
+      collectorId: `collector-${summary.collectorName.toLowerCase()}`,
+      collectorName: summary.collectorName,
+      assignedAgentId: summary.assignedAgentName
+        ? `agent-${summary.assignedAgentName.toLowerCase()}`
+        : null,
+      assignedAgentName: summary.assignedAgentName,
+      status: summary.status,
+      followUpAt: null,
+      lastCallNotes: '',
+      createdAt: summary.createdAt,
+      updatedAt: summary.createdAt,
+    };
+  };
+
+  const handleCheckPhoneDuplicate = async (
+    rawPhone: string
+  ): Promise<{
+    ok: boolean;
+    isDuplicate: boolean;
+    duplicate?: { lead: Lead; matchedBy: 'phone' | 'facebook' };
+    error?: string;
+  }> => {
+    const normalizedPhone = normalizeBdPhone(rawPhone);
+    if (!normalizedPhone) {
+      return {
+        ok: false,
+        isDuplicate: false,
+        error:
+          'Enter a valid Bangladeshi phone number (e.g. 01712345678, 8801712345678, or +8801712345678).',
+      };
+    }
+
+    const currentLeads = mergeRemoteLeads(leadsRef.current, storage.getLeads());
+    const localDup = findDuplicateLead(currentLeads, normalizedPhone, '');
+    if (localDup) {
+      return {
+        ok: true,
+        isDuplicate: true,
+        duplicate: localDup,
+      };
+    }
+
+    const webhookUrl = settings.googleSheetsWebhookUrl.trim();
+    const sheetDup = await checkLeadDuplicateInSheets(
+      webhookUrl,
+      normalizedPhone,
+      '',
+      { timeoutMs: 15000 }
+    );
+
+    if (!sheetDup.ok) {
+      const errMsg =
+        sheetDup.error ??
+        'Unable to verify phone number against Google Sheets Master_Data.';
+      console.error('[RunBD] Early Google Sheets phone check failed:', errMsg);
+      setSyncStatus('error');
+      return {
+        ok: false,
+        isDuplicate: false,
+        error: errMsg,
+      };
+    }
+
+    setSyncStatus('synced');
+
+    if (sheetDup.isDuplicate && sheetDup.existingLead) {
+      const existingLead = buildLeadFromSheetSummary(
+        normalizedPhone,
+        sheetDup.existingLead
+      );
+      return {
+        ok: true,
+        isDuplicate: true,
+        duplicate: { lead: existingLead, matchedBy: sheetDup.matchedBy ?? 'phone' },
+      };
+    }
+
+    return {
+      ok: true,
+      isDuplicate: false,
+    };
+  };
+
   const handleAddSingleLead = async (input: {
     customerName: string;
     rawPhone: string;
@@ -753,30 +850,10 @@ export default function App() {
         };
       }
       if (sheetDup.isDuplicate && sheetDup.existingLead) {
-        const existingPhone =
-          normalizeBdPhone(sheetDup.existingLead.phone) ||
-          sheetDup.existingLead.phone ||
-          normalizedPhone;
-        const existingLead: Lead = {
-          id: sheetDup.existingLead.id,
-          customerName: sheetDup.existingLead.customerName,
-          phone: existingPhone,
-          rawPhone: existingPhone,
-          facebookLink: sheetDup.existingLead.facebookLink,
-          normalizedFacebookLink: normalizeFacebookUrl(sheetDup.existingLead.facebookLink),
-          notes: '',
-          collectorId: `collector-${sheetDup.existingLead.collectorName.toLowerCase()}`,
-          collectorName: sheetDup.existingLead.collectorName,
-          assignedAgentId: sheetDup.existingLead.assignedAgentName
-            ? `agent-${sheetDup.existingLead.assignedAgentName.toLowerCase()}`
-            : null,
-          assignedAgentName: sheetDup.existingLead.assignedAgentName,
-          status: sheetDup.existingLead.status,
-          followUpAt: null,
-          lastCallNotes: '',
-          createdAt: sheetDup.existingLead.createdAt,
-          updatedAt: sheetDup.existingLead.createdAt,
-        };
+        const existingLead = buildLeadFromSheetSummary(
+          normalizedPhone,
+          sheetDup.existingLead
+        );
         const matchedBy = sheetDup.matchedBy ?? 'phone';
         handleRecordDuplicateAttempt({
           collectorId: currentUser.id,
@@ -1712,6 +1789,7 @@ export default function App() {
             allLeads={leads}
             duplicateAttempts={duplicateAttempts}
             autoAssignEnabled={settings.autoAssignEnabled}
+            onCheckPhoneDuplicate={handleCheckPhoneDuplicate}
             onAddSingleLead={handleAddSingleLead}
             onImportBulkLeads={handleImportBulkLeads}
             onRecordDuplicateAttempt={handleRecordDuplicateAttempt}
