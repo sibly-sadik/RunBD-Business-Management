@@ -46,6 +46,8 @@ export interface Lead {
   lastCallNotes: string;
   createdAt: string; // ISO string
   updatedAt: string; // ISO string
+  collectedDate?: string; // Optional YYYY-MM-DD stored collection date
+  date?: string; // Optional YYYY-MM-DD legacy stored date
 }
 
 export interface CallLog {
@@ -71,7 +73,9 @@ export type AuditAction =
   | 'LEAD_REASSIGNED'
   | 'SETTINGS_UPDATED'
   | 'SHEETS_SYNCED'
-  | 'POST_LINK_LOGGED';
+  | 'POST_LINK_LOGGED'
+  | 'PAID_CUSTOMER_ADDED'
+  | 'PAID_CUSTOMER_RENEWED';
 
 export interface AuditLog {
   id: string;
@@ -160,4 +164,24 @@ export interface ContentPost {
   posterId: string;
   posterName: string;
   createdAt: string; // ISO string
+}
+
+export type RenewalStatus = 'Active' | 'Renewed' | 'Expired';
+
+export const RENEWAL_STATUSES: RenewalStatus[] = ['Active', 'Renewed', 'Expired'];
+
+export interface PaidCustomer {
+  id: string;
+  leadId: string;
+  customerName: string;
+  phone: string; // Normalized canonical 01XXXXXXXXX
+  assignedAgentId: string | null;
+  assignedAgentName: string | null;
+  confirmedDate: string; // YYYY-MM-DD
+  renewalDate: string; // YYYY-MM-DD (Confirmed Date + 30 days)
+  renewalStatus: RenewalStatus;
+  lastRenewedAt: string | null;
+  notes: string;
+  createdAt: string; // ISO string
+  updatedAt: string; // ISO string
 }

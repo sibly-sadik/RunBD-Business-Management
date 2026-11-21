@@ -1,27 +1,41 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  addDaysToYmd,
   assignLeadsRoundRobin,
   authenticateUser,
   buildTelUrl,
   buildWhatsAppUrl,
   computeAgentPerformance,
   computeDashboardMetrics,
+  computeDaysRemaining,
+  computeEffectiveRenewalStatus,
   computeFinalDailySummary,
   computeKawsarPostStats,
+  createPaidCustomerFromLead,
+  filterTodayCallLogs,
+  filterTodayDuplicateAttempts,
+  filterTodayLeads,
+  filterTodayPosts,
   findDuplicateLead,
   findDuplicatePost,
   generateDailyReportCsv,
   generateFinalDailySummaryCsv,
+  generatePaidCustomersCsv,
+  getDueRenewalCustomers,
+  getLeadCollectedYmd,
   getScheduledFollowUps,
+  isTimestampToday,
   isValidPostUrl,
   normalizeBdPhone,
   normalizeFacebookUrl,
   normalizePostUrl,
   parseCsvLeads,
+  parseDateToYmd,
+  renewPaidCustomer,
 } from './leadLogic';
 import { DEMO_USERS } from '../data/seedData';
-import { CallLog, ContentPost, Lead, User } from '../types';
+import { CallLog, ContentPost, DuplicateAttempt, Lead, PaidCustomer, User } from '../types';
 
 const mockAgents: User[] = [
   { id: 'a1', name: 'Tanjin', email: 'tanjin@runbd.com', password: '123', role: 'agent', title: 'Agent', avatarInitials: 'TJ' },
@@ -550,6 +564,241 @@ test('computeFinalDailySummary and generateFinalDailySummaryCsv consolidate 6 ag
   assert.ok(csv.includes('DATA COLLECTORS HISTORY'));
   assert.ok(csv.includes('CONTENT & LINK POSTER (KAWSAR)'));
   assert.ok(csv.includes('Kawsar,2,1,2'));
+});
+
+test('Today-only filters isolate current day records so agents, collectors, and poster reset to 0 daily', () => {
+  const now = new Date(2026, 10, 21, 9, 15, 0);
+  const todayIso = new Date(2026, 10, 21, 8, 30, 0).toISOString();
+  const yesterdayIso = new Date(2026, 10, 20, 23, 50, 0).toISOString();
+
+  assert.equal(isTimestampToday(todayIso, now), true);
+  assert.equal(isTimestampToday(yesterdayIso, now), false);
+
+  const mixedLeads: Lead[] = [
+    { ...existingLeads[0], id: 'L-YEST', createdAt: yesterdayIso, updatedAt: todayIso },
+    { ...existingLeads[0], id: 'L-TODAY', createdAt: todayIso, updatedAt: todayIso },
+  ];
+  assert.deepEqual(
+    filterTodayLeads(mixedLeads, now).map((l) => l.id),
+    ['L-TODAY']
+  );
+  assert.equal(filterTodayLeads([{ ...existingLeads[0], id: 'L-YEST', createdAt: yesterdayIso }], now).length, 0);
+
+  const mixedLogs: CallLog[] = [
+    {
+      id: 'C-YEST',
+      leadId: 'L-YEST',
+      customerName: 'Old',
+      phone: '01711223344',
+      agentId: 'a1',
+      agentName: 'Tanjin',
+      previousStatus: 'Pending',
+      newStatus: 'Interested',
+      notes: '',
+      followUpAt: null,
+      timestamp: yesterdayIso,
+    },
+    {
+      id: 'C-TODAY',
+      leadId: 'L-TODAY',
+      customerName: 'New',
+      phone: '01811223344',
+      agentId: 'a1',
+      agentName: 'Tanjin',
+      previousStatus: 'Pending',
+      newStatus: 'Order Confirmed',
+      notes: '',
+      followUpAt: null,
+      timestamp: todayIso,
+    },
+  ];
+  assert.deepEqual(
+    filterTodayCallLogs(mixedLogs, now).map((c) => c.id),
+    ['C-TODAY']
+  );
+
+  const mixedPosts: ContentPost[] = [
+    {
+      id: 'P-YEST',
+      facebookLink: 'https://facebook.com/runbd/posts/old',
+      normalizedFacebookLink: 'facebook.com/runbd/posts/old',
+      websiteLink: 'https://runbd.com/old',
+      normalizedWebsiteLink: 'runbd.com/old',
+      note: 'Yesterday post',
+      posterId: 'poster-kawsar',
+      posterName: 'Kawsar',
+      createdAt: yesterdayIso,
+    },
+  ];
+  assert.equal(filterTodayPosts(mixedPosts, now).length, 0);
+  const kawsarDayStartStats = computeKawsarPostStats(mixedPosts, now);
+  assert.equal(kawsarDayStartStats.todayCount, 0);
+  assert.equal(kawsarDayStartStats.todayFacebookCount, 0);
+  assert.equal(kawsarDayStartStats.todayWebsiteCount, 0);
+
+  const mixedDups: DuplicateAttempt[] = [
+    {
+      id: 'D-YEST',
+      collectorId: 'collector-farhan',
+      collectorName: 'Farhan',
+      attemptedName: 'Old',
+      attemptedPhone: '01711223344',
+      attemptedFacebook: '',
+      matchedBy: 'phone',
+      existingCollectorName: 'Naim',
+      existingDate: yesterdayIso,
+      timestamp: yesterdayIso,
+    },
+    {
+      id: 'D-TODAY',
+      collectorId: 'collector-farhan',
+      collectorName: 'Farhan',
+      attemptedName: 'New',
+      attemptedPhone: '01811223344',
+      attemptedFacebook: '',
+      matchedBy: 'phone',
+      existingCollectorName: 'Naim',
+      existingDate: yesterdayIso,
+      timestamp: todayIso,
+    },
+  ];
+  assert.deepEqual(
+    filterTodayDuplicateAttempts(mixedDups, now).map((d) => d.id),
+    ['D-TODAY']
+  );
+});
+
+test('Paid Customers: createPaidCustomerFromLead sets Today and +30 days, renewPaidCustomer extends +1 month, and 2-day advance alerts scope cleanly', () => {
+  const now = new Date(2026, 10, 20, 10, 0, 0); // 2026-11-20
+  assert.equal(addDaysToYmd('2026-11-20', 30), '2026-12-20');
+  assert.equal(addDaysToYmd('2026-11-20', 2), '2026-11-22');
+
+  const lead: Lead = {
+    ...existingLeads[0],
+    id: 'RBD-ORDER-1',
+    customerName: 'Nusrat Jahan',
+    phone: '01812345678',
+    rawPhone: '+8801812345678',
+    assignedAgentId: 'a1',
+    assignedAgentName: 'Tanjin',
+    status: 'Order Confirmed',
+    lastCallNotes: '1 month subscription confirmed',
+  };
+
+  const created = createPaidCustomerFromLead(lead, now);
+  assert.equal(created.id, 'PC-RBD-ORDER-1');
+  assert.equal(created.leadId, 'RBD-ORDER-1');
+  assert.equal(created.confirmedDate, '2026-11-20');
+  assert.equal(created.renewalDate, '2026-12-20');
+  assert.equal(created.renewalStatus, 'Active');
+  assert.equal(computeDaysRemaining(created.renewalDate, now), 30);
+  assert.equal(computeEffectiveRenewalStatus(created, now), 'Active');
+
+  const due2Days: PaidCustomer = {
+    ...created,
+    id: 'PC-DUE-2',
+    customerName: 'Due In 2 Days',
+    renewalDate: '2026-11-22',
+    assignedAgentId: 'a1',
+    assignedAgentName: 'Tanjin',
+    renewalStatus: 'Active',
+  };
+  const dueTodayOtherAgent: PaidCustomer = {
+    ...created,
+    id: 'PC-DUE-0',
+    customerName: 'Due Today',
+    renewalDate: '2026-11-20',
+    assignedAgentId: 'a2',
+    assignedAgentName: 'Kathy',
+    renewalStatus: 'Active',
+  };
+  const alreadyExpired: PaidCustomer = {
+    ...created,
+    id: 'PC-EXP',
+    customerName: 'Expired Customer',
+    renewalDate: '2026-11-18',
+    assignedAgentId: 'a1',
+    assignedAgentName: 'Tanjin',
+    renewalStatus: 'Active',
+  };
+  const explicitlyExpiredToday: PaidCustomer = {
+    ...created,
+    id: 'PC-EXP-FLAG',
+    customerName: 'Explicitly Expired',
+    renewalDate: '2026-11-21',
+    assignedAgentId: 'a1',
+    assignedAgentName: 'Tanjin',
+    renewalStatus: 'Expired',
+  };
+
+  assert.equal(computeEffectiveRenewalStatus(alreadyExpired, now), 'Expired');
+
+  const allDue = getDueRenewalCustomers(
+    [created, due2Days, dueTodayOtherAgent, alreadyExpired, explicitlyExpiredToday],
+    now
+  );
+  assert.deepEqual(
+    allDue.map((d) => d.customer.id),
+    ['PC-DUE-0', 'PC-DUE-2']
+  );
+  assert.equal(allDue[0].daysRemaining, 0);
+  assert.equal(allDue[1].daysRemaining, 2);
+
+  // Agent scoping shows only that agent's due renewals
+  const agent1Due = getDueRenewalCustomers(
+    [created, due2Days, dueTodayOtherAgent, alreadyExpired],
+    now,
+    'a1'
+  );
+  assert.deepEqual(
+    agent1Due.map((d) => d.customer.id),
+    ['PC-DUE-2']
+  );
+
+  // Renewing extends +30 days from existing future renewalDate and clears the 2-day alert
+  const renewed = renewPaidCustomer(due2Days, now);
+  assert.equal(renewed.renewalStatus, 'Renewed');
+  assert.equal(renewed.renewalDate, '2026-12-22');
+  assert.equal(computeDaysRemaining(renewed.renewalDate, now), 32);
+  assert.equal(getDueRenewalCustomers([renewed], now).length, 0);
+
+  // Renewing an expired customer extends +30 days from Today (not old past date)
+  const renewedExpired = renewPaidCustomer(alreadyExpired, now);
+  assert.equal(renewedExpired.renewalStatus, 'Renewed');
+  assert.equal(renewedExpired.renewalDate, '2026-12-20');
+
+  const csv = generatePaidCustomersCsv([due2Days, renewed], now);
+  assert.ok(csv.startsWith('\uFEFF'));
+  assert.ok(csv.includes('Customer Name,Phone,Assigned Agent,Confirmed Date,Renewal Date,Days Remaining,Renewal Status'));
+  assert.ok(csv.includes('Due In 2 Days,01812345678,Tanjin,2026-11-20,2026-11-22,2,Active'));
+});
+
+test('filterTodayLeads strictly checks collectedDate/date/createdAt (including bare YYYY-MM-DD) and never falls back to updatedAt or missing date', () => {
+  const now = new Date(2026, 10, 21, 10, 30, 0); // 2026-11-21 local
+  const todayIso = new Date(2026, 10, 21, 9, 0, 0).toISOString();
+
+  assert.equal(parseDateToYmd('2026-11-20'), '2026-11-20');
+  assert.equal(parseDateToYmd('2026-11-21'), '2026-11-21');
+  assert.equal(parseDateToYmd(''), null);
+  assert.equal(parseDateToYmd(undefined), null);
+
+  const leadsToCheck: Lead[] = [
+    { ...existingLeads[0], id: 'L-BARE-YEST', createdAt: '2026-11-20', updatedAt: todayIso },
+    { ...existingLeads[0], id: 'L-COLLECTED-YEST', collectedDate: '2026-11-20', createdAt: todayIso, updatedAt: todayIso },
+    { ...existingLeads[0], id: 'L-LEGACY-YEST', date: '2026-11-20', createdAt: todayIso, updatedAt: todayIso },
+    { ...existingLeads[0], id: 'L-MISSING-DATE', createdAt: '', updatedAt: todayIso },
+    { ...existingLeads[0], id: 'L-BARE-TODAY', createdAt: '2026-11-21', updatedAt: todayIso },
+    { ...existingLeads[0], id: 'L-ISO-TODAY', createdAt: todayIso, updatedAt: todayIso },
+  ];
+
+  assert.equal(getLeadCollectedYmd(leadsToCheck[0]), '2026-11-20');
+  assert.equal(getLeadCollectedYmd(leadsToCheck[3]), null);
+
+  const result = filterTodayLeads(leadsToCheck, now);
+  assert.deepEqual(
+    result.map((l) => l.id),
+    ['L-BARE-TODAY', 'L-ISO-TODAY']
+  );
 });
 
 

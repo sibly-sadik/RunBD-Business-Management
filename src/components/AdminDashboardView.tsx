@@ -20,17 +20,22 @@ import {
   computeAgentPerformance,
   computeCollectorStats,
   computeDashboardMetrics,
+  DueRenewalItem,
   generateDailyReportCsv,
   isWithinDateRange,
 } from '../utils/leadLogic';
 import { AdminAgentDetailSection } from './AdminAgentDetailSection';
 import { KawsarPostsView } from './KawsarPostsView';
+import { RenewalAlertBanner } from './RenewalAlertBanner';
 
 interface AdminDashboardViewProps {
   leads: Lead[];
   callLogs: CallLog[];
   duplicateAttempts: DuplicateAttempt[];
   contentPosts: ContentPost[];
+  dueRenewals: DueRenewalItem[];
+  onMarkPaidCustomerRenewed: (customerId: string) => void;
+  onOpenPaidCustomers: () => void;
   onDownloadDailyReport: (filename: string) => void;
 }
 
@@ -49,6 +54,9 @@ export function AdminDashboardView({
   callLogs,
   duplicateAttempts,
   contentPosts,
+  dueRenewals,
+  onMarkPaidCustomerRenewed,
+  onOpenPaidCustomers,
   onDownloadDailyReport,
 }: AdminDashboardViewProps) {
   const [selectedAgentTab, setSelectedAgentTab] = useState<string>('overview');
@@ -133,6 +141,14 @@ export function AdminDashboardView({
 
   return (
     <div className="space-y-6">
+      {/* 2-Day Advance Renewal Notification Banner */}
+      <RenewalAlertBanner
+        dueItems={dueRenewals}
+        audience="admin"
+        onMarkRenewed={onMarkPaidCustomerRenewed}
+        onViewAllPaidCustomers={onOpenPaidCustomers}
+      />
+
       {/* Header & Date Filter Bar */}
       <div className="flex flex-col xl:flex-row xl:items-center xl:justify-between gap-4">
         <div>

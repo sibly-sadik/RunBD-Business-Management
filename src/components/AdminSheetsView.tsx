@@ -10,6 +10,7 @@ import {
   RefreshCw,
   RotateCcw,
   Save,
+  Trash2,
   X,
 } from 'lucide-react';
 import { GOOGLE_APPS_SCRIPT_CODE } from '../data/seedData';
@@ -26,6 +27,7 @@ interface AdminSheetsViewProps {
   onSaveWebhookUrl: (url: string) => void;
   onTestAndSync: (url: string) => Promise<void>;
   onPullLatest: (url: string) => Promise<void>;
+  onClearCacheAndSyncToday: (url: string) => Promise<void>;
 }
 
 export function AdminSheetsView({
@@ -37,12 +39,14 @@ export function AdminSheetsView({
   onSaveWebhookUrl,
   onTestAndSync,
   onPullLatest,
+  onClearCacheAndSyncToday,
 }: AdminSheetsViewProps) {
   const [urlInput, setUrlInput] = useState(webhookUrl);
   const [scriptModalOpen, setScriptModalOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const [testing, setTesting] = useState(false);
   const [pulling, setPulling] = useState(false);
+  const [clearingCache, setClearingCache] = useState(false);
 
   useEffect(() => {
     setUrlInput(webhookUrl);
@@ -73,6 +77,15 @@ export function AdminSheetsView({
       await onPullLatest(urlInput.trim());
     } finally {
       setPulling(false);
+    }
+  };
+
+  const handleClearCacheAndSyncToday = async () => {
+    setClearingCache(true);
+    try {
+      await onClearCacheAndSyncToday(urlInput.trim());
+    } finally {
+      setClearingCache(false);
     }
   };
 
@@ -177,7 +190,7 @@ export function AdminSheetsView({
 
             <button
               type="button"
-              disabled={testing || pulling || !urlInput.trim()}
+              disabled={testing || pulling || clearingCache || !urlInput.trim()}
               onClick={handleTest}
               className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-semibold transition-colors cursor-pointer"
             >
@@ -187,12 +200,25 @@ export function AdminSheetsView({
 
             <button
               type="button"
-              disabled={pulling || testing || !urlInput.trim()}
+              disabled={pulling || testing || clearingCache || !urlInput.trim()}
               onClick={handlePull}
               className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-lg border border-emerald-500/40 bg-emerald-500/10 hover:bg-emerald-500/20 disabled:opacity-50 text-emerald-700 dark:text-emerald-300 text-xs font-semibold transition-colors cursor-pointer"
             >
               <DownloadCloud className={`w-3.5 h-3.5 ${pulling ? 'animate-pulse' : ''}`} />
-              <span>{pulling ? 'Pulling...' : 'Pull Latest Data'}</span>
+              <span>{pulling ? 'Syncing...' : 'Pull Today + Paid Customers'}</span>
+            </button>
+
+            <button
+              type="button"
+              data-testid="clear-cache-sync-today-btn"
+              disabled={clearingCache || pulling || testing || !urlInput.trim()}
+              onClick={handleClearCacheAndSyncToday}
+              className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-lg border border-amber-500/40 bg-amber-500/10 hover:bg-amber-500/20 disabled:opacity-50 text-amber-700 dark:text-amber-300 text-xs font-semibold transition-colors cursor-pointer"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              <span>
+                {clearingCache ? 'Clearing & Syncing...' : 'Clear Local Cache & Sync Today'}
+              </span>
             </button>
 
             {urlInput.trim() !== defaultWebhookUrl && (
@@ -420,6 +446,19 @@ export function AdminSheetsView({
           <p className="mt-1 text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
             Upserts one daily executive row combining all 6 agents&apos; calls &amp; orders, Farhan
             &amp; Naim lead counts, and Kawsar&apos;s Facebook &amp; Website links.
+          </p>
+        </div>
+
+        <div className="glass-panel rounded-2xl p-5">
+          <p className="text-xs font-mono font-semibold text-amber-600 dark:text-amber-400">
+            Core Tab 6: Paid_Customers
+          </p>
+          <p className="mt-2 text-sm font-semibold text-slate-900 dark:text-white">
+            1-Month Renewals (Two-Way)
+          </p>
+          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+            Auto-syncs Order Confirmed customers with 30-day renewal dates and pulls manual sheet
+            status or renewal edits back into the app.
           </p>
         </div>
       </section>

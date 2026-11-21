@@ -251,6 +251,56 @@ service cloud.firestore {
       && isNullableString(data.lastSyncedAt, 64);
     }
 
+    function isValidRenewalStatus(status) {
+      return status in ['Active', 'Renewed', 'Expired'];
+    }
+
+    function isValidPaidCustomer(data) {
+      return data.keys().hasAll([
+        'id',
+        'leadId',
+        'customerName',
+        'phone',
+        'assignedAgentId',
+        'assignedAgentName',
+        'confirmedDate',
+        'renewalDate',
+        'renewalStatus',
+        'lastRenewedAt',
+        'notes',
+        'createdAt',
+        'updatedAt'
+      ])
+      && data.keys().hasOnly([
+        'id',
+        'leadId',
+        'customerName',
+        'phone',
+        'assignedAgentId',
+        'assignedAgentName',
+        'confirmedDate',
+        'renewalDate',
+        'renewalStatus',
+        'lastRenewedAt',
+        'notes',
+        'createdAt',
+        'updatedAt'
+      ])
+      && isValidId(data.id)
+      && data.leadId is string && data.leadId.size() <= 128
+      && data.customerName is string && data.customerName.size() >= 1 && data.customerName.size() <= 200
+      && data.phone is string && data.phone.size() <= 32
+      && isNullableString(data.assignedAgentId, 64)
+      && isNullableString(data.assignedAgentName, 100)
+      && data.confirmedDate is string && data.confirmedDate.size() <= 32
+      && data.renewalDate is string && data.renewalDate.size() <= 32
+      && isValidRenewalStatus(data.renewalStatus)
+      && isNullableString(data.lastRenewedAt, 64)
+      && data.notes is string && data.notes.size() <= 2000
+      && data.createdAt is string && data.createdAt.size() <= 64
+      && data.updatedAt is string && data.updatedAt.size() <= 64;
+    }
+
     // Connection probe document
     match /test/connection {
       allow get: if true;
@@ -320,6 +370,32 @@ service cloud.firestore {
       allow get: if settingId == 'global';
       allow list: if false;
       allow create, update: if settingId == 'global' && isValidSettings(incoming());
+      allow delete: if false;
+    }
+
+    // Paid Customers & 1-Month Renewal Tracking
+    match /paidCustomers/{customerId} {
+      allow get: if isValidId(customerId);
+      allow list: if true;
+      allow create: if isValidId(customerId)
+        && incoming().id == customerId
+        && isValidPaidCustomer(incoming());
+      allow update: if isValidId(customerId)
+        && isValidPaidCustomer(incoming())
+        && incoming().id == existing().id
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'customerName',
+          'phone',
+          'assignedAgentId',
+          'assignedAgentName',
+          'confirmedDate',
+          'renewalDate',
+          'renewalStatus',
+          'lastRenewedAt',
+          'notes',
+          'updatedAt'
+        ]);
       allow delete: if false;
     }
   }

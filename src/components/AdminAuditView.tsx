@@ -17,6 +17,8 @@ const ACTION_LABELS: Record<AuditAction, string> = {
   SETTINGS_UPDATED: 'Settings Updated',
   SHEETS_SYNCED: 'Sheets Synced',
   POST_LINK_LOGGED: 'Post Link Logged',
+  PAID_CUSTOMER_ADDED: 'Paid Customer Added',
+  PAID_CUSTOMER_RENEWED: 'Customer Renewed (+1 Mo)',
 };
 
 export function AdminAuditView({ auditLogs }: AdminAuditViewProps) {

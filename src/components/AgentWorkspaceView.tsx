@@ -15,14 +15,18 @@ import { CALL_STATUSES, CallLog, CallStatus, Lead, User } from '../types';
 import {
   buildTelUrl,
   buildWhatsAppUrl,
+  DueRenewalItem,
+  filterTodayCallLogs,
+  filterTodayLeads,
   formatBdPhoneDisplay,
   formatDateTime,
   formatShortDate,
   formatTime,
+  getLocalDateString,
   getScheduledFollowUps,
   isFollowUpDueToday,
-  isWithinDateRange,
 } from '../utils/leadLogic';
+import { RenewalAlertBanner } from './RenewalAlertBanner';
 import { StatusBadge } from './StatusBadge';
 
 interface AgentWorkspaceViewProps {
@@ -30,6 +34,9 @@ interface AgentWorkspaceViewProps {
   leads: Lead[];
   callLogs: CallLog[];
   callScript: string;
+  dueRenewals: DueRenewalItem[];
+  onMarkPaidCustomerRenewed: (customerId: string) => void;
+  onOpenPaidCustomers: () => void;
   onUpdateCallScript: (script: string) => void;
   onLogCall: (input: {
     leadId: string;
@@ -44,6 +51,9 @@ export function AgentWorkspaceView({
   leads,
   callLogs,
   callScript,
+  dueRenewals,
+  onMarkPaidCustomerRenewed,
+  onOpenPaidCustomers,
   onUpdateCallScript,
   onLogCall,
 }: AgentWorkspaceViewProps) {
@@ -60,9 +70,12 @@ export function AgentWorkspaceView({
   const [modalFollowUpTime, setModalFollowUpTime] = useState('');
   const [modalNotes, setModalNotes] = useState('');
 
+  const todayStr = getLocalDateString();
+
+  // Strict Today-only visibility: Agents only see leads assigned Today and Today's call logs
   const myLeads = useMemo(
     () =>
-      leads
+      filterTodayLeads(leads)
         .filter((l) => l.assignedAgentId === agent.id)
         .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()),
     [leads, agent.id]
@@ -70,28 +83,34 @@ export function AgentWorkspaceView({
 
   const myCallHistory = useMemo(
     () =>
-      callLogs
+      filterTodayCallLogs(callLogs)
         .filter((c) => c.agentId === agent.id)
         .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()),
     [callLogs, agent.id]
   );
 
-  const myCallsToday = useMemo(
-    () =>
-      myCallHistory.filter((c) =>
-        isWithinDateRange(c.timestamp, { preset: 'today', startDate: '', endDate: '' })
-      ).length,
-    [myCallHistory]
-  );
+  const myCallsToday = myCallHistory.length;
 
   const scheduledFollowUps = useMemo(
-    () => getScheduledFollowUps(leads, agent.id),
-    [leads, agent.id]
+    () => getScheduledFollowUps(myLeads, agent.id),
+    [myLeads, agent.id]
   );
 
   const todayFollowUpsCount = useMemo(
     () => scheduledFollowUps.filter((l) => isFollowUpDueToday(l.followUpAt)).length,
     [scheduledFollowUps]
+  );
+
+  const pendingFollowUpCount = useMemo(
+    () =>
+      myLeads.filter(
+        (l) =>
+          l.status === 'Pending' ||
+          l.status === 'Busy / Call Later' ||
+          l.status === 'Interested' ||
+          Boolean(l.followUpAt)
+      ).length,
+    [myLeads]
   );
 
   const confirmedCount = useMemo(
@@ -169,6 +188,14 @@ export function AgentWorkspaceView({
 
   return (
     <div className="space-y-6">
+      {/* 2-Day Advance Renewal Notification Banner */}
+      <RenewalAlertBanner
+        dueItems={dueRenewals}
+        audience="agent"
+        onMarkRenewed={onMarkPaidCustomerRenewed}
+        onViewAllPaidCustomers={onOpenPaidCustomers}
+      />
+
       {/* Dedicated Agent Workspace Header & Section Tabs */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
@@ -176,7 +203,7 @@ export function AgentWorkspaceView({
             {agent.name}&apos;s Dedicated Workspace
           </h1>
           <p className="text-sm text-slate-500 dark:text-slate-400 mt-0.5">
-            Personal assigned leads, scheduled callbacks, and call log history.
+            Today ({todayStr}) &middot; Assigned leads, calls, and callbacks reset daily.
           </p>
         </div>
 
@@ -209,41 +236,55 @@ export function AgentWorkspaceView({
                 : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
             }`}
           >
-            Call Log History ({myCallHistory.length})
+            Today&apos;s Call Logs ({myCallHistory.length})
           </button>
         </div>
       </div>
 
-      {/* Personal KPI Strip */}
+      {/* Personal Today-Only KPI Strip */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="glass-panel rounded-xl p-4">
           <p className="text-xs font-medium text-slate-500 dark:text-slate-400">Assigned Leads</p>
-          <p className="mt-1.5 text-2xl font-bold font-mono tabular-nums text-slate-900 dark:text-white">
+          <p
+            data-testid="agent-assigned-counter"
+            className="mt-1.5 text-2xl font-bold font-mono tabular-nums text-slate-900 dark:text-white"
+          >
             {myLeads.length}
           </p>
         </div>
         <div className="glass-panel rounded-xl p-4">
-          <p className="text-xs font-medium text-slate-500 dark:text-slate-400">Calls Logged Today</p>
-          <p className="mt-1.5 text-2xl font-bold font-mono tabular-nums text-sky-600 dark:text-sky-400">
+          <p className="text-xs font-medium text-slate-500 dark:text-slate-400">Calls Made</p>
+          <p
+            data-testid="agent-calls-counter"
+            className="mt-1.5 text-2xl font-bold font-mono tabular-nums text-sky-600 dark:text-sky-400"
+          >
             {myCallsToday}
           </p>
         </div>
         <div className="glass-panel rounded-xl p-4">
-          <p className="text-xs font-medium text-slate-500 dark:text-slate-400">Orders Confirmed</p>
-          <p className="mt-1.5 text-2xl font-bold font-mono tabular-nums text-emerald-600 dark:text-emerald-400">
+          <p className="text-xs font-medium text-slate-500 dark:text-slate-400">Confirmed Orders</p>
+          <p
+            data-testid="agent-confirmed-counter"
+            className="mt-1.5 text-2xl font-bold font-mono tabular-nums text-emerald-600 dark:text-emerald-400"
+          >
             {confirmedCount}
           </p>
         </div>
         <div className="glass-panel rounded-xl p-4">
           <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
-            Scheduled Follow-ups
+            Pending / Follow-up
           </p>
           <p
             data-testid="agent-followup-counter"
             className="mt-1.5 text-2xl font-bold font-mono tabular-nums text-amber-600 dark:text-amber-400"
           >
-            {scheduledFollowUps.length}
+            {pendingFollowUpCount}
           </p>
+          {scheduledFollowUps.length > 0 && (
+            <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400 tabular-nums">
+              {scheduledFollowUps.length} scheduled callback{scheduledFollowUps.length === 1 ? '' : 's'}
+            </p>
+          )}
         </div>
       </div>
 

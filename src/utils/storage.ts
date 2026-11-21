@@ -1,9 +1,22 @@
-import { AppSettings, AuditLog, CallLog, ContentPost, DuplicateAttempt, Lead } from '../types';
-import type { FinalDailySummary } from './leadLogic';
 import {
+  AppSettings,
+  AuditLog,
+  CallLog,
+  ContentPost,
+  DuplicateAttempt,
+  Lead,
+  PaidCustomer,
+} from '../types';
+import { FinalDailySummary, getLocalDateString } from './leadLogic';
+import {
+  filterPullPayloadByDate,
   getDefaultWebhookUrl,
+  LeadDuplicateCheckResult,
   ParsedPullPayload,
+  parseLeadDuplicateCheckResponse,
+  parsePostDuplicateCheckResponse,
   parsePullPayload,
+  PostDuplicateCheckResult,
   resolveWebhookUrl,
 } from './sheetsSync';
 import {
@@ -12,6 +25,7 @@ import {
   createSeedContentPosts,
   createSeedDuplicateAttempts,
   createSeedLeads,
+  createSeedPaidCustomers,
   DEFAULT_SETTINGS,
 } from '../data/seedData';
 
@@ -29,6 +43,7 @@ const STORAGE_KEYS = {
   AUDIT_LOGS: 'runbd_audit_logs_v2',
   DUPLICATES: 'runbd_duplicates_v2',
   CONTENT_POSTS: 'runbd_content_posts_v2',
+  PAID_CUSTOMERS: 'runbd_paid_customers_v1',
   SETTINGS: 'runbd_settings_v2',
   SESSION_USER_ID: 'runbd_session_user_v2',
   THEME: 'runbd_theme_v1',
@@ -59,6 +74,12 @@ function safeWrite<T>(key: string, value: T): void {
 export const storage = {
   getLeads: () => safeRead<Lead[]>(STORAGE_KEYS.LEADS, createSeedLeads),
   saveLeads: (leads: Lead[]) => safeWrite(STORAGE_KEYS.LEADS, leads),
+  clearLeadsCache: () => {
+    safeWrite<Lead[]>(STORAGE_KEYS.LEADS, []);
+    safeWrite<CallLog[]>(STORAGE_KEYS.CALL_LOGS, []);
+    safeWrite<ContentPost[]>(STORAGE_KEYS.CONTENT_POSTS, []);
+    safeWrite<DuplicateAttempt[]>(STORAGE_KEYS.DUPLICATES, []);
+  },
 
   getCallLogs: () => safeRead<CallLog[]>(STORAGE_KEYS.CALL_LOGS, createSeedCallLogs),
   saveCallLogs: (logs: CallLog[]) => safeWrite(STORAGE_KEYS.CALL_LOGS, logs),
@@ -73,6 +94,11 @@ export const storage = {
   getContentPosts: () =>
     safeRead<ContentPost[]>(STORAGE_KEYS.CONTENT_POSTS, createSeedContentPosts),
   saveContentPosts: (posts: ContentPost[]) => safeWrite(STORAGE_KEYS.CONTENT_POSTS, posts),
+
+  getPaidCustomers: () =>
+    safeRead<PaidCustomer[]>(STORAGE_KEYS.PAID_CUSTOMERS, createSeedPaidCustomers),
+  savePaidCustomers: (customers: PaidCustomer[]) =>
+    safeWrite(STORAGE_KEYS.PAID_CUSTOMERS, customers),
 
   getSettings: (): AppSettings => {
     const settings = safeRead<AppSettings>(STORAGE_KEYS.SETTINGS, () => ({
@@ -133,8 +159,10 @@ export interface SheetsSyncPayload {
     | 'TEST_SYNC'
     | 'FULL_SYNC'
     | 'LEAD_UPSERT'
+    | 'LEADS_BATCH_UPSERT'
     | 'CALL_LOGGED'
     | 'KAWSAR_POST_LOGGED'
+    | 'PAID_CUSTOMER_UPSERT'
     | 'CONNECT_CHECK';
   lead?: Lead;
   leads?: Lead[];
@@ -142,6 +170,8 @@ export interface SheetsSyncPayload {
   callLogs?: CallLog[];
   post?: ContentPost;
   contentPosts?: ContentPost[];
+  paidCustomer?: PaidCustomer;
+  paidCustomers?: PaidCustomer[];
   dailySummary: {
     date: string;
     totalLeads: number;
@@ -172,6 +202,9 @@ export async function pushToGoogleSheetsWebhook(
     return { ok: false, error: 'Invalid webhook URL format' };
   }
 
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10000);
+
   try {
     await fetch(trimmed, {
       method: 'POST',
@@ -180,6 +213,7 @@ export async function pushToGoogleSheetsWebhook(
         'Content-Type': 'text/plain;charset=utf-8',
       },
       body: JSON.stringify(payload),
+      signal: controller.signal,
     });
     return { ok: true };
   } catch (err) {
@@ -187,6 +221,8 @@ export async function pushToGoogleSheetsWebhook(
       ok: false,
       error: err instanceof Error ? err.message : 'Network error syncing to Google Sheets',
     };
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -198,22 +234,31 @@ export interface PullSheetsResult {
 }
 
 /**
- * Attempts to pull the latest leads, call logs, and Kawsar posts from Google Sheets
- * via a GET request to the Apps Script Web App (`doGet`).
+ * Pulls active records from Google Sheets via GET (`doGet`).
+ * Defaults to `scope: 'today'` so historical sheet rows are NOT bulk-loaded into frontend state/memory.
  */
 export async function pullFromGoogleSheetsWebhook(
   webhookUrl: string,
-  options?: { timeoutMs?: number }
+  options?: { timeoutMs?: number; scope?: 'today' | 'all'; date?: string }
 ): Promise<PullSheetsResult> {
   const trimmed = webhookUrl.trim();
   if (!trimmed) {
     return { ok: false, pulledData: false, error: 'No webhook URL configured' };
   }
 
+  const scope = options?.scope ?? 'today';
+  const targetDate = options?.date ?? getLocalDateString();
+
   let targetUrl: string;
   try {
     const parsed = new URL(trimmed);
     parsed.searchParams.set('action', 'pull');
+    if (scope === 'today') {
+      parsed.searchParams.set('scope', 'today');
+      parsed.searchParams.set('date', targetDate);
+    } else {
+      parsed.searchParams.set('scope', 'all');
+    }
     targetUrl = parsed.toString();
   } catch {
     return { ok: false, pulledData: false, error: 'Invalid webhook URL format' };
@@ -239,16 +284,142 @@ export async function pullFromGoogleSheetsWebhook(
     } catch {
       return { ok: false, pulledData: false, error: 'Response is not JSON' };
     }
-    const data = parsePullPayload(json);
-    if (!data) {
+    const parsedData = parsePullPayload(json);
+    if (!parsedData) {
       return { ok: false, pulledData: false, error: 'Unexpected payload structure' };
     }
+    const data =
+      scope === 'today' ? filterPullPayloadByDate(parsedData, targetDate) : parsedData;
     return { ok: true, pulledData: true, data };
   } catch (err) {
     return {
       ok: false,
       pulledData: false,
       error: err instanceof Error ? err.message : 'Unable to fetch remote data',
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Performs an on-demand lightweight duplicate check against Google Sheets `Master_Data`
+ * (`GET ?action=check_lead_duplicate&phone=...&facebookLink=...`) without pulling all rows.
+ */
+export async function checkLeadDuplicateInSheets(
+  webhookUrl: string,
+  phone: string,
+  facebookLink: string,
+  options?: { timeoutMs?: number }
+): Promise<LeadDuplicateCheckResult> {
+  const trimmed = webhookUrl.trim();
+  if (!trimmed) {
+    return { ok: false, isDuplicate: false, error: 'No webhook URL configured' };
+  }
+
+  let targetUrl: string;
+  try {
+    const parsed = new URL(trimmed);
+    parsed.searchParams.set('action', 'check_lead_duplicate');
+    parsed.searchParams.set('phone', phone.trim());
+    parsed.searchParams.set('facebookLink', facebookLink.trim());
+    targetUrl = parsed.toString();
+  } catch {
+    return { ok: false, isDuplicate: false, error: 'Invalid webhook URL format' };
+  }
+
+  const controller = new AbortController();
+  const timeoutMs = options?.timeoutMs ?? 4000;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const res = await fetch(targetUrl, {
+      method: 'GET',
+      redirect: 'follow',
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      return { ok: false, isDuplicate: false, error: `HTTP ${res.status}` };
+    }
+    const text = await res.text();
+    let json: unknown;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      return { ok: false, isDuplicate: false, error: 'Response is not JSON' };
+    }
+    const parsedResult = parseLeadDuplicateCheckResponse(json);
+    if (!parsedResult) {
+      return { ok: false, isDuplicate: false, error: 'Unsupported check response' };
+    }
+    return parsedResult;
+  } catch (err) {
+    return {
+      ok: false,
+      isDuplicate: false,
+      error: err instanceof Error ? err.message : 'Unable to query sheet duplicate check',
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Performs an on-demand lightweight duplicate check against Google Sheets `Kawsar_Posts_Log`
+ * (`GET ?action=check_post_duplicate&facebookLink=...&websiteLink=...`) without pulling all rows.
+ */
+export async function checkPostDuplicateInSheets(
+  webhookUrl: string,
+  facebookLink: string,
+  websiteLink: string,
+  options?: { timeoutMs?: number }
+): Promise<PostDuplicateCheckResult> {
+  const trimmed = webhookUrl.trim();
+  if (!trimmed) {
+    return { ok: false, isDuplicate: false, error: 'No webhook URL configured' };
+  }
+
+  let targetUrl: string;
+  try {
+    const parsed = new URL(trimmed);
+    parsed.searchParams.set('action', 'check_post_duplicate');
+    parsed.searchParams.set('facebookLink', facebookLink.trim());
+    parsed.searchParams.set('websiteLink', websiteLink.trim());
+    targetUrl = parsed.toString();
+  } catch {
+    return { ok: false, isDuplicate: false, error: 'Invalid webhook URL format' };
+  }
+
+  const controller = new AbortController();
+  const timeoutMs = options?.timeoutMs ?? 4000;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const res = await fetch(targetUrl, {
+      method: 'GET',
+      redirect: 'follow',
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      return { ok: false, isDuplicate: false, error: `HTTP ${res.status}` };
+    }
+    const text = await res.text();
+    let json: unknown;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      return { ok: false, isDuplicate: false, error: 'Response is not JSON' };
+    }
+    const parsedResult = parsePostDuplicateCheckResponse(json);
+    if (!parsedResult) {
+      return { ok: false, isDuplicate: false, error: 'Unsupported check response' };
+    }
+    return parsedResult;
+  } catch (err) {
+    return {
+      ok: false,
+      isDuplicate: false,
+      error: err instanceof Error ? err.message : 'Unable to query sheet duplicate check',
     };
   } finally {
     clearTimeout(timer);

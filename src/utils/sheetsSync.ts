@@ -1,10 +1,26 @@
-import { CALL_STATUSES, CallLog, CallStatus, ContentPost, Lead } from '../types';
 import {
+  CALL_STATUSES,
+  CallLog,
+  CallStatus,
+  ContentPost,
+  Lead,
+  PaidCustomer,
+  RenewalStatus,
+  RENEWAL_STATUSES,
+} from '../types';
+import {
+  addDaysToYmd,
+  computeDaysRemaining,
   extractPhoneCoreKey,
+  getLocalDateString,
   normalizeBdPhone,
   normalizeFacebookUrl,
   normalizePostUrl,
+  parseDateToYmd,
+  toYmdString,
 } from './leadLogic';
+
+export const HISTORICAL_FALLBACK_ISO = '1970-01-01T00:00:00.000Z';
 
 export const FALLBACK_GOOGLE_SHEETS_WEBHOOK_URL =
   'https://script.google.com/macros/s/AKfycbwqMl23Bi200Idn267ySCDpKBY30b1FdYC8OWPOPK90neBvSPwWyn7Eq-VqV8ublfUD/exec';
@@ -60,6 +76,7 @@ export interface ParsedPullPayload {
   leads: Partial<Lead>[];
   callLogs: Partial<CallLog>[];
   contentPosts: Partial<ContentPost>[];
+  paidCustomers: Partial<PaidCustomer>[];
 }
 
 export interface SheetLeadDuplicateFlag {
@@ -90,6 +107,38 @@ export interface SheetDuplicateReport {
   postDuplicates: SheetPostDuplicateFlag[];
 }
 
+export interface LeadDuplicateCheckResult {
+  ok: boolean;
+  isDuplicate: boolean;
+  matchedBy?: 'phone' | 'facebook';
+  existingLead?: {
+    id: string;
+    customerName: string;
+    phone: string;
+    facebookLink: string;
+    collectorName: string;
+    assignedAgentName: string | null;
+    status: CallStatus;
+    createdAt: string;
+  };
+  error?: string;
+}
+
+export interface PostDuplicateCheckResult {
+  ok: boolean;
+  isDuplicate: boolean;
+  matchedField?: 'Facebook Link' | 'Website Link';
+  existingPost?: {
+    id: string;
+    note: string;
+    facebookLink: string;
+    websiteLink: string;
+    posterName: string;
+    createdAt: string;
+  };
+  error?: string;
+}
+
 /**
  * Validates and extracts structured arrays from a Google Apps Script `doGet` JSON response.
  * Returns null if the response does not match an expected JSON payload.
@@ -100,7 +149,8 @@ export function parsePullPayload(raw: unknown): ParsedPullPayload | null {
   const hasAnyArray =
     Array.isArray(obj.leads) ||
     Array.isArray(obj.callLogs) ||
-    Array.isArray(obj.contentPosts);
+    Array.isArray(obj.contentPosts) ||
+    Array.isArray(obj.paidCustomers);
   if (!hasAnyArray) return null;
 
   return {
@@ -109,12 +159,159 @@ export function parsePullPayload(raw: unknown): ParsedPullPayload | null {
     contentPosts: Array.isArray(obj.contentPosts)
       ? (obj.contentPosts as Partial<ContentPost>[])
       : [],
+    paidCustomers: Array.isArray(obj.paidCustomers)
+      ? (obj.paidCustomers as Partial<PaidCustomer>[])
+      : [],
+  };
+}
+
+function isRecordOnDate(value: unknown, targetDateStr: string): boolean {
+  return parseDateToYmd(value) === targetDateStr;
+}
+
+/**
+ * Filters a pulled Google Sheets payload strictly to rows matching `targetDateStr` (YYYY-MM-DD)
+ * for leads, callLogs, and contentPosts so historical Master_Data rows never load into
+ * frontend state/memory, while preserving `paidCustomers` in full for 1-month renewal tracking.
+ * Never falls back to updatedAt or render time for leads.
+ */
+export function filterPullPayloadByDate(
+  payload: ParsedPullPayload,
+  targetDateStr: string = getLocalDateString()
+): ParsedPullPayload {
+  return {
+    leads: payload.leads.filter((l) => {
+      const storedDate = l.collectedDate ?? l.date ?? l.createdAt;
+      return isRecordOnDate(storedDate, targetDateStr);
+    }),
+    callLogs: payload.callLogs.filter((c) => isRecordOnDate(c.timestamp, targetDateStr)),
+    contentPosts: payload.contentPosts.filter((p) =>
+      isRecordOnDate(p.createdAt, targetDateStr)
+    ),
+    paidCustomers: payload.paidCustomers,
+  };
+}
+
+/**
+ * Parses an on-demand `?action=check_lead_duplicate` JSON response from Google Apps Script.
+ */
+export function parseLeadDuplicateCheckResponse(
+  raw: unknown
+): LeadDuplicateCheckResult | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const obj = raw as Record<string, unknown>;
+  if (typeof obj.isDuplicate !== 'boolean') return null;
+
+  if (!obj.isDuplicate) {
+    return { ok: true, isDuplicate: false };
+  }
+
+  const rawLead =
+    obj.lead && typeof obj.lead === 'object'
+      ? (obj.lead as Record<string, unknown>)
+      : obj.existingLead && typeof obj.existingLead === 'object'
+      ? (obj.existingLead as Record<string, unknown>)
+      : obj;
+
+  const matchedRaw = String(obj.matchedBy ?? rawLead.matchedBy ?? 'phone').toLowerCase();
+  const matchedBy: 'phone' | 'facebook' = matchedRaw.includes('face') ? 'facebook' : 'phone';
+
+  const agentRaw = String(
+    rawLead.assignedAgentName ?? rawLead.assignedAgent ?? ''
+  ).trim();
+  const assignedAgentName =
+    agentRaw && agentRaw.toLowerCase() !== 'unassigned' ? agentRaw : null;
+
+  const rawPhone = safePhoneString(rawLead.phone ?? rawLead.rawPhone);
+  const phone = normalizeBdPhone(rawPhone) || rawPhone;
+  const createdAt = toValidTimestamp(
+    rawLead.createdAt ?? rawLead.collectedDate ?? rawLead.date ?? rawLead.updatedAt,
+    HISTORICAL_FALLBACK_ISO
+  );
+
+  return {
+    ok: true,
+    isDuplicate: true,
+    matchedBy,
+    existingLead: {
+      id: typeof rawLead.id === 'string' && rawLead.id.trim() ? rawLead.id.trim() : 'SHEET-DUP',
+      customerName:
+        typeof rawLead.customerName === 'string' && rawLead.customerName.trim()
+          ? rawLead.customerName.trim()
+          : 'Existing Sheet Lead',
+      phone,
+      facebookLink: typeof rawLead.facebookLink === 'string' ? rawLead.facebookLink.trim() : '',
+      collectorName:
+        typeof rawLead.collectorName === 'string' && rawLead.collectorName.trim()
+          ? rawLead.collectorName.trim()
+          : typeof rawLead.collector === 'string' && rawLead.collector.trim()
+          ? rawLead.collector.trim()
+          : 'Unknown Collector',
+      assignedAgentName,
+      status: normalizeStatus(rawLead.status),
+      createdAt,
+    },
+  };
+}
+
+/**
+ * Parses an on-demand `?action=check_post_duplicate` JSON response from Google Apps Script.
+ */
+export function parsePostDuplicateCheckResponse(
+  raw: unknown
+): PostDuplicateCheckResult | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const obj = raw as Record<string, unknown>;
+  if (typeof obj.isDuplicate !== 'boolean') return null;
+
+  if (!obj.isDuplicate) {
+    return { ok: true, isDuplicate: false };
+  }
+
+  const rawPost =
+    obj.post && typeof obj.post === 'object'
+      ? (obj.post as Record<string, unknown>)
+      : obj.existingPost && typeof obj.existingPost === 'object'
+      ? (obj.existingPost as Record<string, unknown>)
+      : obj;
+
+  const matchedRaw = String(
+    obj.matchedField ?? rawPost.matchedField ?? 'Facebook Link'
+  ).toLowerCase();
+  const matchedField: 'Facebook Link' | 'Website Link' = matchedRaw.includes('web')
+    ? 'Website Link'
+    : 'Facebook Link';
+
+  return {
+    ok: true,
+    isDuplicate: true,
+    matchedField,
+    existingPost: {
+      id: typeof rawPost.id === 'string' && rawPost.id.trim() ? rawPost.id.trim() : 'SHEET-PST-DUP',
+      note: typeof rawPost.note === 'string' ? rawPost.note.trim() : '',
+      facebookLink: typeof rawPost.facebookLink === 'string' ? rawPost.facebookLink.trim() : '',
+      websiteLink: typeof rawPost.websiteLink === 'string' ? rawPost.websiteLink.trim() : '',
+      posterName:
+        typeof rawPost.posterName === 'string' && rawPost.posterName.trim()
+          ? rawPost.posterName.trim()
+          : 'Kawsar',
+      createdAt: toValidTimestamp(rawPost.createdAt, HISTORICAL_FALLBACK_ISO),
+    },
   };
 }
 
 function toValidTimestamp(value: unknown, fallback: string): string {
-  if (typeof value === 'string' && value.trim()) {
-    const parsed = Date.parse(value);
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? fallback : value.toISOString();
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.replace(/^'+/, '').trim();
+    if (!trimmed) return fallback;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+      const ymd = parseDateToYmd(trimmed);
+      return ymd ? `${ymd}T12:00:00.000Z` : fallback;
+    }
+    const parsed = Date.parse(trimmed);
     if (!Number.isNaN(parsed)) return new Date(parsed).toISOString();
   }
   return fallback;
@@ -190,8 +387,6 @@ export function mergeRemoteLeads(
     byId.set(lead.id, lead);
   }
 
-  const nowIso = new Date().toISOString();
-
   remoteLeads.forEach((r, idx) => {
     const rawPhone = safePhoneString(r.rawPhone ?? r.phone);
     const phone = normalizeBdPhone(rawPhone) || rawPhone;
@@ -205,14 +400,26 @@ export function mergeRemoteLeads(
     const id = explicitId || buildDeterministicLeadId(r, idx);
     const normalizedFacebookLink =
       r.normalizedFacebookLink?.trim() || normalizeFacebookUrl(facebookLink);
-    const updatedAt = toValidTimestamp(r.updatedAt, nowIso);
-    const createdAt = toValidTimestamp(r.createdAt, updatedAt);
-
     const existing = byId.get(id);
+    const hasExplicitRemoteUpdatedAt = Boolean(
+      typeof r.updatedAt === 'string' && r.updatedAt.trim() && !Number.isNaN(Date.parse(r.updatedAt))
+    );
+    const remoteCreatedRaw = r.createdAt ?? r.collectedDate ?? r.date;
+    const createdAt = toValidTimestamp(
+      remoteCreatedRaw,
+      existing ? existing.createdAt : HISTORICAL_FALLBACK_ISO
+    );
+    const updatedAt = toValidTimestamp(
+      r.updatedAt,
+      existing ? existing.updatedAt : createdAt
+    );
+    const resolvedCollectedDate =
+      parseDateToYmd(r.collectedDate ?? r.date) ?? existing?.collectedDate;
+
     if (existing) {
       const existingTime = Date.parse(existing.updatedAt || existing.createdAt) || 0;
       const remoteTime = Date.parse(updatedAt) || 0;
-      if (remoteTime >= existingTime) {
+      if (hasExplicitRemoteUpdatedAt && remoteTime > existingTime) {
         const assignedName =
           r.assignedAgentName !== undefined
             ? r.assignedAgentName &&
@@ -244,7 +451,9 @@ export function mergeRemoteLeads(
           notes: r.notes !== undefined ? r.notes : existing.notes,
           lastCallNotes:
             r.lastCallNotes !== undefined ? r.lastCallNotes : existing.lastCallNotes,
+          createdAt: existing.createdAt || createdAt,
           updatedAt,
+          ...(resolvedCollectedDate ? { collectedDate: resolvedCollectedDate } : {}),
         });
       }
     } else {
@@ -277,6 +486,7 @@ export function mergeRemoteLeads(
         lastCallNotes: typeof r.lastCallNotes === 'string' ? r.lastCallNotes : '',
         createdAt,
         updatedAt,
+        ...(resolvedCollectedDate ? { collectedDate: resolvedCollectedDate } : {}),
       });
     }
   });
@@ -300,8 +510,6 @@ export function mergeRemoteCallLogs(
     byId.set(log.id, log);
   }
 
-  const nowIso = new Date().toISOString();
-
   for (const r of remoteLogs) {
     const id = typeof r.id === 'string' ? r.id.trim() : '';
     if (!id || byId.has(id)) continue;
@@ -322,7 +530,7 @@ export function mergeRemoteCallLogs(
       notes: typeof r.notes === 'string' ? r.notes : '',
       followUpAt:
         typeof r.followUpAt === 'string' && r.followUpAt.trim() ? r.followUpAt : null,
-      timestamp: toValidTimestamp(r.timestamp, nowIso),
+      timestamp: toValidTimestamp(r.timestamp, HISTORICAL_FALLBACK_ISO),
     });
   }
 
@@ -344,8 +552,6 @@ export function mergeRemoteContentPosts(
   for (const post of localPosts) {
     byId.set(post.id, post);
   }
-
-  const nowIso = new Date().toISOString();
 
   remotePosts.forEach((r, idx) => {
     const facebookLink = typeof r.facebookLink === 'string' ? r.facebookLink.trim() : '';
@@ -372,12 +578,186 @@ export function mergeRemoteContentPosts(
         typeof r.posterName === 'string' && r.posterName.trim()
           ? r.posterName.trim()
           : 'Kawsar',
-      createdAt: toValidTimestamp(r.createdAt, nowIso),
+      createdAt: toValidTimestamp(r.createdAt, HISTORICAL_FALLBACK_ISO),
     });
   });
 
   return Array.from(byId.values()).sort(
     (a, b) => (Date.parse(b.createdAt) || 0) - (Date.parse(a.createdAt) || 0)
+  );
+}
+
+const VALID_RENEWAL_STATUSES: ReadonlySet<RenewalStatus> = new Set(RENEWAL_STATUSES);
+
+function normalizeRenewalStatus(status: unknown): RenewalStatus {
+  if (typeof status === 'string') {
+    const trimmed = status.trim();
+    if (VALID_RENEWAL_STATUSES.has(trimmed as RenewalStatus)) {
+      return trimmed as RenewalStatus;
+    }
+    const lower = trimmed.toLowerCase();
+    if (lower === 'renewed') return 'Renewed';
+    if (lower === 'expired') return 'Expired';
+  }
+  return 'Active';
+}
+
+function buildDeterministicPaidCustomerId(
+  r: Partial<PaidCustomer>,
+  index: number
+): string {
+  const leadId = typeof r.leadId === 'string' ? r.leadId.trim() : '';
+  if (leadId && isFirestoreDocIdSafe(leadId)) {
+    return `PC-${leadId}`.slice(0, 128);
+  }
+  const core = extractPhoneCoreKey(safePhoneString(r.phone));
+  if (core) return `SHEET-PC-${core}`.slice(0, 120);
+  return `SHEET-PC-ROW-${index + 2}`;
+}
+
+/**
+ * Two-way merge of Paid Customers pulled from Google Sheets (`Paid_Customers` tab)
+ * or Firestore into local state. Supports manual edits in Google Sheets (e.g., changing
+ * Renewal Status or Renewal Date directly in the sheet) while preserving newer local updates.
+ */
+export function mergeRemotePaidCustomers(
+  localCustomers: PaidCustomer[],
+  remoteCustomers: Partial<PaidCustomer>[]
+): PaidCustomer[] {
+  if (!remoteCustomers.length) return localCustomers;
+
+  const byId = new Map<string, PaidCustomer>();
+  for (const c of localCustomers) {
+    byId.set(c.id, c);
+  }
+
+  const now = new Date();
+  const nowIso = now.toISOString();
+
+  remoteCustomers.forEach((r, idx) => {
+    const rawPhone = safePhoneString(r.phone);
+    const phone = normalizeBdPhone(rawPhone) || rawPhone;
+    const customerName = typeof r.customerName === 'string' ? r.customerName.trim() : '';
+    const explicitId = typeof r.id === 'string' ? r.id.trim() : '';
+    const leadId = typeof r.leadId === 'string' ? r.leadId.trim() : '';
+
+    if (!explicitId && !phone && !customerName) return;
+
+    const id = explicitId || buildDeterministicPaidCustomerId(r, idx);
+    const existing = byId.get(id);
+
+    const hasExplicitRemoteUpdatedAt = Boolean(
+      typeof r.updatedAt === 'string' && r.updatedAt.trim() && !Number.isNaN(Date.parse(r.updatedAt))
+    );
+    const updatedAt = toValidTimestamp(
+      r.updatedAt,
+      existing ? existing.updatedAt : nowIso
+    );
+    const createdAt = toValidTimestamp(
+      r.createdAt,
+      existing ? existing.createdAt : updatedAt
+    );
+
+    const confirmedDateRaw =
+      typeof r.confirmedDate === 'string' && r.confirmedDate.replace(/^'+/, '').trim()
+        ? toYmdString(r.confirmedDate.replace(/^'+/, '').trim(), now)
+        : existing?.confirmedDate || getLocalDateString(now);
+
+    const renewalDateRaw =
+      typeof r.renewalDate === 'string' && r.renewalDate.replace(/^'+/, '').trim()
+        ? toYmdString(r.renewalDate.replace(/^'+/, '').trim(), now)
+        : existing?.renewalDate || addDaysToYmd(confirmedDateRaw, 30);
+
+    const remoteAgentRaw =
+      r.assignedAgentName !== undefined
+        ? r.assignedAgentName &&
+          String(r.assignedAgentName).trim().toLowerCase() !== 'unassigned'
+          ? String(r.assignedAgentName).trim()
+          : null
+        : existing?.assignedAgentName ?? null;
+    const remoteAgentId =
+      r.assignedAgentId !== undefined
+        ? r.assignedAgentId
+        : remoteAgentRaw !== existing?.assignedAgentName
+        ? resolveAgentIdFromName(remoteAgentRaw)
+        : existing?.assignedAgentId ?? resolveAgentIdFromName(remoteAgentRaw);
+
+    const remoteStatus = r.renewalStatus
+      ? normalizeRenewalStatus(r.renewalStatus)
+      : existing?.renewalStatus ?? 'Active';
+
+    if (existing) {
+      const existingTime = Date.parse(existing.updatedAt || existing.createdAt) || 0;
+      const remoteTime = Date.parse(updatedAt) || 0;
+      const sheetValuesChanged =
+        (customerName && customerName !== existing.customerName) ||
+        (phone && phone !== existing.phone) ||
+        remoteAgentRaw !== existing.assignedAgentName ||
+        confirmedDateRaw !== existing.confirmedDate ||
+        renewalDateRaw !== existing.renewalDate ||
+        remoteStatus !== existing.renewalStatus;
+
+      // Apply remote update if remote timestamp is strictly newer, OR if remote is not older
+      // (same timestamp / manual sheet edit without touching Updated At) and sheet fields changed.
+      const shouldUpdate =
+        (hasExplicitRemoteUpdatedAt && remoteTime > existingTime) ||
+        (remoteTime >= existingTime && sheetValuesChanged) ||
+        (!hasExplicitRemoteUpdatedAt && sheetValuesChanged);
+
+      if (shouldUpdate) {
+        const effectiveUpdatedAt =
+          hasExplicitRemoteUpdatedAt && remoteTime > existingTime
+            ? updatedAt
+            : sheetValuesChanged
+            ? nowIso
+            : existing.updatedAt;
+
+        byId.set(id, {
+          ...existing,
+          leadId: leadId || existing.leadId,
+          customerName: customerName || existing.customerName,
+          phone: phone || existing.phone,
+          assignedAgentId: remoteAgentId,
+          assignedAgentName: remoteAgentRaw,
+          confirmedDate: confirmedDateRaw,
+          renewalDate: renewalDateRaw,
+          renewalStatus: remoteStatus,
+          lastRenewedAt:
+            r.lastRenewedAt !== undefined
+              ? r.lastRenewedAt || null
+              : remoteStatus === 'Renewed' && existing.renewalStatus !== 'Renewed'
+              ? effectiveUpdatedAt
+              : existing.lastRenewedAt,
+          notes: typeof r.notes === 'string' ? r.notes : existing.notes,
+          updatedAt: effectiveUpdatedAt,
+        });
+      }
+    } else {
+      byId.set(id, {
+        id,
+        leadId: leadId || id.replace(/^PC-/, ''),
+        customerName: customerName || 'Paid Customer',
+        phone,
+        assignedAgentId: remoteAgentId,
+        assignedAgentName: remoteAgentRaw,
+        confirmedDate: confirmedDateRaw,
+        renewalDate: renewalDateRaw,
+        renewalStatus: remoteStatus,
+        lastRenewedAt:
+          typeof r.lastRenewedAt === 'string' && r.lastRenewedAt.trim()
+            ? r.lastRenewedAt
+            : null,
+        notes: typeof r.notes === 'string' ? r.notes : '',
+        createdAt,
+        updatedAt,
+      });
+    }
+  });
+
+  return Array.from(byId.values()).sort(
+    (a, b) =>
+      computeDaysRemaining(a.renewalDate, now) - computeDaysRemaining(b.renewalDate, now) ||
+      (Date.parse(b.createdAt) || 0) - (Date.parse(a.createdAt) || 0)
   );
 }
 

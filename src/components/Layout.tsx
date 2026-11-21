@@ -1,6 +1,9 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
+  BadgeCheck,
   BarChart3,
+  Bell,
+  CheckCircle2,
   ClipboardCheck,
   Cloud,
   CloudOff,
@@ -18,12 +21,14 @@ import {
   X,
 } from 'lucide-react';
 import { SyncStatus, User } from '../types';
+import { DueRenewalItem, formatBdPhoneDisplay } from '../utils/leadLogic';
 import { AppFooter } from './AppFooter';
 
 export type NavTab =
   | 'admin-overview'
   | 'admin-final-summary'
   | 'admin-leads'
+  | 'paid-customers'
   | 'data-collection'
   | 'kawsar-posts'
   | 'admin-audit'
@@ -40,6 +45,8 @@ interface LayoutProps {
   syncStatus: SyncStatus;
   quickStatLabel: string;
   quickStatValue: string;
+  dueRenewals?: DueRenewalItem[];
+  onMarkPaidCustomerRenewed?: (customerId: string) => void;
   children: React.ReactNode;
 }
 
@@ -47,6 +54,7 @@ interface NavItem {
   id: NavTab;
   label: string;
   icon: typeof BarChart3;
+  badgeCount?: number;
 }
 
 export function Layout({
@@ -59,9 +67,33 @@ export function Layout({
   syncStatus,
   quickStatLabel,
   quickStatValue,
+  dueRenewals = [],
+  onMarkPaidCustomerRenewed,
   children,
 }: LayoutProps) {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [bellOpen, setBellOpen] = useState(false);
+  const bellRef = useRef<HTMLDivElement>(null);
+
+  const showRenewalControls = user.role === 'admin' || user.role === 'agent';
+
+  useEffect(() => {
+    if (!bellOpen) return;
+    const handleOutside = (e: MouseEvent) => {
+      if (bellRef.current && !bellRef.current.contains(e.target as Node)) {
+        setBellOpen(false);
+      }
+    };
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setBellOpen(false);
+    };
+    document.addEventListener('mousedown', handleOutside);
+    document.addEventListener('keydown', handleEscape);
+    return () => {
+      document.removeEventListener('mousedown', handleOutside);
+      document.removeEventListener('keydown', handleEscape);
+    };
+  }, [bellOpen]);
 
   const navItems: NavItem[] =
     user.role === 'admin'
@@ -69,13 +101,27 @@ export function Layout({
           { id: 'admin-overview', label: 'Analytics & KPIs', icon: BarChart3 },
           { id: 'admin-final-summary', label: 'Final Daily Summary', icon: ClipboardCheck },
           { id: 'admin-leads', label: 'Lead Distribution', icon: Users },
+          {
+            id: 'paid-customers',
+            label: 'Paid Customers',
+            icon: BadgeCheck,
+            badgeCount: dueRenewals.length,
+          },
           { id: 'data-collection', label: 'Data Collection', icon: Database },
           { id: 'kawsar-posts', label: 'Kawsar Posts Log', icon: Link2 },
           { id: 'admin-audit', label: 'Audit Logs', icon: History },
           { id: 'admin-sheets', label: 'Google Sheets Sync', icon: FileSpreadsheet },
         ]
       : user.role === 'agent'
-      ? [{ id: 'agent-workspace', label: 'My Call Queue', icon: Headphones }]
+      ? [
+          { id: 'agent-workspace', label: 'My Call Queue', icon: Headphones },
+          {
+            id: 'paid-customers',
+            label: 'Paid Customers',
+            icon: BadgeCheck,
+            badgeCount: dueRenewals.length,
+          },
+        ]
       : user.role === 'poster'
       ? [{ id: 'kawsar-posts', label: 'Post & Link Tracker', icon: Link2 }]
       : [{ id: 'data-collection', label: 'Lead Collection', icon: Database }];
@@ -166,7 +212,15 @@ export function Layout({
               }`}
             >
               <Icon className="w-4 h-4 shrink-0" />
-              <span className="truncate">{item.label}</span>
+              <span className="truncate flex-1 text-left">{item.label}</span>
+              {typeof item.badgeCount === 'number' && item.badgeCount > 0 && (
+                <span
+                  data-testid={`nav-badge-${item.id}`}
+                  className="ml-auto font-mono text-[11px] font-bold tabular-nums px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-700 dark:text-amber-300"
+                >
+                  {item.badgeCount}
+                </span>
+              )}
             </button>
           );
         })}
@@ -294,6 +348,111 @@ export function Layout({
                 <CloudOff className="w-4 h-4 text-slate-400" />
               )}
             </span>
+            {showRenewalControls && (
+              <div className="relative" ref={bellRef}>
+                <button
+                  type="button"
+                  data-testid="renewal-bell-button"
+                  onClick={() => setBellOpen((prev) => !prev)}
+                  aria-label="Renewal notifications"
+                  aria-expanded={bellOpen}
+                  className="relative p-2 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+                >
+                  <Bell className="w-4 h-4" />
+                  {dueRenewals.length > 0 && (
+                    <span
+                      data-testid="renewal-bell-badge"
+                      className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 rounded-full bg-amber-500 text-slate-950 text-[10px] font-bold font-mono tabular-nums flex items-center justify-center shadow-xs"
+                    >
+                      {dueRenewals.length}
+                    </span>
+                  )}
+                </button>
+
+                {bellOpen && (
+                  <div
+                    role="dialog"
+                    aria-label="Upcoming 2-day renewals"
+                    data-testid="renewal-bell-popover"
+                    className="absolute right-0 mt-2 w-80 sm:w-96 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden z-50"
+                  >
+                    <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-2">
+                      <div>
+                        <p className="text-xs font-bold text-slate-900 dark:text-white">
+                          2-Day Renewal Notifications
+                        </p>
+                        <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                          {dueRenewals.length} customer{dueRenewals.length === 1 ? '' : 's'} due within 2 days
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setBellOpen(false)}
+                        aria-label="Close notifications"
+                        className="p-1 rounded-lg text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+
+                    {dueRenewals.length === 0 ? (
+                      <div className="p-5 text-center text-xs text-slate-500 dark:text-slate-400">
+                        No renewals due within the next 2 days.
+                      </div>
+                    ) : (
+                      <ul className="divide-y divide-slate-200 dark:divide-slate-800 max-h-80 overflow-y-auto">
+                        {dueRenewals.map(({ customer, daysRemaining }) => (
+                          <li key={customer.id} className="p-3.5 space-y-2">
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="min-w-0">
+                                <p className="text-xs font-semibold text-slate-900 dark:text-white truncate">
+                                  {customer.customerName}
+                                </p>
+                                <p className="text-[11px] font-mono text-slate-500 dark:text-slate-400">
+                                  {formatBdPhoneDisplay(customer.phone)} · {customer.assignedAgentName ?? 'Unassigned'}
+                                </p>
+                              </div>
+                              <span className="text-[11px] font-mono font-semibold text-amber-700 dark:text-amber-300 bg-amber-500/15 px-1.5 py-0.5 rounded whitespace-nowrap">
+                                {daysRemaining <= 0
+                                  ? 'Due Today'
+                                  : daysRemaining === 1
+                                  ? '1d left'
+                                  : `${daysRemaining}d left`}
+                              </span>
+                            </div>
+                            {onMarkPaidCustomerRenewed && (
+                              <button
+                                type="button"
+                                data-testid={`bell-renew-${customer.id}`}
+                                onClick={() => onMarkPaidCustomerRenewed(customer.id)}
+                                className="w-full inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-semibold transition-colors cursor-pointer"
+                              >
+                                <CheckCircle2 className="w-3 h-3" />
+                                <span>Mark as Renewed (+1 Month)</span>
+                              </button>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+
+                    <div className="p-2.5 bg-slate-50 dark:bg-slate-950 border-t border-slate-200 dark:border-slate-800">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setBellOpen(false);
+                          handleNavClick('paid-customers');
+                        }}
+                        className="w-full py-2 rounded-lg text-xs font-semibold text-emerald-700 dark:text-emerald-400 hover:bg-emerald-500/10 transition-colors cursor-pointer"
+                      >
+                        View All Paid Customers
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
             <button
               type="button"
               onClick={onToggleTheme}

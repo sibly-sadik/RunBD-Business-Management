@@ -1,14 +1,24 @@
 import {
   collection,
   doc,
+  limit,
   onSnapshot,
   orderBy,
   query,
   setDoc,
   Unsubscribe,
+  where,
   writeBatch,
 } from 'firebase/firestore';
-import { db, handleFirestoreError, OperationType } from '../firebase';
+import {
+  db,
+  handleFirestoreError,
+  isFirestoreQuotaError,
+  isFirestoreQuotaExceeded,
+  markFirestoreQuotaExceeded,
+  onFirestoreQuotaExceeded,
+  OperationType,
+} from '../firebase';
 import {
   AppSettings,
   AuditLog,
@@ -16,7 +26,29 @@ import {
   ContentPost,
   DuplicateAttempt,
   Lead,
+  PaidCustomer,
 } from '../types';
+
+const activeSubscriptions = new Set<Unsubscribe>();
+
+onFirestoreQuotaExceeded(() => {
+  activeSubscriptions.forEach((unsub) => {
+    try {
+      unsub();
+    } catch {
+      // Ignore cleanup errors
+    }
+  });
+  activeSubscriptions.clear();
+});
+
+function trackSubscription(unsub: Unsubscribe): Unsubscribe {
+  activeSubscriptions.add(unsub);
+  return () => {
+    activeSubscriptions.delete(unsub);
+    unsub();
+  };
+}
 
 function clampString(value: string | undefined | null, maxLen: number): string {
   return (value ?? '').slice(0, maxLen);
@@ -120,16 +152,49 @@ function sanitizeSettingsForFirestore(settings: AppSettings): AppSettings {
   };
 }
 
-export function subscribeToLeads(onData: (leads: Lead[]) => void): Unsubscribe {
+function sanitizePaidCustomerForFirestore(customer: PaidCustomer): PaidCustomer {
+  return {
+    id: clampString(customer.id, 128),
+    leadId: clampString(customer.leadId, 128),
+    customerName: clampString(customer.customerName || 'Paid Customer', 200),
+    phone: clampString(customer.phone, 32),
+    assignedAgentId: clampNullableString(customer.assignedAgentId, 64),
+    assignedAgentName: clampNullableString(customer.assignedAgentName, 100),
+    confirmedDate: clampString(customer.confirmedDate, 32),
+    renewalDate: clampString(customer.renewalDate, 32),
+    renewalStatus: customer.renewalStatus,
+    lastRenewedAt: clampNullableString(customer.lastRenewedAt, 64),
+    notes: clampString(customer.notes, 2000),
+    createdAt: clampString(customer.createdAt, 64),
+    updatedAt: clampString(customer.updatedAt, 64),
+  };
+}
+
+export function subscribeToLeads(
+  onData: (leads: Lead[]) => void,
+  options?: { sinceIso?: string }
+): Unsubscribe {
+  if (isFirestoreQuotaExceeded()) return () => {};
   const path = 'leads';
-  const q = query(collection(db, path), orderBy('createdAt', 'desc'));
-  return onSnapshot(
+  const q = options?.sinceIso
+    ? query(
+        collection(db, path),
+        where('createdAt', '>=', options.sinceIso),
+        orderBy('createdAt', 'desc'),
+        limit(500)
+      )
+    : query(collection(db, path), orderBy('createdAt', 'desc'), limit(500));
+  const unsub = onSnapshot(
     q,
     (snapshot) => {
       const items = snapshot.docs.map((d) => d.data() as Lead);
       onData(items);
     },
     (error) => {
+      if (isFirestoreQuotaError(error)) {
+        markFirestoreQuotaExceeded();
+        return;
+      }
       try {
         handleFirestoreError(error, OperationType.LIST, path);
       } catch {
@@ -137,18 +202,34 @@ export function subscribeToLeads(onData: (leads: Lead[]) => void): Unsubscribe {
       }
     }
   );
+  return trackSubscription(unsub);
 }
 
-export function subscribeToCallLogs(onData: (logs: CallLog[]) => void): Unsubscribe {
+export function subscribeToCallLogs(
+  onData: (logs: CallLog[]) => void,
+  options?: { sinceIso?: string }
+): Unsubscribe {
+  if (isFirestoreQuotaExceeded()) return () => {};
   const path = 'callLogs';
-  const q = query(collection(db, path), orderBy('timestamp', 'desc'));
-  return onSnapshot(
+  const q = options?.sinceIso
+    ? query(
+        collection(db, path),
+        where('timestamp', '>=', options.sinceIso),
+        orderBy('timestamp', 'desc'),
+        limit(300)
+      )
+    : query(collection(db, path), orderBy('timestamp', 'desc'), limit(300));
+  const unsub = onSnapshot(
     q,
     (snapshot) => {
       const items = snapshot.docs.map((d) => d.data() as CallLog);
       onData(items);
     },
     (error) => {
+      if (isFirestoreQuotaError(error)) {
+        markFirestoreQuotaExceeded();
+        return;
+      }
       try {
         handleFirestoreError(error, OperationType.LIST, path);
       } catch {
@@ -156,20 +237,34 @@ export function subscribeToCallLogs(onData: (logs: CallLog[]) => void): Unsubscr
       }
     }
   );
+  return trackSubscription(unsub);
 }
 
 export function subscribeToContentPosts(
-  onData: (posts: ContentPost[]) => void
+  onData: (posts: ContentPost[]) => void,
+  options?: { sinceIso?: string }
 ): Unsubscribe {
+  if (isFirestoreQuotaExceeded()) return () => {};
   const path = 'contentPosts';
-  const q = query(collection(db, path), orderBy('createdAt', 'desc'));
-  return onSnapshot(
+  const q = options?.sinceIso
+    ? query(
+        collection(db, path),
+        where('createdAt', '>=', options.sinceIso),
+        orderBy('createdAt', 'desc'),
+        limit(250)
+      )
+    : query(collection(db, path), orderBy('createdAt', 'desc'), limit(250));
+  const unsub = onSnapshot(
     q,
     (snapshot) => {
       const items = snapshot.docs.map((d) => d.data() as ContentPost);
       onData(items);
     },
     (error) => {
+      if (isFirestoreQuotaError(error)) {
+        markFirestoreQuotaExceeded();
+        return;
+      }
       try {
         handleFirestoreError(error, OperationType.LIST, path);
       } catch {
@@ -177,18 +272,24 @@ export function subscribeToContentPosts(
       }
     }
   );
+  return trackSubscription(unsub);
 }
 
 export function subscribeToAuditLogs(onData: (logs: AuditLog[]) => void): Unsubscribe {
+  if (isFirestoreQuotaExceeded()) return () => {};
   const path = 'auditLogs';
-  const q = query(collection(db, path), orderBy('timestamp', 'desc'));
-  return onSnapshot(
+  const q = query(collection(db, path), orderBy('timestamp', 'desc'), limit(150));
+  const unsub = onSnapshot(
     q,
     (snapshot) => {
       const items = snapshot.docs.map((d) => d.data() as AuditLog);
       onData(items);
     },
     (error) => {
+      if (isFirestoreQuotaError(error)) {
+        markFirestoreQuotaExceeded();
+        return;
+      }
       try {
         handleFirestoreError(error, OperationType.LIST, path);
       } catch {
@@ -196,20 +297,34 @@ export function subscribeToAuditLogs(onData: (logs: AuditLog[]) => void): Unsubs
       }
     }
   );
+  return trackSubscription(unsub);
 }
 
 export function subscribeToDuplicateAttempts(
-  onData: (attempts: DuplicateAttempt[]) => void
+  onData: (attempts: DuplicateAttempt[]) => void,
+  options?: { sinceIso?: string }
 ): Unsubscribe {
+  if (isFirestoreQuotaExceeded()) return () => {};
   const path = 'duplicateAttempts';
-  const q = query(collection(db, path), orderBy('timestamp', 'desc'));
-  return onSnapshot(
+  const q = options?.sinceIso
+    ? query(
+        collection(db, path),
+        where('timestamp', '>=', options.sinceIso),
+        orderBy('timestamp', 'desc'),
+        limit(100)
+      )
+    : query(collection(db, path), orderBy('timestamp', 'desc'), limit(100));
+  const unsub = onSnapshot(
     q,
     (snapshot) => {
       const items = snapshot.docs.map((d) => d.data() as DuplicateAttempt);
       onData(items);
     },
     (error) => {
+      if (isFirestoreQuotaError(error)) {
+        markFirestoreQuotaExceeded();
+        return;
+      }
       try {
         handleFirestoreError(error, OperationType.LIST, path);
       } catch {
@@ -217,13 +332,15 @@ export function subscribeToDuplicateAttempts(
       }
     }
   );
+  return trackSubscription(unsub);
 }
 
 export function subscribeToSettings(
   onData: (settings: AppSettings) => void
 ): Unsubscribe {
+  if (isFirestoreQuotaExceeded()) return () => {};
   const path = 'settings/global';
-  return onSnapshot(
+  const unsub = onSnapshot(
     doc(db, 'settings', 'global'),
     (snapshot) => {
       if (snapshot.exists()) {
@@ -231,6 +348,10 @@ export function subscribeToSettings(
       }
     },
     (error) => {
+      if (isFirestoreQuotaError(error)) {
+        markFirestoreQuotaExceeded();
+        return;
+      }
       try {
         handleFirestoreError(error, OperationType.GET, path);
       } catch {
@@ -238,9 +359,38 @@ export function subscribeToSettings(
       }
     }
   );
+  return trackSubscription(unsub);
+}
+
+export function subscribeToPaidCustomers(
+  onData: (customers: PaidCustomer[]) => void
+): Unsubscribe {
+  if (isFirestoreQuotaExceeded()) return () => {};
+  const path = 'paidCustomers';
+  const q = query(collection(db, path), orderBy('renewalDate', 'asc'), limit(500));
+  const unsub = onSnapshot(
+    q,
+    (snapshot) => {
+      const items = snapshot.docs.map((d) => d.data() as PaidCustomer);
+      onData(items);
+    },
+    (error) => {
+      if (isFirestoreQuotaError(error)) {
+        markFirestoreQuotaExceeded();
+        return;
+      }
+      try {
+        handleFirestoreError(error, OperationType.LIST, path);
+      } catch {
+        // Logged via handleFirestoreError
+      }
+    }
+  );
+  return trackSubscription(unsub);
 }
 
 export async function saveLeadToFirestore(lead: Lead): Promise<void> {
+  if (isFirestoreQuotaExceeded()) return;
   const path = `leads/${lead.id}`;
   try {
     await setDoc(doc(db, 'leads', lead.id), sanitizeLeadForFirestore(lead));
@@ -250,7 +400,7 @@ export async function saveLeadToFirestore(lead: Lead): Promise<void> {
 }
 
 export async function saveLeadsBatchToFirestore(leads: Lead[]): Promise<void> {
-  if (!leads.length) return;
+  if (isFirestoreQuotaExceeded() || !leads.length) return;
   const CHUNK_SIZE = 450;
   try {
     for (let i = 0; i < leads.length; i += CHUNK_SIZE) {
@@ -267,6 +417,7 @@ export async function saveLeadsBatchToFirestore(leads: Lead[]): Promise<void> {
 }
 
 export async function saveCallLogToFirestore(log: CallLog): Promise<void> {
+  if (isFirestoreQuotaExceeded()) return;
   const path = `callLogs/${log.id}`;
   try {
     await setDoc(doc(db, 'callLogs', log.id), sanitizeCallLogForFirestore(log));
@@ -276,6 +427,7 @@ export async function saveCallLogToFirestore(log: CallLog): Promise<void> {
 }
 
 export async function saveContentPostToFirestore(post: ContentPost): Promise<void> {
+  if (isFirestoreQuotaExceeded()) return;
   const path = `contentPosts/${post.id}`;
   try {
     await setDoc(doc(db, 'contentPosts', post.id), sanitizeContentPostForFirestore(post));
@@ -285,6 +437,7 @@ export async function saveContentPostToFirestore(post: ContentPost): Promise<voi
 }
 
 export async function saveAuditLogToFirestore(log: AuditLog): Promise<void> {
+  if (isFirestoreQuotaExceeded()) return;
   const path = `auditLogs/${log.id}`;
   try {
     await setDoc(doc(db, 'auditLogs', log.id), sanitizeAuditLogForFirestore(log));
@@ -296,6 +449,7 @@ export async function saveAuditLogToFirestore(log: AuditLog): Promise<void> {
 export async function saveDuplicateAttemptToFirestore(
   attempt: DuplicateAttempt
 ): Promise<void> {
+  if (isFirestoreQuotaExceeded()) return;
   const path = `duplicateAttempts/${attempt.id}`;
   try {
     await setDoc(
@@ -308,6 +462,7 @@ export async function saveDuplicateAttemptToFirestore(
 }
 
 export async function saveSettingsToFirestore(settings: AppSettings): Promise<void> {
+  if (isFirestoreQuotaExceeded()) return;
   const path = 'settings/global';
   try {
     await setDoc(
@@ -316,5 +471,40 @@ export async function saveSettingsToFirestore(settings: AppSettings): Promise<vo
     );
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+export async function savePaidCustomerToFirestore(customer: PaidCustomer): Promise<void> {
+  if (isFirestoreQuotaExceeded()) return;
+  const path = `paidCustomers/${customer.id}`;
+  try {
+    await setDoc(
+      doc(db, 'paidCustomers', customer.id),
+      sanitizePaidCustomerForFirestore(customer)
+    );
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+export async function savePaidCustomersBatchToFirestore(
+  customers: PaidCustomer[]
+): Promise<void> {
+  if (isFirestoreQuotaExceeded() || !customers.length) return;
+  const CHUNK_SIZE = 450;
+  try {
+    for (let i = 0; i < customers.length; i += CHUNK_SIZE) {
+      const chunk = customers.slice(i, i + CHUNK_SIZE);
+      const batch = writeBatch(db);
+      for (const customer of chunk) {
+        batch.set(
+          doc(db, 'paidCustomers', customer.id),
+          sanitizePaidCustomerForFirestore(customer)
+        );
+      }
+      await batch.commit();
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, 'paidCustomers');
   }
 }

@@ -12,9 +12,11 @@ import { CALL_STATUSES, CallStatus, Lead } from '../types';
 import {
   buildTelUrl,
   buildWhatsAppUrl,
+  filterTodayLeads,
   formatBdPhoneDisplay,
   formatShortDate,
   generateLeadsCsv,
+  getLocalDateString,
 } from '../utils/leadLogic';
 import { StatusBadge } from './StatusBadge';
 
@@ -24,6 +26,7 @@ interface AdminLeadsViewProps {
   roundRobinIndex: number;
   onToggleAutoAssign: (enabled: boolean) => void;
   onReassignLead: (leadId: string, newAgentId: string | null) => void;
+  onUpdateLeadStatus: (leadId: string, newStatus: CallStatus) => void;
   onExportCsv: () => void;
 }
 
@@ -33,18 +36,24 @@ export function AdminLeadsView({
   roundRobinIndex,
   onToggleAutoAssign,
   onReassignLead,
+  onUpdateLeadStatus,
   onExportCsv,
 }: AdminLeadsViewProps) {
   const [search, setSearch] = useState('');
   const [agentFilter, setAgentFilter] = useState<string>('ALL');
   const [statusFilter, setStatusFilter] = useState<CallStatus | 'ALL'>('ALL');
 
+  const todayStr = getLocalDateString();
+
+  // Hide 28k+ historical Master_Data rows: display ONLY leads collected Today (YYYY-MM-DD)
+  const todayLeads = useMemo(() => filterTodayLeads(leads), [leads]);
+
   const nextAgent =
     CALL_CENTER_AGENTS[roundRobinIndex % CALL_CENTER_AGENTS.length]?.name ?? 'Tanjin';
 
   const filteredLeads = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return leads
+    return todayLeads
       .filter((l) => {
         if (agentFilter === 'UNASSIGNED' && l.assignedAgentId !== null) return false;
         if (agentFilter !== 'ALL' && agentFilter !== 'UNASSIGNED' && l.assignedAgentId !== agentFilter)
@@ -59,7 +68,7 @@ export function AdminLeadsView({
         );
       })
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  }, [leads, search, agentFilter, statusFilter]);
+  }, [todayLeads, search, agentFilter, statusFilter]);
 
   const handleDownloadCsv = () => {
     const csv = generateLeadsCsv(filteredLeads);
@@ -79,10 +88,10 @@ export function AdminLeadsView({
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
           <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-slate-900 dark:text-white">
-            Centralized Lead Distribution
+            Centralized Lead Distribution (Today: {todayStr})
           </h1>
           <p className="text-sm text-slate-500 dark:text-slate-400 mt-0.5">
-            Control Round-Robin automation, manually reassign leads, or export master CSV.
+            Showing only today&apos;s collected leads ({todayLeads.length}). Historical Master_Data rows stay in Google Sheets for live duplicate checking.
           </p>
         </div>
 
@@ -92,7 +101,7 @@ export function AdminLeadsView({
           className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition-colors whitespace-nowrap self-start cursor-pointer"
         >
           <Download className="w-4 h-4" />
-          <span>Export Master CSV</span>
+          <span>Export Today&apos;s CSV</span>
         </button>
       </div>
 
@@ -183,15 +192,15 @@ export function AdminLeadsView({
             </select>
 
             <span className="text-xs font-mono tabular-nums text-slate-500 dark:text-slate-400">
-              {filteredLeads.length} leads
+              {filteredLeads.length} today lead{filteredLeads.length === 1 ? '' : 's'}
             </span>
           </div>
         </div>
 
         {filteredLeads.length === 0 ? (
           <div className="p-10 text-center text-sm text-slate-500 dark:text-slate-400">
-            {leads.length === 0
-              ? 'No leads in the database yet. Add leads from the Data Collection module to begin Round-Robin distribution.'
+            {todayLeads.length === 0
+              ? `No leads collected today (${todayStr}) yet. Add leads from Data Collection to distribute across the 6 agents.`
               : 'No leads match your current search or filter.'}
           </div>
         ) : (
@@ -275,7 +284,23 @@ export function AdminLeadsView({
                     </select>
                   </td>
                   <td className="py-3 px-4">
-                    <StatusBadge status={lead.status} compact />
+                    <div className="flex items-center gap-2">
+                      <StatusBadge status={lead.status} compact />
+                      <select
+                        aria-label={`Update status for ${lead.customerName}`}
+                        value={lead.status}
+                        onChange={(e) =>
+                          onUpdateLeadStatus(lead.id, e.target.value as CallStatus)
+                        }
+                        className="px-2 py-1 text-xs font-medium rounded-md bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
+                      >
+                        {CALL_STATUSES.map((st) => (
+                          <option key={st} value={st}>
+                            {st}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
                   </td>
                   <td className="py-3 px-4 text-xs font-mono tabular-nums text-slate-500 dark:text-slate-400 whitespace-nowrap">
                     {formatShortDate(lead.createdAt)}

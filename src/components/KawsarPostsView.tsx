@@ -13,14 +13,17 @@ import {
 import { ContentPost } from '../types';
 import {
   computeKawsarPostStats,
+  filterTodayPosts,
   findDuplicatePost,
   formatDateTime,
+  getLocalDateString,
   isValidPostUrl,
   normalizePostUrl,
 } from '../utils/leadLogic';
 
 interface KawsarPostsViewProps {
   posts: ContentPost[];
+  todayOnly?: boolean;
   canSubmit?: boolean;
   compact?: boolean;
   onAddPost?: (input: {
@@ -44,6 +47,7 @@ type LinkFilter = 'ALL' | 'FACEBOOK' | 'WEBSITE' | 'BOTH';
 
 export function KawsarPostsView({
   posts,
+  todayOnly = false,
   canSubmit = true,
   compact = false,
   onAddPost,
@@ -61,7 +65,13 @@ export function KawsarPostsView({
   const [searchQuery, setSearchQuery] = useState('');
   const [linkFilter, setLinkFilter] = useState<LinkFilter>('ALL');
 
-  const stats = useMemo(() => computeKawsarPostStats(posts), [posts]);
+  const todayStr = getLocalDateString();
+  const scopedPosts = useMemo(
+    () => (todayOnly ? filterTodayPosts(posts) : posts),
+    [posts, todayOnly]
+  );
+
+  const stats = useMemo(() => computeKawsarPostStats(scopedPosts), [scopedPosts]);
 
   const liveDuplicate = useMemo(() => {
     if (!facebookLink.trim() && !websiteLink.trim()) return null;
@@ -70,7 +80,7 @@ export function KawsarPostsView({
 
   const filteredPosts = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    return posts.filter((p) => {
+    return scopedPosts.filter((p) => {
       const hasFb = Boolean(p.facebookLink && p.facebookLink.trim());
       const hasWeb = Boolean(p.websiteLink && p.websiteLink.trim());
       if (linkFilter === 'FACEBOOK' && !hasFb) return false;
@@ -84,7 +94,7 @@ export function KawsarPostsView({
         (p.websiteLink || '').toLowerCase().includes(q)
       );
     });
-  }, [posts, searchQuery, linkFilter]);
+  }, [scopedPosts, searchQuery, linkFilter]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -183,14 +193,16 @@ export function KawsarPostsView({
             {stats.todayCount}
           </p>
           <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-            {stats.totalCount} total entries submitted all time
+            {todayOnly
+              ? `Today (${todayStr}) · Resets daily`
+              : `${stats.totalCount} total entries submitted all time`}
           </p>
         </div>
 
         <div className="glass-panel rounded-2xl p-5">
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium text-slate-500 dark:text-slate-400">
-              Total Facebook Links
+              {todayOnly ? 'Facebook Links Today' : 'Total Facebook Links'}
             </span>
             <Share2 className="w-4 h-4 text-sky-500" />
           </div>
@@ -198,17 +210,17 @@ export function KawsarPostsView({
             data-testid="kawsar-fb-links"
             className="mt-2.5 text-3xl font-bold font-mono tabular-nums text-sky-600 dark:text-sky-400"
           >
-            {stats.facebookCount}
+            {todayOnly ? stats.todayFacebookCount : stats.facebookCount}
           </p>
           <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-            Non-empty Facebook links logged
+            {todayOnly ? 'Facebook links submitted today' : 'Non-empty Facebook links logged'}
           </p>
         </div>
 
         <div className="glass-panel rounded-2xl p-5">
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium text-slate-500 dark:text-slate-400">
-              Total Website Links
+              {todayOnly ? 'Website Links Today' : 'Total Website Links'}
             </span>
             <Globe className="w-4 h-4 text-amber-500" />
           </div>
@@ -216,10 +228,10 @@ export function KawsarPostsView({
             data-testid="kawsar-web-links"
             className="mt-2.5 text-3xl font-bold font-mono tabular-nums text-amber-600 dark:text-amber-400"
           >
-            {stats.websiteCount}
+            {todayOnly ? stats.todayWebsiteCount : stats.websiteCount}
           </p>
           <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-            Non-empty Website links logged
+            {todayOnly ? 'Website links submitted today' : 'Non-empty Website links logged'}
           </p>
         </div>
       </div>
@@ -369,10 +381,15 @@ export function KawsarPostsView({
         <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
           <div>
             <h2 className="text-base font-semibold text-slate-900 dark:text-white">
-              {compact ? "Kawsar's Submitted Post Links" : 'Submitted Links History'}
+              {compact
+                ? "Kawsar's Submitted Post Links"
+                : todayOnly
+                ? "Today's Submitted Links"
+                : 'Submitted Links History'}
             </h2>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-              Showing {filteredPosts.length} of {posts.length} submitted entries
+              Showing {filteredPosts.length} of {scopedPosts.length}{' '}
+              {todayOnly ? `entries today (${todayStr})` : 'submitted entries'}
             </p>
           </div>
 
@@ -416,8 +433,10 @@ export function KawsarPostsView({
               {filteredPosts.length === 0 ? (
                 <tr>
                   <td colSpan={4} className="py-10 px-4 text-center text-xs text-slate-500 dark:text-slate-400">
-                    {posts.length === 0
-                      ? 'No post links submitted yet. Use the form above to log your Facebook and/or Website post links.'
+                    {scopedPosts.length === 0
+                      ? todayOnly
+                        ? 'No post links submitted today yet. Use the form above to log your Facebook and/or Website post links.'
+                        : 'No post links submitted yet. Use the form above to log your Facebook and/or Website post links.'
                       : 'No entries match your search filter.'}
                   </td>
                 </tr>

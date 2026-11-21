@@ -1,15 +1,21 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { CallLog, ContentPost, Lead } from '../types';
+import { CallLog, ContentPost, Lead, PaidCustomer } from '../types';
+import { filterTodayLeads } from './leadLogic';
 import {
   detectLeadDuplicatesInList,
   detectPostDuplicatesInList,
   FALLBACK_GOOGLE_SHEETS_WEBHOOK_URL,
+  filterPullPayloadByDate,
   getDefaultWebhookUrl,
+  HISTORICAL_FALLBACK_ISO,
   isFirestoreDocIdSafe,
   mergeRemoteCallLogs,
   mergeRemoteContentPosts,
   mergeRemoteLeads,
+  mergeRemotePaidCustomers,
+  parseLeadDuplicateCheckResponse,
+  parsePostDuplicateCheckResponse,
   parsePullPayload,
   resolveWebhookUrl,
 } from './sheetsSync';
@@ -164,6 +170,42 @@ describe('mergeRemoteLeads', () => {
     assert.equal(updated?.status, 'Order Confirmed');
     assert.equal(updated?.collectorId, 'collector-farhan');
     assert.equal(kept?.customerName, 'Unsynced Local');
+  });
+
+  it('preserves existing updatedAt when remote row lacks updatedAt so sync stays idempotent', () => {
+    const local: Lead[] = [
+      {
+        id: 'LD-IDEMPOTENT',
+        customerName: 'Existing Lead',
+        phone: '01700000099',
+        rawPhone: '01700000099',
+        facebookLink: '',
+        normalizedFacebookLink: '',
+        notes: '',
+        collectorId: 'collector-farhan',
+        collectorName: 'Farhan',
+        assignedAgentId: 'agent-tanjin',
+        assignedAgentName: 'Tanjin',
+        status: 'Interested',
+        followUpAt: null,
+        lastCallNotes: '',
+        createdAt: '2026-11-18T08:00:00.000Z',
+        updatedAt: '2026-11-18T08:00:00.000Z',
+      },
+    ];
+
+    const merged = mergeRemoteLeads(local, [
+      {
+        id: 'LD-IDEMPOTENT',
+        customerName: 'Existing Lead',
+        phone: '01700000099',
+        status: 'Pending', // stale sheet row without updatedAt must not overwrite newer local updatedAt
+      },
+    ]);
+
+    assert.equal(merged.length, 1);
+    assert.equal(merged[0].updatedAt, '2026-11-18T08:00:00.000Z');
+    assert.equal(merged[0].status, 'Interested');
   });
 });
 
@@ -338,4 +380,230 @@ describe('detectLeadDuplicatesInList & detectPostDuplicatesInList', () => {
     assert.equal(flags[1].duplicatePostId, 'PST-2');
   });
 });
+
+describe('on-demand duplicate checks & today-only pull filtering', () => {
+  it('filterPullPayloadByDate keeps only records created/logged on the target YYYY-MM-DD date', () => {
+    const todayIso = new Date(2026, 10, 21, 10, 0, 0).toISOString();
+    const yesterdayIso = new Date(2026, 10, 20, 15, 0, 0).toISOString();
+
+    const filtered = filterPullPayloadByDate(
+      {
+        leads: [
+          { id: 'L-TODAY', createdAt: todayIso },
+          { id: 'L-YEST', createdAt: yesterdayIso, updatedAt: todayIso },
+        ],
+        callLogs: [
+          { id: 'C-TODAY', timestamp: todayIso },
+          { id: 'C-YEST', timestamp: yesterdayIso },
+        ],
+        contentPosts: [
+          { id: 'P-TODAY', createdAt: todayIso },
+          { id: 'P-YEST', createdAt: yesterdayIso },
+        ],
+        paidCustomers: [],
+      },
+      '2026-11-21'
+    );
+
+    assert.deepEqual(filtered.leads.map((l) => l.id), ['L-TODAY']);
+    assert.deepEqual(filtered.callLogs.map((c) => c.id), ['C-TODAY']);
+    assert.deepEqual(filtered.contentPosts.map((p) => p.id), ['P-TODAY']);
+  });
+
+  it('parseLeadDuplicateCheckResponse parses duplicate and non-duplicate responses cleanly', () => {
+    const nonDup = parseLeadDuplicateCheckResponse({ ok: true, isDuplicate: false });
+    assert.deepEqual(nonDup, { ok: true, isDuplicate: false });
+
+    const dup = parseLeadDuplicateCheckResponse({
+      ok: true,
+      isDuplicate: true,
+      matchedBy: 'phone',
+      lead: {
+        id: 'RBD-900',
+        customerName: 'Kamal Hossain',
+        phone: "'+8801711223344",
+        assignedAgentName: 'Kathy',
+        status: 'Order Confirmed',
+        collectorName: 'Naim',
+        createdAt: '2026-11-10T09:00:00.000Z',
+      },
+    });
+
+    assert.ok(dup);
+    assert.equal(dup.isDuplicate, true);
+    assert.equal(dup.matchedBy, 'phone');
+    assert.equal(dup.existingLead?.customerName, 'Kamal Hossain');
+    assert.equal(dup.existingLead?.phone, '01711223344');
+    assert.equal(dup.existingLead?.assignedAgentName, 'Kathy');
+    assert.equal(dup.existingLead?.status, 'Order Confirmed');
+    assert.equal(dup.existingLead?.collectorName, 'Naim');
+  });
+
+  it('parsePostDuplicateCheckResponse parses Kawsar duplicate and unique responses cleanly', () => {
+    const nonDup = parsePostDuplicateCheckResponse({ ok: true, isDuplicate: false });
+    assert.deepEqual(nonDup, { ok: true, isDuplicate: false });
+
+    const dup = parsePostDuplicateCheckResponse({
+      ok: true,
+      isDuplicate: true,
+      matchedField: 'Website Link',
+      post: {
+        id: 'PST-77',
+        note: 'Winter Promo',
+        websiteLink: 'https://runbd.com/products/winter-promo',
+        posterName: 'Kawsar',
+        createdAt: '2026-11-12T11:30:00.000Z',
+      },
+    });
+
+    assert.ok(dup);
+    assert.equal(dup.isDuplicate, true);
+    assert.equal(dup.matchedField, 'Website Link');
+    assert.equal(dup.existingPost?.posterName, 'Kawsar');
+    assert.equal(dup.existingPost?.note, 'Winter Promo');
+  });
+
+  it('parsePullPayload extracts paidCustomers and filterPullPayloadByDate preserves all paidCustomers while hiding historical leads', () => {
+    const todayIso = new Date(2026, 10, 21, 10, 0, 0).toISOString();
+    const yesterdayIso = new Date(2026, 10, 20, 15, 0, 0).toISOString();
+
+    const parsed = parsePullPayload({
+      ok: true,
+      leads: [
+        { id: 'L-TODAY', createdAt: todayIso },
+        { id: 'L-OLD', createdAt: yesterdayIso },
+      ],
+      callLogs: [{ id: 'C-TODAY', timestamp: todayIso }],
+      contentPosts: [],
+      paidCustomers: [
+        {
+          id: 'PC-OLD-ACTIVE',
+          leadId: 'L-OLD',
+          customerName: 'Older Paid Customer',
+          phone: '01711223344',
+          confirmedDate: '2026-10-25',
+          renewalDate: '2026-11-24',
+          renewalStatus: 'Active',
+        },
+      ],
+    });
+
+    assert.ok(parsed);
+    assert.equal(parsed.paidCustomers.length, 1);
+
+    const filtered = filterPullPayloadByDate(parsed, '2026-11-21');
+    assert.deepEqual(filtered.leads.map((l) => l.id), ['L-TODAY']);
+    assert.equal(filtered.paidCustomers.length, 1);
+    assert.equal(filtered.paidCustomers[0].id, 'PC-OLD-ACTIVE');
+  });
+
+  it('mergeRemotePaidCustomers applies manual Google Sheets status/renewal edits cleanly two-way', () => {
+    const local: PaidCustomer[] = [
+      {
+        id: 'PC-RBD-1',
+        leadId: 'RBD-1',
+        customerName: 'Mahmudul Hasan',
+        phone: '01711223344',
+        assignedAgentId: 'agent-tanjin',
+        assignedAgentName: 'Tanjin',
+        confirmedDate: '2026-10-22',
+        renewalDate: '2026-11-21',
+        renewalStatus: 'Active',
+        lastRenewedAt: null,
+        notes: 'Initial order',
+        createdAt: '2026-10-22T09:00:00.000Z',
+        updatedAt: '2026-10-22T09:00:00.000Z',
+      },
+    ];
+
+    const merged = mergeRemotePaidCustomers(local, [
+      {
+        id: 'PC-RBD-1',
+        leadId: 'RBD-1',
+        customerName: 'Mahmudul Hasan',
+        phone: "'+8801711223344",
+        assignedAgentName: 'Tanjin',
+        confirmedDate: '2026-10-22',
+        renewalDate: '2026-12-21', // manually renewed inside Google Sheet without updating UpdatedAt
+        renewalStatus: 'Renewed',
+      },
+      {
+        id: '',
+        customerName: 'Sheet Manual Paid',
+        phone: '01955667788',
+        assignedAgentName: 'Sakib',
+        confirmedDate: '2026-11-01',
+        renewalDate: '2026-12-01',
+        renewalStatus: 'Active',
+      },
+    ]);
+
+    assert.equal(merged.length, 2);
+    const updated = merged.find((c) => c.id === 'PC-RBD-1');
+    const addedFromSheet = merged.find((c) => c.customerName === 'Sheet Manual Paid');
+    assert.equal(updated?.renewalStatus, 'Renewed');
+    assert.equal(updated?.renewalDate, '2026-12-21');
+    assert.equal(updated?.phone, '01711223344');
+    assert.ok(addedFromSheet);
+    assert.equal(addedFromSheet?.id, 'SHEET-PC-1955667788');
+    assert.equal(addedFromSheet?.assignedAgentId, 'agent-sakib');
+    assert.equal(isFirestoreDocIdSafe(addedFromSheet?.id || ''), true);
+  });
+
+  it('mergeRemoteLeads and filterPullPayloadByDate preserve bare stored dates and never stamp missing dates as Today', () => {
+    const now = new Date(2026, 10, 21, 11, 0, 0);
+    const todayIso = new Date(2026, 10, 21, 9, 0, 0).toISOString();
+
+    const filtered = filterPullPayloadByDate(
+      {
+        leads: [
+          { id: 'L-TODAY-BARE', createdAt: '2026-11-21' },
+          { id: 'L-YEST-BARE', createdAt: '2026-11-20', updatedAt: todayIso },
+          { id: 'L-NO-CREATED', updatedAt: todayIso },
+          { id: 'L-COLLECTED-YEST', collectedDate: '2026-11-20', updatedAt: todayIso },
+        ],
+        callLogs: [],
+        contentPosts: [],
+        paidCustomers: [],
+      },
+      '2026-11-21'
+    );
+    assert.deepEqual(filtered.leads.map((l) => l.id), ['L-TODAY-BARE']);
+
+    const merged = mergeRemoteLeads([], [
+      {
+        id: 'L-OLD-NO-DATE',
+        customerName: 'Historical Without CreatedAt',
+        phone: '01711000001',
+        updatedAt: todayIso,
+      },
+      {
+        id: 'L-OLD-BARE',
+        customerName: 'Yesterday Bare Date',
+        phone: '01711000002',
+        createdAt: '2026-11-20',
+        updatedAt: todayIso,
+      },
+      {
+        id: 'L-TODAY-ROW',
+        customerName: 'Today Lead',
+        phone: '01711000003',
+        createdAt: '2026-11-21',
+        updatedAt: todayIso,
+      },
+    ]);
+
+    const noDate = merged.find((l) => l.id === 'L-OLD-NO-DATE');
+    const bareOld = merged.find((l) => l.id === 'L-OLD-BARE');
+    assert.equal(noDate?.createdAt, HISTORICAL_FALLBACK_ISO);
+    assert.equal(bareOld?.createdAt, '2026-11-20T12:00:00.000Z');
+
+    assert.deepEqual(
+      filterTodayLeads(merged, now).map((l) => l.id),
+      ['L-TODAY-ROW']
+    );
+  });
+});
+
+
 

@@ -12,10 +12,13 @@ import {
 } from 'lucide-react';
 import { CsvPreviewRow, DuplicateAttempt, Lead, User } from '../types';
 import {
+  filterTodayDuplicateAttempts,
+  filterTodayLeads,
   findDuplicateLead,
   formatBdPhoneDisplay,
   formatDateTime,
   formatShortDate,
+  getLocalDateString,
   normalizeBdPhone,
   parseCsvLeads,
 } from '../utils/leadLogic';
@@ -74,22 +77,26 @@ export function DataCollectionView({
     return findDuplicateLead(allLeads, rawPhone, facebookLink);
   }, [allLeads, rawPhone, facebookLink]);
 
-  // Filtered submissions & duplicate alerts for the current collector (Admin sees all)
+  const todayStr = getLocalDateString();
+
+  // Strictly display ONLY leads collected Today (YYYY-MM-DD) for all roles (Collectors & Admin)
   const mySubmissions = useMemo(() => {
+    const todayLeads = filterTodayLeads(allLeads);
     const list =
       currentUser.role === 'admin'
-        ? allLeads
-        : allLeads.filter((l) => l.collectorId === currentUser.id);
+        ? todayLeads
+        : todayLeads.filter((l) => l.collectorId === currentUser.id);
     return [...list].sort(
       (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
     );
   }, [allLeads, currentUser]);
 
   const myDuplicates = useMemo(() => {
+    const todayDups = filterTodayDuplicateAttempts(duplicateAttempts);
     const list =
       currentUser.role === 'admin'
-        ? duplicateAttempts
-        : duplicateAttempts.filter((d) => d.collectorId === currentUser.id);
+        ? todayDups
+        : todayDups.filter((d) => d.collectorId === currentUser.id);
     return [...list].sort(
       (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
     );
@@ -265,6 +272,42 @@ export function DataCollectionView({
           >
             Bulk CSV Upload
           </button>
+        </div>
+      </div>
+
+      {/* Today-only Collector Stats (Historical rows remain in Google Sheets) */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div className="glass-panel rounded-xl p-4 flex items-center justify-between gap-4">
+          <div>
+            <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
+              Collected Today ({todayStr})
+            </p>
+            <p
+              data-testid="collector-today-count"
+              className="mt-1 text-2xl font-bold font-mono tabular-nums text-emerald-600 dark:text-emerald-400"
+            >
+              {mySubmissions.length}
+            </p>
+            <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+              Resets to 0 daily &middot; Live Sheet duplicate check active on submit
+            </p>
+          </div>
+        </div>
+        <div className="glass-panel rounded-xl p-4 flex items-center justify-between gap-4">
+          <div>
+            <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
+              Blocked Duplicates Today
+            </p>
+            <p
+              data-testid="collector-dup-today-count"
+              className="mt-1 text-2xl font-bold font-mono tabular-nums text-amber-600 dark:text-amber-400"
+            >
+              {myDuplicates.length}
+            </p>
+            <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+              Checked directly against full Google Sheets Master_Data
+            </p>
+          </div>
         </div>
       </div>
 
@@ -445,7 +488,7 @@ export function DataCollectionView({
               {csvFileName ? `Loaded: ${csvFileName}` : 'Choose a CSV file to validate and preview'}
             </p>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-              Every row is normalized and checked against existing database duplicates before import.
+              Every row is normalized and checked live against Google Sheets Master_Data before import.
             </p>
             <input
               ref={fileInputRef}
@@ -547,17 +590,19 @@ export function DataCollectionView({
           <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
             <div>
               <h2 className="text-base font-semibold text-slate-900 dark:text-white">
-                {currentUser.role === 'admin' ? 'Recent Collected Leads' : 'My Submission History'}
+                {currentUser.role === 'admin'
+                  ? "Today's Collected Leads (All Collectors)"
+                  : "My Today's Submissions"}
               </h2>
               <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5 tabular-nums">
-                {mySubmissions.length} valid lead{mySubmissions.length === 1 ? '' : 's'} recorded
+                {mySubmissions.length} valid lead{mySubmissions.length === 1 ? '' : 's'} recorded today ({todayStr})
               </p>
             </div>
           </div>
 
           {mySubmissions.length === 0 ? (
             <div className="p-8 text-center text-sm text-slate-500 dark:text-slate-400">
-              No leads submitted yet. Use the form above to add your first lead.
+              No leads submitted today ({todayStr}) yet. Use the form above to add a lead.
             </div>
           ) : (
             <div className="overflow-x-auto">

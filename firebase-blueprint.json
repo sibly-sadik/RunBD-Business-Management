@@ -172,6 +172,44 @@
         "callScript",
         "lastSyncedAt"
       ]
+    },
+    "PaidCustomer": {
+      "title": "PaidCustomer",
+      "description": "Confirmed paid customer tracked for 1-month renewal cycles and 2-day advance alerts.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "leadId": { "type": "string", "maxLength": 128 },
+        "customerName": { "type": "string", "maxLength": 200 },
+        "phone": { "type": "string", "maxLength": 32 },
+        "assignedAgentId": { "type": "string", "maxLength": 64 },
+        "assignedAgentName": { "type": "string", "maxLength": 100 },
+        "confirmedDate": { "type": "string", "maxLength": 32 },
+        "renewalDate": { "type": "string", "maxLength": 32 },
+        "renewalStatus": {
+          "type": "string",
+          "enum": ["Active", "Renewed", "Expired"]
+        },
+        "lastRenewedAt": { "type": "string", "maxLength": 64 },
+        "notes": { "type": "string", "maxLength": 2000 },
+        "createdAt": { "type": "string", "format": "date-time", "maxLength": 64 },
+        "updatedAt": { "type": "string", "format": "date-time", "maxLength": 64 }
+      },
+      "required": [
+        "id",
+        "leadId",
+        "customerName",
+        "phone",
+        "assignedAgentId",
+        "assignedAgentName",
+        "confirmedDate",
+        "renewalDate",
+        "renewalStatus",
+        "lastRenewedAt",
+        "notes",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -198,6 +236,10 @@
     "/settings/{settingId}": {
       "schema": { "$ref": "#/entities/AppSettings" },
       "description": "Global workspace settings document (settings/global)."
+    },
+    "/paidCustomers/{customerId}": {
+      "schema": { "$ref": "#/entities/PaidCustomer" },
+      "description": "Paid customers created from Order Confirmed leads with 30-day renewal dates."
     }
   }
 }

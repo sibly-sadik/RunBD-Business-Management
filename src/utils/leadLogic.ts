@@ -7,6 +7,8 @@ import {
   DateRangeFilter,
   DuplicateAttempt,
   Lead,
+  PaidCustomer,
+  RenewalStatus,
   User,
 } from '../types';
 
@@ -336,8 +338,89 @@ export function assignLeadsRoundRobin(
   return { assignedLeads, nextIndex: pointer };
 }
 
+export function getLocalDateString(date: Date = new Date()): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(
+    date.getDate()
+  ).padStart(2, '0')}`;
+}
+
 /**
- * Checks if an ISO timestamp falls within the active DateRangeFilter.
+ * Parses a YYYY-MM-DD date string into local midnight Date, or null if invalid.
+ */
+export function parseYmdLocal(ymd: string): Date | null {
+  const match = String(ymd || '')
+    .trim()
+    .match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const dt = new Date(year, month - 1, day, 0, 0, 0, 0);
+  if (
+    dt.getFullYear() !== year ||
+    dt.getMonth() !== month - 1 ||
+    dt.getDate() !== day
+  ) {
+    return null;
+  }
+  return dt;
+}
+
+/**
+ * Normalizes a stored date/timestamp (bare YYYY-MM-DD, YYYY/MM/DD, ISO timestamp, or Date)
+ * into a local YYYY-MM-DD calendar date string without UTC-midnight off-by-one shifts.
+ * Returns null for empty or invalid values (never defaults to Today).
+ */
+export function parseDateToYmd(value: unknown): string | null {
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : getLocalDateString(value);
+  }
+  if (typeof value !== 'string') return null;
+  const trimmed = value.replace(/^'+/, '').trim();
+  if (!trimmed) return null;
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+    return parseYmdLocal(trimmed) ? trimmed : null;
+  }
+
+  const slashIso = trimmed.match(/^(\d{4})\/(\d{1,2})\/(\d{1,2})$/);
+  if (slashIso) {
+    const ymd = `${slashIso[1]}-${slashIso[2].padStart(2, '0')}-${slashIso[3].padStart(2, '0')}`;
+    return parseYmdLocal(ymd) ? ymd : null;
+  }
+
+  const parsed = new Date(trimmed);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return getLocalDateString(parsed);
+}
+
+/**
+ * Extracts a lead's actual stored collection date (YYYY-MM-DD) from collectedDate / date / createdAt.
+ * Never falls back to updatedAt or current render time.
+ */
+export function getLeadCollectedYmd(
+  lead: Partial<Pick<Lead, 'createdAt' | 'collectedDate' | 'date'>>
+): string | null {
+  return (
+    parseDateToYmd(lead.collectedDate) ??
+    parseDateToYmd(lead.date) ??
+    parseDateToYmd(lead.createdAt)
+  );
+}
+
+/**
+ * Checks whether a lead's stored collection date equals Today's local YYYY-MM-DD date.
+ */
+export function isLeadCollectedToday(
+  lead: Partial<Pick<Lead, 'createdAt' | 'collectedDate' | 'date'>>,
+  now: Date = new Date()
+): boolean {
+  const ymd = getLeadCollectedYmd(lead);
+  return ymd !== null && ymd === getLocalDateString(now);
+}
+
+/**
+ * Checks if an ISO timestamp or bare YYYY-MM-DD falls within the active DateRangeFilter.
  */
 export function isWithinDateRange(
   isoTimestamp: string,
@@ -345,7 +428,9 @@ export function isWithinDateRange(
   now: Date = new Date()
 ): boolean {
   if (filter.preset === 'all') return true;
-  const date = new Date(isoTimestamp);
+  const trimmed = String(isoTimestamp ?? '').replace(/^'+/, '').trim();
+  const bareLocal = /^\d{4}-\d{2}-\d{2}$/.test(trimmed) ? parseYmdLocal(trimmed) : null;
+  const date = bareLocal ?? new Date(trimmed);
   if (Number.isNaN(date.getTime())) return false;
 
   const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
@@ -387,6 +472,48 @@ export function isFollowUpDueToday(followUpAt: string | null, now: Date = new Da
     dt.getMonth() === now.getMonth() &&
     dt.getDate() === now.getDate()
   );
+}
+
+/**
+ * Checks whether an ISO timestamp or YYYY-MM-DD date string falls on today's local date (YYYY-MM-DD).
+ */
+export function isTimestampToday(isoTimestamp: string, now: Date = new Date()): boolean {
+  const ymd = parseDateToYmd(isoTimestamp);
+  if (!ymd) return false;
+  return ymd === getLocalDateString(now);
+}
+
+/**
+ * Returns only leads collected today (YYYY-MM-DD local date).
+ * Checks collectedDate / date / createdAt strictly (never updatedAt or render time).
+ */
+export function filterTodayLeads(leads: Lead[], now: Date = new Date()): Lead[] {
+  const todayYmd = getLocalDateString(now);
+  return leads.filter((l) => getLeadCollectedYmd(l) === todayYmd);
+}
+
+/**
+ * Returns only call logs recorded today (YYYY-MM-DD local date).
+ */
+export function filterTodayCallLogs(logs: CallLog[], now: Date = new Date()): CallLog[] {
+  return logs.filter((c) => isTimestampToday(c.timestamp, now));
+}
+
+/**
+ * Returns only content posts submitted today (YYYY-MM-DD local date).
+ */
+export function filterTodayPosts(posts: ContentPost[], now: Date = new Date()): ContentPost[] {
+  return posts.filter((p) => isTimestampToday(p.createdAt, now));
+}
+
+/**
+ * Returns only duplicate attempts recorded today (YYYY-MM-DD local date).
+ */
+export function filterTodayDuplicateAttempts(
+  attempts: DuplicateAttempt[],
+  now: Date = new Date()
+): DuplicateAttempt[] {
+  return attempts.filter((d) => isTimestampToday(d.timestamp, now));
 }
 
 /**
@@ -505,7 +632,9 @@ export function computeCollectorStats(
  * Formats an ISO date string into a readable short date, e.g., "Nov 17, 2026".
  */
 export function formatShortDate(iso: string): string {
-  const dt = new Date(iso);
+  const trimmed = String(iso ?? '').replace(/^'+/, '').trim();
+  const bareLocal = /^\d{4}-\d{2}-\d{2}$/.test(trimmed) ? parseYmdLocal(trimmed) : null;
+  const dt = bareLocal ?? new Date(trimmed);
   if (Number.isNaN(dt.getTime())) return iso;
   return dt.toLocaleDateString('en-US', {
     month: 'short',
@@ -778,29 +907,41 @@ export function computeKawsarPostStats(
   now: Date = new Date()
 ): {
   todayCount: number;
+  todayFacebookCount: number;
+  todayWebsiteCount: number;
   facebookCount: number;
   websiteCount: number;
   totalCount: number;
 } {
   const todayFilter: DateRangeFilter = { preset: 'today', startDate: '', endDate: '' };
   let todayCount = 0;
+  let todayFacebookCount = 0;
+  let todayWebsiteCount = 0;
   let facebookCount = 0;
   let websiteCount = 0;
 
   for (const post of posts) {
-    if (isWithinDateRange(post.createdAt, todayFilter, now)) {
+    const isToday = isWithinDateRange(post.createdAt, todayFilter, now);
+    const hasFb = Boolean(post.facebookLink && post.facebookLink.trim());
+    const hasWeb = Boolean(post.websiteLink && post.websiteLink.trim());
+
+    if (isToday) {
       todayCount++;
+      if (hasFb) todayFacebookCount++;
+      if (hasWeb) todayWebsiteCount++;
     }
-    if (post.facebookLink && post.facebookLink.trim()) {
+    if (hasFb) {
       facebookCount++;
     }
-    if (post.websiteLink && post.websiteLink.trim()) {
+    if (hasWeb) {
       websiteCount++;
     }
   }
 
   return {
     todayCount,
+    todayFacebookCount,
+    todayWebsiteCount,
     facebookCount,
     websiteCount,
     totalCount: posts.length,
@@ -849,16 +990,8 @@ export interface FinalDailySummary {
   };
 }
 
-export function getLocalDateString(date: Date = new Date()): string {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(
-    date.getDate()
-  ).padStart(2, '0')}`;
-}
-
 function isIsoOnLocalDate(iso: string, targetDateStr: string): boolean {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return false;
-  return getLocalDateString(d) === targetDateStr;
+  return parseDateToYmd(iso) === targetDateStr;
 }
 
 export function computeFinalDailySummary(
@@ -1066,6 +1199,201 @@ export function generateFinalDailySummaryCsv(summary: FinalDailySummary): string
   );
 
   return '\uFEFF' + lines.join('\n');
+}
+
+// ============================================================================
+// Paid Customers & 1-Month Renewal Tracking Logic
+// ============================================================================
+
+// Paid Customers helpers continue below (parseYmdLocal defined above)
+
+/**
+ * Adds a whole number of calendar days to a YYYY-MM-DD date string and returns YYYY-MM-DD.
+ */
+export function addDaysToYmd(ymd: string, days: number): string {
+  const base = parseYmdLocal(ymd) ?? new Date();
+  const next = new Date(base.getFullYear(), base.getMonth(), base.getDate() + days, 0, 0, 0, 0);
+  return getLocalDateString(next);
+}
+
+/**
+ * Normalizes any ISO timestamp, Date, or YYYY-MM-DD string into YYYY-MM-DD (local date).
+ */
+export function toYmdString(value: string | Date | null | undefined, fallbackNow: Date = new Date()): string {
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? getLocalDateString(fallbackNow) : getLocalDateString(value);
+  }
+  const str = String(value ?? '').trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(str)) {
+    return str;
+  }
+  if (str) {
+    const parsed = new Date(str);
+    if (!Number.isNaN(parsed.getTime())) {
+      return getLocalDateString(parsed);
+    }
+  }
+  return getLocalDateString(fallbackNow);
+}
+
+/**
+ * Computes whole calendar days remaining until renewalDate (YYYY-MM-DD) relative to `now`.
+ * Returns 0 if renewalDate is today, positive integer if upcoming, negative if past.
+ */
+export function computeDaysRemaining(renewalDateYmd: string, now: Date = new Date()): number {
+  const renewalDt = parseYmdLocal(toYmdString(renewalDateYmd, now));
+  if (!renewalDt) return 0;
+  const todayDt = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+  const diffMs = renewalDt.getTime() - todayDt.getTime();
+  return Math.round(diffMs / 86400000);
+}
+
+/**
+ * Computes effective RenewalStatus: returns 'Expired' if stored status is 'Expired'
+ * or if the renewal date has passed (daysRemaining < 0); otherwise returns stored status ('Active' | 'Renewed').
+ */
+export function computeEffectiveRenewalStatus(
+  customer: Pick<PaidCustomer, 'renewalDate' | 'renewalStatus'>,
+  now: Date = new Date()
+): RenewalStatus {
+  if (customer.renewalStatus === 'Expired') return 'Expired';
+  const daysRemaining = computeDaysRemaining(customer.renewalDate, now);
+  if (daysRemaining < 0) return 'Expired';
+  return customer.renewalStatus === 'Renewed' ? 'Renewed' : 'Active';
+}
+
+/**
+ * Creates a deterministic PaidCustomer record from an Order Confirmed Lead,
+ * setting Confirmed Date = Today (YYYY-MM-DD) and Renewal Date = Confirmed Date + 30 days.
+ */
+export function createPaidCustomerFromLead(
+  lead: Lead,
+  now: Date = new Date()
+): PaidCustomer {
+  const confirmedDate = getLocalDateString(now);
+  const renewalDate = addDaysToYmd(confirmedDate, 30);
+  const nowIso = now.toISOString();
+  const safeId = /^[a-zA-Z0-9_-]{1,120}$/.test(lead.id)
+    ? `PC-${lead.id}`.slice(0, 128)
+    : `PC-${Date.now().toString(36).toUpperCase()}`;
+
+  return {
+    id: safeId,
+    leadId: lead.id,
+    customerName: lead.customerName,
+    phone: normalizeBdPhone(lead.phone || lead.rawPhone) || lead.phone || lead.rawPhone,
+    assignedAgentId: lead.assignedAgentId,
+    assignedAgentName: lead.assignedAgentName,
+    confirmedDate,
+    renewalDate,
+    renewalStatus: 'Active',
+    lastRenewedAt: null,
+    notes: lead.lastCallNotes || lead.notes || '',
+    createdAt: nowIso,
+    updatedAt: nowIso,
+  };
+}
+
+/**
+ * Marks a PaidCustomer as Renewed (+1 Month / +30 days) and clears any 2-day renewal alert.
+ * Extends from the current renewalDate when not yet expired, or from today when expired.
+ */
+export function renewPaidCustomer(
+  customer: PaidCustomer,
+  now: Date = new Date()
+): PaidCustomer {
+  const todayYmd = getLocalDateString(now);
+  const currentRenewalYmd = toYmdString(customer.renewalDate, now);
+  const baseYmd = currentRenewalYmd >= todayYmd ? currentRenewalYmd : todayYmd;
+  const nextRenewalDate = addDaysToYmd(baseYmd, 30);
+  const nowIso = now.toISOString();
+
+  return {
+    ...customer,
+    renewalDate: nextRenewalDate,
+    renewalStatus: 'Renewed',
+    lastRenewedAt: nowIso,
+    updatedAt: nowIso,
+  };
+}
+
+/**
+ * Returns Paid Customers whose Renewal Date is 2 days away or less (0 <= daysRemaining <= 2)
+ * and whose status is Active / Renewed (not Expired), sorted soonest first.
+ */
+export interface DueRenewalItem {
+  customer: PaidCustomer;
+  daysRemaining: number;
+  effectiveStatus: RenewalStatus;
+}
+
+export function getDueRenewalCustomers(
+  customers: PaidCustomer[],
+  now: Date = new Date(),
+  agentIdFilter?: string | null
+): DueRenewalItem[] {
+  const items: DueRenewalItem[] = [];
+  for (const customer of customers) {
+    if (agentIdFilter && customer.assignedAgentId !== agentIdFilter) continue;
+    const daysRemaining = computeDaysRemaining(customer.renewalDate, now);
+    const effectiveStatus = computeEffectiveRenewalStatus(customer, now);
+    if (effectiveStatus !== 'Expired' && daysRemaining <= 2) {
+      items.push({ customer, daysRemaining, effectiveStatus });
+    }
+  }
+  return items.sort(
+    (a, b) =>
+      a.daysRemaining - b.daysRemaining ||
+      a.customer.customerName.localeCompare(b.customer.customerName)
+  );
+}
+
+/**
+ * Generates an Excel-compatible (UTF-8 BOM) CSV export of Paid Customers & Renewals.
+ */
+export function generatePaidCustomersCsv(
+  customers: PaidCustomer[],
+  now: Date = new Date()
+): string {
+  const headers = [
+    'Customer ID',
+    'Lead ID',
+    'Customer Name',
+    'Phone',
+    'Assigned Agent',
+    'Confirmed Date',
+    'Renewal Date',
+    'Days Remaining',
+    'Renewal Status',
+  ];
+
+  const escape = (val: string | number | null | undefined) => {
+    const str = String(val ?? '');
+    if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+      return `"${str.replace(/"/g, '""')}"`;
+    }
+    return str;
+  };
+
+  const rows = customers.map((c) => {
+    const daysRemaining = computeDaysRemaining(c.renewalDate, now);
+    const effectiveStatus = computeEffectiveRenewalStatus(c, now);
+    return [
+      c.id,
+      c.leadId,
+      c.customerName,
+      c.phone,
+      c.assignedAgentName ?? 'Unassigned',
+      c.confirmedDate,
+      c.renewalDate,
+      daysRemaining,
+      effectiveStatus,
+    ]
+      .map(escape)
+      .join(',');
+  });
+
+  return '\uFEFF' + [headers.join(','), ...rows].join('\n');
 }
 
 
