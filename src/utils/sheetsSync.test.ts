@@ -10,6 +10,7 @@ import {
   getDefaultWebhookUrl,
   HISTORICAL_FALLBACK_ISO,
   isFirestoreDocIdSafe,
+  isLegacyWebhookUrl,
   mergeRemoteCallLogs,
   mergeRemoteContentPosts,
   mergeRemoteLeads,
@@ -21,11 +22,31 @@ import {
 } from './sheetsSync';
 
 describe('Google Sheets default webhook URL resolution', () => {
+  it('uses the updated RunBD Apps Script deployment URL as the hardcoded fallback', () => {
+    assert.equal(
+      FALLBACK_GOOGLE_SHEETS_WEBHOOK_URL,
+      'https://script.google.com/macros/s/AKfycbyCPGFliknk1322hJoPwgCWkBIlobMRWd3AnJcAKr8R7oCs1Q5rNT--ydFr8jaWkF3r/exec'
+    );
+  });
+
   it('returns the hardcoded RunBD webhook URL when no saved or env URL exists', () => {
     assert.equal(getDefaultWebhookUrl(undefined), FALLBACK_GOOGLE_SHEETS_WEBHOOK_URL);
     assert.equal(getDefaultWebhookUrl(''), FALLBACK_GOOGLE_SHEETS_WEBHOOK_URL);
     assert.equal(resolveWebhookUrl('', ''), FALLBACK_GOOGLE_SHEETS_WEBHOOK_URL);
     assert.equal(resolveWebhookUrl(null, null), FALLBACK_GOOGLE_SHEETS_WEBHOOK_URL);
+  });
+
+  it('automatically replaces legacy/deprecated webhook URLs with the new default URL', () => {
+    const legacyUrl =
+      'https://script.google.com/macros/s/AKfycbwqMl23Bi200Idn267ySCDpKBY30b1FdYC8OWPOPK90neBvSPwWyn7Eq-VqV8ublfUD/exec';
+    assert.equal(isLegacyWebhookUrl(legacyUrl), true);
+    assert.equal(isLegacyWebhookUrl(` ${legacyUrl}/ `), true);
+    assert.equal(resolveWebhookUrl(legacyUrl, ''), FALLBACK_GOOGLE_SHEETS_WEBHOOK_URL);
+    assert.equal(getDefaultWebhookUrl(legacyUrl), FALLBACK_GOOGLE_SHEETS_WEBHOOK_URL);
+    assert.equal(
+      isLegacyWebhookUrl(FALLBACK_GOOGLE_SHEETS_WEBHOOK_URL),
+      false
+    );
   });
 
   it('prefers VITE_GOOGLE_SHEET_WEBHOOK_URL env value over fallback when localStorage is empty', () => {

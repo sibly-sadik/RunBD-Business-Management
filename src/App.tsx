@@ -72,10 +72,12 @@ import {
   detectLeadDuplicatesInList,
   detectPostDuplicatesInList,
   isFirestoreDocIdSafe,
+  isLegacyWebhookUrl,
   mergeRemoteCallLogs,
   mergeRemoteContentPosts,
   mergeRemoteLeads,
   mergeRemotePaidCustomers,
+  resolveWebhookUrl,
   SheetDuplicateReport,
 } from './utils/sheetsSync';
 import {
@@ -244,13 +246,17 @@ export default function App() {
       setCallLogs((prev) => mergeRemoteCallLogs(prev, remoteLogs));
     }, todayScopeOption);
     const unsubSettings = subscribeToSettings((remoteSettings) => {
+      const remoteUrl = remoteSettings.googleSheetsWebhookUrl?.trim() ?? '';
       setSettings((prev) => ({
         ...prev,
         ...remoteSettings,
         googleSheetsWebhookUrl:
-          remoteSettings.googleSheetsWebhookUrl?.trim() ||
-          prev.googleSheetsWebhookUrl ||
-          DEFAULT_GOOGLE_SHEETS_WEBHOOK_URL,
+          remoteUrl && !isLegacyWebhookUrl(remoteUrl)
+            ? remoteUrl
+            : resolveWebhookUrl(
+                prev.googleSheetsWebhookUrl,
+                DEFAULT_GOOGLE_SHEETS_WEBHOOK_URL
+              ),
       }));
     });
 

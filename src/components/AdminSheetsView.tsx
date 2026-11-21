@@ -172,11 +172,20 @@ export function AdminSheetsView({
             <input
               id="webhook-url-input"
               type="url"
-              placeholder="https://script.google.com/macros/s/AKfycb.../exec"
+              placeholder={defaultWebhookUrl}
               value={urlInput}
               onChange={(e) => setUrlInput(e.target.value)}
               className="w-full px-3.5 py-2.5 text-sm font-mono rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500"
             />
+            <p className="mt-1.5 text-[11px] text-slate-500 dark:text-slate-400 break-all">
+              Default RunBD Web App URL:{' '}
+              <code
+                data-testid="default-webhook-url"
+                className="font-mono text-slate-700 dark:text-slate-300"
+              >
+                {defaultWebhookUrl}
+              </code>
+            </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-3">

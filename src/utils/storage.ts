@@ -45,9 +45,12 @@ const STORAGE_KEYS = {
   CONTENT_POSTS: 'runbd_content_posts_v2',
   PAID_CUSTOMERS: 'runbd_paid_customers_v1',
   SETTINGS: 'runbd_settings_v2',
+  WEBHOOK_VERSION: 'runbd_webhook_version_v1',
   SESSION_USER_ID: 'runbd_session_user_v2',
   THEME: 'runbd_theme_v1',
 };
+
+const CURRENT_WEBHOOK_VERSION = '2026-11-21-v2';
 
 function safeRead<T>(key: string, fallback: () => T): T {
   try {
@@ -105,6 +108,28 @@ export const storage = {
       ...DEFAULT_SETTINGS,
       googleSheetsWebhookUrl: DEFAULT_GOOGLE_SHEETS_WEBHOOK_URL,
     }));
+
+    let migratedVersion: string | null = null;
+    try {
+      migratedVersion = localStorage.getItem(STORAGE_KEYS.WEBHOOK_VERSION);
+    } catch {
+      migratedVersion = null;
+    }
+
+    if (migratedVersion !== CURRENT_WEBHOOK_VERSION) {
+      try {
+        localStorage.setItem(STORAGE_KEYS.WEBHOOK_VERSION, CURRENT_WEBHOOK_VERSION);
+      } catch {
+        // Ignore
+      }
+      const upgraded: AppSettings = {
+        ...settings,
+        googleSheetsWebhookUrl: DEFAULT_GOOGLE_SHEETS_WEBHOOK_URL,
+      };
+      safeWrite(STORAGE_KEYS.SETTINGS, upgraded);
+      return upgraded;
+    }
+
     const resolvedUrl = resolveWebhookUrl(
       settings.googleSheetsWebhookUrl,
       ENV_GOOGLE_SHEET_WEBHOOK_URL
@@ -119,7 +144,14 @@ export const storage = {
     }
     return settings;
   },
-  saveSettings: (settings: AppSettings) => safeWrite(STORAGE_KEYS.SETTINGS, settings),
+  saveSettings: (settings: AppSettings) => {
+    try {
+      localStorage.setItem(STORAGE_KEYS.WEBHOOK_VERSION, CURRENT_WEBHOOK_VERSION);
+    } catch {
+      // Ignore
+    }
+    safeWrite(STORAGE_KEYS.SETTINGS, settings);
+  },
 
   getSessionUserId: (): string | null => {
     try {

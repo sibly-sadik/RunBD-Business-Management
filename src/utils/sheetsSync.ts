@@ -23,7 +23,17 @@ import {
 export const HISTORICAL_FALLBACK_ISO = '1970-01-01T00:00:00.000Z';
 
 export const FALLBACK_GOOGLE_SHEETS_WEBHOOK_URL =
-  'https://script.google.com/macros/s/AKfycbwqMl23Bi200Idn267ySCDpKBY30b1FdYC8OWPOPK90neBvSPwWyn7Eq-VqV8ublfUD/exec';
+  'https://script.google.com/macros/s/AKfycbyCPGFliknk1322hJoPwgCWkBIlobMRWd3AnJcAKr8R7oCs1Q5rNT--ydFr8jaWkF3r/exec';
+
+export const LEGACY_GOOGLE_SHEETS_WEBHOOK_URLS: ReadonlySet<string> = new Set([
+  'https://script.google.com/macros/s/AKfycbwqMl23Bi200Idn267ySCDpKBY30b1FdYC8OWPOPK90neBvSPwWyn7Eq-VqV8ublfUD/exec',
+]);
+
+export function isLegacyWebhookUrl(value?: string | null): boolean {
+  const normalized = (value ?? '').trim().replace(/\/+$/, '');
+  if (!normalized) return false;
+  return LEGACY_GOOGLE_SHEETS_WEBHOOK_URLS.has(normalized);
+}
 
 export function isValidHttpUrl(value: string): boolean {
   const trimmed = value.trim();
@@ -42,22 +52,22 @@ export function isValidHttpUrl(value: string): boolean {
  */
 export function getDefaultWebhookUrl(envUrl?: string | null): string {
   const candidate = (envUrl ?? '').trim();
-  if (candidate && isValidHttpUrl(candidate)) {
+  if (candidate && isValidHttpUrl(candidate) && !isLegacyWebhookUrl(candidate)) {
     return candidate;
   }
   return FALLBACK_GOOGLE_SHEETS_WEBHOOK_URL;
 }
 
 /**
- * Resolves the active webhook URL: uses the saved custom URL if present,
- * otherwise automatically initializes with the default webhook URL.
+ * Resolves the active webhook URL: uses the saved custom URL if present
+ * and not deprecated, otherwise automatically initializes with the default webhook URL.
  */
 export function resolveWebhookUrl(
   savedUrl?: string | null,
   envUrl?: string | null
 ): string {
   const saved = (savedUrl ?? '').trim();
-  if (saved && isValidHttpUrl(saved)) {
+  if (saved && isValidHttpUrl(saved) && !isLegacyWebhookUrl(saved)) {
     return saved;
   }
   return getDefaultWebhookUrl(envUrl);
