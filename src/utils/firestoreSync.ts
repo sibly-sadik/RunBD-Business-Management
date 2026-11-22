@@ -146,6 +146,9 @@ function sanitizeSettingsForFirestore(settings: AppSettings): AppSettings {
   return {
     autoAssignEnabled: Boolean(settings.autoAssignEnabled),
     roundRobinIndex: Math.max(0, Math.floor(Number(settings.roundRobinIndex) || 0)),
+    disabledAgentIds: Array.isArray(settings.disabledAgentIds)
+      ? settings.disabledAgentIds.filter((id): id is string => typeof id === 'string')
+      : [],
     googleSheetsWebhookUrl: clampString(settings.googleSheetsWebhookUrl, 1000),
     callScript: clampString(settings.callScript, 10000),
     lastSyncedAt: clampNullableString(settings.lastSyncedAt, 64),

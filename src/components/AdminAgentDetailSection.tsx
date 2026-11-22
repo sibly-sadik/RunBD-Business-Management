@@ -10,13 +10,13 @@ import {
 import { CALL_STATUSES, CallLog, CallStatus, DateRangeFilter, Lead, User } from '../types';
 import {
   buildTelUrl,
-  buildWhatsAppUrl,
   formatBdPhoneDisplay,
   formatDateTime,
   formatShortDate,
   formatTime,
   isFollowUpDueToday,
   isWithinDateRange,
+  openWhatsAppChat,
 } from '../utils/leadLogic';
 import { StatusBadge } from './StatusBadge';
 
@@ -204,15 +204,14 @@ export function AdminAgentDetailSection({
                     >
                       <PhoneCall className="w-3.5 h-3.5" />
                     </a>
-                    <a
-                      href={buildWhatsAppUrl(lead.phone, lead.customerName)}
-                      target="_blank"
-                      rel="noreferrer"
+                    <button
+                      type="button"
+                      onClick={() => openWhatsAppChat(lead.phone)}
                       aria-label={`WhatsApp ${lead.customerName}`}
-                      className="p-1.5 rounded-md bg-slate-200/80 dark:bg-slate-800 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-600 hover:text-white transition-colors"
+                      className="p-1.5 rounded-md bg-slate-200/80 dark:bg-slate-800 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-600 hover:text-white transition-colors cursor-pointer"
                     >
                       <MessageCircle className="w-3.5 h-3.5" />
-                    </a>
+                    </button>
                   </div>
                 </div>
               </div>
@@ -318,15 +317,14 @@ export function AdminAgentDetailSection({
                         >
                           <PhoneCall className="w-3 h-3" />
                         </a>
-                        <a
-                          href={buildWhatsAppUrl(lead.phone, lead.customerName)}
-                          target="_blank"
-                          rel="noreferrer"
+                        <button
+                          type="button"
+                          onClick={() => openWhatsAppChat(lead.phone)}
                           aria-label={`WhatsApp ${lead.customerName}`}
-                          className="p-1 rounded bg-slate-200/80 dark:bg-slate-800 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-600 hover:text-white transition-colors"
+                          className="p-1 rounded bg-slate-200/80 dark:bg-slate-800 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-600 hover:text-white transition-colors cursor-pointer"
                         >
                           <MessageCircle className="w-3 h-3" />
-                        </a>
+                        </button>
                       </div>
                     </td>
                     <td className="py-3 px-4">

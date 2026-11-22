@@ -12,6 +12,7 @@ import {
 import {
   addDaysToYmd,
   computeDaysRemaining,
+  deduplicateSameDayCallLogs,
   extractPhoneCoreKey,
   getLocalDateString,
   normalizeBdPhone,
@@ -653,7 +654,7 @@ export function mergeRemoteCallLogs(
   localLogs: CallLog[],
   remoteLogs: Partial<CallLog>[]
 ): CallLog[] {
-  if (!remoteLogs.length) return localLogs;
+  if (!remoteLogs.length) return deduplicateSameDayCallLogs(localLogs, { perAgent: true });
 
   const byId = new Map<string, CallLog>();
   for (const log of localLogs) {
@@ -662,9 +663,47 @@ export function mergeRemoteCallLogs(
 
   for (const r of remoteLogs) {
     const id = typeof r.id === 'string' ? r.id.trim() : '';
-    if (!id || byId.has(id)) continue;
+    if (!id) continue;
 
-    const agentName = typeof r.agentName === 'string' ? r.agentName.trim() : 'Agent';
+    const existing = byId.get(id);
+    const agentName =
+      typeof r.agentName === 'string' && r.agentName.trim()
+        ? r.agentName.trim()
+        : existing?.agentName || 'Agent';
+    const remoteTimestamp = toValidTimestamp(r.timestamp, HISTORICAL_FALLBACK_ISO);
+
+    if (existing) {
+      const existingTime = Date.parse(existing.timestamp) || 0;
+      const remoteTime = Date.parse(remoteTimestamp) || 0;
+      if (remoteTime > existingTime) {
+        byId.set(id, {
+          ...existing,
+          leadId: typeof r.leadId === 'string' && r.leadId.trim() ? r.leadId.trim() : existing.leadId,
+          customerName:
+            typeof r.customerName === 'string' && r.customerName.trim()
+              ? r.customerName.trim()
+              : existing.customerName,
+          phone: safePhoneString(r.phone) || existing.phone,
+          agentId:
+            typeof r.agentId === 'string' && r.agentId.trim()
+              ? r.agentId.trim()
+              : existing.agentId,
+          agentName,
+          previousStatus: existing.previousStatus || normalizeStatus(r.previousStatus),
+          newStatus: r.newStatus ? normalizeStatus(r.newStatus) : existing.newStatus,
+          notes: typeof r.notes === 'string' ? r.notes : existing.notes,
+          followUpAt:
+            r.followUpAt !== undefined
+              ? typeof r.followUpAt === 'string' && r.followUpAt.trim()
+                ? r.followUpAt
+                : null
+              : existing.followUpAt,
+          timestamp: remoteTimestamp,
+        });
+      }
+      continue;
+    }
+
     byId.set(id, {
       id,
       leadId: typeof r.leadId === 'string' ? r.leadId.trim() : '',
@@ -680,13 +719,11 @@ export function mergeRemoteCallLogs(
       notes: typeof r.notes === 'string' ? r.notes : '',
       followUpAt:
         typeof r.followUpAt === 'string' && r.followUpAt.trim() ? r.followUpAt : null,
-      timestamp: toValidTimestamp(r.timestamp, HISTORICAL_FALLBACK_ISO),
+      timestamp: remoteTimestamp,
     });
   }
 
-  return Array.from(byId.values()).sort(
-    (a, b) => (Date.parse(b.timestamp) || 0) - (Date.parse(a.timestamp) || 0)
-  );
+  return deduplicateSameDayCallLogs(Array.from(byId.values()), { perAgent: true });
 }
 
 /**

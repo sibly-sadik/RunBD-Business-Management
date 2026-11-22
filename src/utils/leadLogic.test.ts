@@ -6,6 +6,9 @@ import {
   authenticateUser,
   buildTelUrl,
   buildWhatsAppUrl,
+  normalizeWhatsAppPhone,
+  openWhatsAppChat,
+  WHATSAPP_WINDOW_NAME,
   computeAgentPerformance,
   computeDashboardMetrics,
   computeDaysRemaining,
@@ -13,18 +16,23 @@ import {
   computeFinalDailySummary,
   computeKawsarPostStats,
   createPaidCustomerFromLead,
+  deduplicateSameDayCallLogs,
+  filterAgentAssignedQueueLeads,
   filterTodayCallLogs,
   filterTodayDuplicateAttempts,
   filterTodayLeads,
   filterTodayPosts,
   findDuplicateLead,
   findDuplicatePost,
+  findExistingTodayCallLog,
   generateDailyReportCsv,
   generateFinalDailySummaryCsv,
   generatePaidCustomersCsv,
+  getActiveAgents,
   getAgentTodayCallLogs,
   getDueRenewalCustomers,
   getLeadCollectedYmd,
+  getNextRoundRobinAgent,
   getScheduledFollowUps,
   isTimestampToday,
   isValidPostUrl,
@@ -34,6 +42,7 @@ import {
   parseCsvLeads,
   parseDateToYmd,
   renewPaidCustomer,
+  upsertTodayCallLogInList,
 } from './leadLogic';
 import { DEMO_USERS } from '../data/seedData';
 import { CALL_STATUSES, CallLog, ContentPost, DuplicateAttempt, Lead, PaidCustomer, User } from '../types';
@@ -207,7 +216,97 @@ test('computeDashboardMetrics and computeAgentPerformance calculate conversion r
 
 test('Click-to-Call and WhatsApp link builders format Bangladeshi numbers properly', () => {
   assert.equal(buildTelUrl('01711223344'), 'tel:+8801711223344');
-  assert.ok(buildWhatsAppUrl('+8801711223344', 'Karim').startsWith('https://wa.me/8801711223344?text='));
+  assert.equal(normalizeWhatsAppPhone('01711223344'), '8801711223344');
+  assert.equal(normalizeWhatsAppPhone('+880 1711-223344'), '8801711223344');
+  assert.equal(normalizeWhatsAppPhone('008801711223344'), '8801711223344');
+  assert.equal(normalizeWhatsAppPhone('1711223344'), '8801711223344');
+  assert.equal(
+    buildWhatsAppUrl('+8801711223344'),
+    'https://web.whatsapp.com/send?phone=8801711223344'
+  );
+  assert.equal(
+    buildWhatsAppUrl('01812345678'),
+    'https://web.whatsapp.com/send?phone=8801812345678'
+  );
+});
+
+test('openWhatsAppChat reuses single named tab runbd_whatsapp_tab and falls back cleanly when popups are blocked', () => {
+  const openCalls: Array<{ url: string; target?: string; features?: string }> = [];
+  let focusCount = 0;
+
+  const mockWin = {
+    open: (url: string, target?: string, features?: string) => {
+      openCalls.push({ url, target, features });
+      return {
+        focus: () => {
+          focusCount += 1;
+        },
+      };
+    },
+  };
+
+  const first = openWhatsAppChat('01711223344', { win: mockWin });
+  const second = openWhatsAppChat('+880 1812-345678', { win: mockWin });
+
+  assert.equal(WHATSAPP_WINDOW_NAME, 'runbd_whatsapp_tab');
+  assert.equal(first.opened, true);
+  assert.equal(first.fallbackUsed, false);
+  assert.equal(second.opened, true);
+  assert.equal(focusCount, 2);
+  assert.deepEqual(openCalls, [
+    {
+      url: 'https://web.whatsapp.com/send?phone=8801711223344',
+      target: 'runbd_whatsapp_tab',
+      features: undefined,
+    },
+    {
+      url: 'https://web.whatsapp.com/send?phone=8801812345678',
+      target: 'runbd_whatsapp_tab',
+      features: undefined,
+    },
+  ]);
+
+  // Popup-blocked fallback clicks a temporary <a target="runbd_whatsapp_tab">
+  let blockedCallbackCalled = false;
+  let clickedAnchor: { href: string; target: string } | null = null;
+  let removed = false;
+
+  const blockedRes = openWhatsAppChat('01911223344', {
+    win: {
+      open: () => null,
+    },
+    doc: {
+      createElement: () => {
+        const el = {
+          href: '',
+          target: '',
+          style: {},
+          click: () => {
+            clickedAnchor = { href: el.href, target: el.target };
+          },
+          remove: () => {
+            removed = true;
+          },
+        };
+        return el;
+      },
+      body: {
+        appendChild: () => {},
+      },
+    },
+    onPopupBlocked: () => {
+      blockedCallbackCalled = true;
+    },
+  });
+
+  assert.equal(blockedRes.opened, false);
+  assert.equal(blockedRes.fallbackUsed, true);
+  assert.equal(blockedCallbackCalled, true);
+  assert.deepEqual(clickedAnchor, {
+    href: 'https://web.whatsapp.com/send?phone=8801911223344',
+    target: 'runbd_whatsapp_tab',
+  });
+  assert.equal(removed, true);
 });
 
 test('authenticateUser verifies exact credentials for Admin, 6 Call Center Agents, and 2 Data Collectors (Farhan & Naim)', () => {
@@ -935,6 +1034,244 @@ test('Done status is available in CALL_STATUSES and excludes leads from schedule
   );
 });
 
+test('getActiveAgents, getNextRoundRobinAgent, and assignLeadsRoundRobin skip disabled agents cleanly', () => {
+  const disabledIds = ['a3', 'a6']; // Tania and Sakib marked Absent/OFF
+  const active = getActiveAgents(mockAgents, disabledIds);
+  assert.deepEqual(
+    active.map((a) => a.name),
+    ['Tanjin', 'Kathy', 'Shanaz', 'Sizon']
+  );
 
+  assert.equal(getNextRoundRobinAgent(mockAgents, 0, disabledIds)?.name, 'Tanjin');
+  assert.equal(getNextRoundRobinAgent(mockAgents, 2, disabledIds)?.name, 'Shanaz');
+  assert.equal(getNextRoundRobinAgent(mockAgents, 4, disabledIds)?.name, 'Tanjin');
+
+  const batch = Array.from({ length: 6 }, (_, i) => ({
+    id: `SKIP-${i}`,
+    customerName: `Customer ${i}`,
+    phone: `0172000000${i}`,
+    rawPhone: `0172000000${i}`,
+    facebookLink: '',
+    normalizedFacebookLink: '',
+    notes: '',
+    collectorId: 'collector-farhan',
+    collectorName: 'Farhan',
+    status: 'Pending' as const,
+    followUpAt: null,
+    lastCallNotes: '',
+    createdAt: '2026-11-22T10:00:00.000Z',
+    updatedAt: '2026-11-22T10:00:00.000Z',
+  }));
+
+  const { assignedLeads, nextIndex } = assignLeadsRoundRobin(
+    batch,
+    mockAgents,
+    1,
+    true,
+    disabledIds
+  );
+  assert.deepEqual(
+    assignedLeads.map((l) => l.assignedAgentName),
+    ['Kathy', 'Shanaz', 'Sizon', 'Tanjin', 'Kathy', 'Shanaz']
+  );
+  assert.equal(
+    assignedLeads.some((l) => l.assignedAgentName === 'Tania' || l.assignedAgentName === 'Sakib'),
+    false
+  );
+  assert.equal(nextIndex, 3);
+  assert.equal(getNextRoundRobinAgent(mockAgents, nextIndex, disabledIds)?.name, 'Sizon');
+
+  // If all agents are disabled, leaves unassigned gracefully
+  const allDisabled = mockAgents.map((a) => a.id);
+  assert.equal(getNextRoundRobinAgent(mockAgents, 0, allDisabled), null);
+  const unassigned = assignLeadsRoundRobin(batch.slice(0, 2), mockAgents, 0, true, allDisabled);
+  assert.deepEqual(
+    unassigned.assignedLeads.map((l) => l.assignedAgentName),
+    [null, null]
+  );
+});
+
+test('filterAgentAssignedQueueLeads excludes Done leads by default while keeping Done accessible when explicitly filtered', () => {
+  const queueLeads: Lead[] = [
+    { ...existingLeads[0], id: 'Q-PENDING', customerName: 'Rahim', phone: '01711111111', status: 'Pending', lastCallNotes: '' },
+    { ...existingLeads[0], id: 'Q-INTERESTED', customerName: 'Karim', phone: '01722222222', status: 'Interested', lastCallNotes: 'Wants callback' },
+    { ...existingLeads[0], id: 'Q-DONE-1', customerName: 'Salam', phone: '01733333333', status: 'Done', lastCallNotes: 'Completed' },
+    { ...existingLeads[0], id: 'Q-CONFIRMED', customerName: 'Jabbar', phone: '01744444444', status: 'Order Confirmed', lastCallNotes: '' },
+  ];
+
+  // Default ALL filter removes Done leads automatically
+  const defaultQueue = filterAgentAssignedQueueLeads(queueLeads, 'ALL', '');
+  assert.deepEqual(
+    defaultQueue.map((l) => l.id),
+    ['Q-PENDING', 'Q-INTERESTED', 'Q-CONFIRMED']
+  );
+
+  // Search under ALL still excludes Done leads
+  const searchUnderAll = filterAgentAssignedQueueLeads(queueLeads, 'ALL', 'Salam');
+  assert.equal(searchUnderAll.length, 0);
+
+  // Explicit Done filter displays Done leads cleanly
+  const doneOnly = filterAgentAssignedQueueLeads(queueLeads, 'Done', '');
+  assert.deepEqual(
+    doneOnly.map((l) => l.id),
+    ['Q-DONE-1']
+  );
+
+  // Explicit Interested filter narrows to Interested only
+  const interestedOnly = filterAgentAssignedQueueLeads(queueLeads, 'Interested', 'callback');
+  assert.deepEqual(
+    interestedOnly.map((l) => l.id),
+    ['Q-INTERESTED']
+  );
+});
+
+test('1 phone / lead = max 1 Today call entry per day: deduplicateSameDayCallLogs, upsertTodayCallLogInList, and KPI metrics', () => {
+  const now = new Date(2026, 10, 22, 16, 30, 0); // 2026-11-22
+  const morningIso = new Date(2026, 10, 22, 10, 0, 0).toISOString();
+  const afternoonIso = new Date(2026, 10, 22, 14, 0, 0).toISOString();
+  const yesterdayIso = new Date(2026, 10, 21, 15, 0, 0).toISOString();
+
+  // Existing duplicate Today logs for the same phone (+880 1817-705593 vs 01817705593)
+  // plus a valid call from Yesterday for the same number (different day must stay separate)
+  const rawLogs: CallLog[] = [
+    {
+      id: 'CL-OLD-DUP',
+      leadId: 'L-1817',
+      customerName: 'Nadia Akter',
+      phone: '+880 1817-705593',
+      agentId: 'a1',
+      agentName: 'Tanjin',
+      previousStatus: 'Pending',
+      newStatus: 'Interested',
+      notes: 'First call today',
+      followUpAt: null,
+      timestamp: morningIso,
+    },
+    {
+      id: 'CL-NEW-DUP',
+      leadId: 'L-1817',
+      customerName: 'Nadia Akter',
+      phone: '01817705593',
+      agentId: 'a1',
+      agentName: 'Tanjin',
+      previousStatus: 'Interested',
+      newStatus: 'Done',
+      notes: 'Second update same day',
+      followUpAt: null,
+      timestamp: afternoonIso,
+    },
+    {
+      id: 'CL-YEST-SAME-PHONE',
+      leadId: 'L-1817',
+      customerName: 'Nadia Akter',
+      phone: '01817705593',
+      agentId: 'a1',
+      agentName: 'Tanjin',
+      previousStatus: 'Pending',
+      newStatus: 'Busy / Call Later',
+      notes: 'Called yesterday',
+      followUpAt: null,
+      timestamp: yesterdayIso,
+    },
+  ];
+
+  // 1) Deduplication keeps newest entry per day (Today=1, Yesterday=1 -> total 2 across days)
+  const dedupedAll = deduplicateSameDayCallLogs(rawLogs);
+  assert.deepEqual(
+    dedupedAll.map((c) => c.id),
+    ['CL-NEW-DUP', 'CL-YEST-SAME-PHONE']
+  );
+
+  // 2) Today calls & Agent Today calls count as 1 unique call (keeping newest status Done)
+  const todayCalls = filterTodayCallLogs(rawLogs, now);
+  assert.deepEqual(
+    todayCalls.map((c) => c.id),
+    ['CL-NEW-DUP']
+  );
+  const agentTodayCalls = getAgentTodayCallLogs(rawLogs, 'a1', now);
+  assert.equal(agentTodayCalls.length, 1);
+  assert.equal(agentTodayCalls[0].newStatus, 'Done');
+
+  // 3) Admin KPIs, Leaderboard, Daily CSV, and Final Daily Summary count 1 unique call Today
+  const leadsForMetric: Lead[] = [
+    {
+      ...existingLeads[0],
+      id: 'L-1817',
+      customerName: 'Nadia Akter',
+      phone: '01817705593',
+      assignedAgentId: 'a1',
+      assignedAgentName: 'Tanjin',
+      status: 'Done',
+      createdAt: morningIso,
+      updatedAt: afternoonIso,
+    },
+  ];
+  const metrics = computeDashboardMetrics(
+    leadsForMetric,
+    rawLogs,
+    { preset: 'today', startDate: '', endDate: '' },
+    now
+  );
+  assert.equal(metrics.callsMadeToday, 1);
+  assert.equal(metrics.totalCallsInRange, 1);
+
+  const perf = computeAgentPerformance(
+    mockAgents,
+    leadsForMetric,
+    rawLogs,
+    { preset: 'today', startDate: '', endDate: '' },
+    now
+  );
+  assert.equal(perf.find((p) => p.agentId === 'a1')?.totalCalls, 1);
+
+  const summary = computeFinalDailySummary(
+    mockAgents,
+    [],
+    leadsForMetric,
+    rawLogs,
+    [],
+    '2026-11-22'
+  );
+  const tanjinSummary = summary.agents.find((a) => a.agentId === 'a1');
+  assert.equal(tanjinSummary?.callsMade, 1);
+  assert.equal(tanjinSummary?.done, 1);
+  assert.equal(tanjinSummary?.interested, 0);
+  assert.equal(summary.agentTotals.callsMade, 1);
+
+  const csv = generateDailyReportCsv(mockAgents, leadsForMetric, rawLogs, now);
+  assert.ok(csv.includes('2026-11-22,Tanjin,1,'));
+  assert.ok(csv.includes('2026-11-22,TOTAL,1,'));
+
+  // 4) Upsert in place finds existing Today entry (even with 880/01 phone formatting difference)
+  const existingToday = findExistingTodayCallLog(
+    rawLogs,
+    'a1',
+    'Tanjin',
+    'L-1817',
+    '8801817705593',
+    '2026-11-22'
+  );
+  assert.equal(existingToday?.id, 'CL-NEW-DUP');
+
+  const eveningIso = new Date(2026, 10, 22, 16, 15, 0).toISOString();
+  const updatedList = upsertTodayCallLogInList(rawLogs, {
+    id: existingToday!.id,
+    leadId: 'L-1817',
+    customerName: 'Nadia Akter',
+    phone: '01817705593',
+    agentId: 'a1',
+    agentName: 'Tanjin',
+    previousStatus: 'Pending',
+    newStatus: 'Order Confirmed',
+    notes: 'Confirmed in evening',
+    followUpAt: null,
+    timestamp: eveningIso,
+  });
+  // Only 1 Today row (collapsed older CL-OLD-DUP) + 1 Yesterday row
+  assert.deepEqual(
+    updatedList.map((c) => `${c.id}:${c.newStatus}`),
+    ['CL-NEW-DUP:Order Confirmed', 'CL-YEST-SAME-PHONE:Busy / Call Later']
+  );
+});
 
 

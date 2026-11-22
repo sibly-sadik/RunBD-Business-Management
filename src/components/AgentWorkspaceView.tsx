@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import {
   CalendarClock,
+  Check,
   ChevronDown,
   ChevronUp,
   ClipboardList,
@@ -14,8 +15,8 @@ import {
 import { CALL_STATUSES, CallLog, CallStatus, Lead, User } from '../types';
 import {
   buildTelUrl,
-  buildWhatsAppUrl,
   DueRenewalItem,
+  filterAgentAssignedQueueLeads,
   filterTodayLeads,
   formatBdPhoneDisplay,
   formatDateTime,
@@ -25,6 +26,7 @@ import {
   getLocalDateString,
   getScheduledFollowUps,
   isFollowUpDueToday,
+  openWhatsAppChat,
 } from '../utils/leadLogic';
 import { RenewalAlertBanner } from './RenewalAlertBanner';
 import { StatusBadge } from './StatusBadge';
@@ -116,18 +118,26 @@ export function AgentWorkspaceView({
     [myLeads]
   );
 
-  const filteredLeads = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
-    return myLeads.filter((l) => {
-      if (statusFilter !== 'ALL' && l.status !== statusFilter) return false;
-      if (!q) return true;
-      return (
-        l.customerName.toLowerCase().includes(q) ||
-        l.phone.includes(q) ||
-        l.lastCallNotes.toLowerCase().includes(q)
-      );
+  const activeQueueLeads = useMemo(
+    () => myLeads.filter((l) => l.status !== 'Done'),
+    [myLeads]
+  );
+
+  const doneLeadsCount = myLeads.length - activeQueueLeads.length;
+
+  const filteredLeads = useMemo(
+    () => filterAgentAssignedQueueLeads(myLeads, statusFilter, searchQuery),
+    [myLeads, searchQuery, statusFilter]
+  );
+
+  const handleQuickDone = (lead: Lead) => {
+    onLogCall({
+      leadId: lead.id,
+      newStatus: 'Done',
+      followUpAt: null,
+      notes: lead.lastCallNotes || '',
     });
-  }, [myLeads, searchQuery, statusFilter]);
+  };
 
   const openCallModal = (lead: Lead) => {
     setActiveLead(lead);
@@ -349,15 +359,15 @@ export function AgentWorkspaceView({
                     <PhoneCall className="w-3.5 h-3.5" />
                     <span>Call</span>
                   </a>
-                  <a
-                    href={buildWhatsAppUrl(lead.phone, lead.customerName)}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="flex-1 inline-flex items-center justify-center gap-1.5 py-2 px-2.5 rounded-lg bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-900 dark:text-slate-100 text-xs font-semibold transition-colors whitespace-nowrap"
+                  <button
+                    type="button"
+                    onClick={() => openWhatsAppChat(lead.phone)}
+                    aria-label={`WhatsApp ${lead.customerName}`}
+                    className="flex-1 inline-flex items-center justify-center gap-1.5 py-2 px-2.5 rounded-lg bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-900 dark:text-slate-100 text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer"
                   >
                     <MessageCircle className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
                     <span>WhatsApp</span>
-                  </a>
+                  </button>
                   <button
                     type="button"
                     onClick={() => openCallModal(lead)}
@@ -428,7 +438,12 @@ export function AgentWorkspaceView({
               My Assigned Leads
             </h2>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5 tabular-nums">
-              Showing {filteredLeads.length} of {myLeads.length} assigned leads
+              Showing {filteredLeads.length} of{' '}
+              {statusFilter === 'ALL' ? activeQueueLeads.length : myLeads.length}{' '}
+              {statusFilter === 'ALL' ? 'active' : 'assigned'} leads
+              {statusFilter === 'ALL' && doneLeadsCount > 0
+                ? ` · ${doneLeadsCount} moved to Today calls`
+                : ''}
             </p>
           </div>
 
@@ -463,7 +478,9 @@ export function AgentWorkspaceView({
 
         {filteredLeads.length === 0 ? (
           <div className="p-10 text-center text-sm text-slate-500 dark:text-slate-400">
-            No leads match your current filter.
+            {statusFilter === 'ALL' && !searchQuery.trim() && doneLeadsCount > 0
+              ? 'All assigned leads have been marked Done and moved to Today calls.'
+              : 'No leads match your current filter.'}
           </div>
         ) : (
           <>
@@ -526,16 +543,15 @@ export function AgentWorkspaceView({
                             <PhoneCall className="w-3 h-3" />
                             <span>Call</span>
                           </a>
-                          <a
-                            href={buildWhatsAppUrl(lead.phone, lead.customerName)}
-                            target="_blank"
-                            rel="noreferrer"
+                          <button
+                            type="button"
+                            onClick={() => openWhatsAppChat(lead.phone)}
                             aria-label={`WhatsApp ${lead.customerName}`}
-                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-slate-200/80 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-100 text-xs font-medium transition-colors whitespace-nowrap"
+                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-slate-200/80 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-100 text-xs font-medium transition-colors whitespace-nowrap cursor-pointer"
                           >
                             <MessageCircle className="w-3 h-3 text-emerald-600 dark:text-emerald-400" />
                             <span>WhatsApp</span>
-                          </a>
+                          </button>
                         </div>
                       </td>
                       <td className="py-3.5 px-4 text-xs text-slate-500 dark:text-slate-400 tabular-nums whitespace-nowrap">
@@ -550,13 +566,27 @@ export function AgentWorkspaceView({
                         )}
                       </td>
                       <td className="py-3.5 px-4 text-right">
-                        <button
-                          type="button"
-                          onClick={() => openCallModal(lead)}
-                          className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 hover:border-emerald-500 hover:text-emerald-600 dark:hover:text-emerald-400 text-xs font-semibold text-slate-700 dark:text-slate-200 transition-colors whitespace-nowrap cursor-pointer"
-                        >
-                          Log Call
-                        </button>
+                        <div className="inline-flex items-center justify-end gap-2">
+                          {lead.status !== 'Done' && (
+                            <button
+                              type="button"
+                              onClick={() => handleQuickDone(lead)}
+                              aria-label={`Mark ${lead.customerName} as Done`}
+                              data-testid={`quick-done-btn-${lead.id}`}
+                              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer"
+                            >
+                              <Check className="w-3.5 h-3.5" />
+                              <span>Done</span>
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => openCallModal(lead)}
+                            className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 hover:border-emerald-500 hover:text-emerald-600 dark:hover:text-emerald-400 text-xs font-semibold text-slate-700 dark:text-slate-200 transition-colors whitespace-nowrap cursor-pointer"
+                          >
+                            Log Call
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -605,7 +635,7 @@ export function AgentWorkspaceView({
                     </p>
                   )}
 
-                  <div className="grid grid-cols-3 gap-2 pt-1">
+                  <div className="grid grid-cols-2 gap-2 pt-1">
                     <a
                       href={buildTelUrl(lead.phone)}
                       className="inline-flex items-center justify-center gap-1.5 py-2.5 rounded-lg bg-emerald-600 text-white text-xs font-semibold"
@@ -613,19 +643,33 @@ export function AgentWorkspaceView({
                       <PhoneCall className="w-3.5 h-3.5" />
                       <span>Call</span>
                     </a>
-                    <a
-                      href={buildWhatsAppUrl(lead.phone, lead.customerName)}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="inline-flex items-center justify-center gap-1.5 py-2.5 rounded-lg bg-slate-200 dark:bg-slate-800 text-slate-900 dark:text-slate-100 text-xs font-semibold"
+                    <button
+                      type="button"
+                      onClick={() => openWhatsAppChat(lead.phone)}
+                      aria-label={`WhatsApp ${lead.customerName}`}
+                      className="inline-flex items-center justify-center gap-1.5 py-2.5 rounded-lg bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-900 dark:text-slate-100 text-xs font-semibold cursor-pointer"
                     >
                       <MessageCircle className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
                       <span>WhatsApp</span>
-                    </a>
+                    </button>
+                    {lead.status !== 'Done' && (
+                      <button
+                        type="button"
+                        onClick={() => handleQuickDone(lead)}
+                        aria-label={`Mark ${lead.customerName} as Done`}
+                        data-testid={`mobile-quick-done-btn-${lead.id}`}
+                        className="inline-flex items-center justify-center gap-1.5 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold cursor-pointer"
+                      >
+                        <Check className="w-3.5 h-3.5" />
+                        <span>Done</span>
+                      </button>
+                    )}
                     <button
                       type="button"
                       onClick={() => openCallModal(lead)}
-                      className="inline-flex items-center justify-center py-2.5 rounded-lg border border-slate-300 dark:border-slate-700 text-xs font-semibold text-slate-800 dark:text-slate-100 cursor-pointer"
+                      className={`inline-flex items-center justify-center py-2.5 rounded-lg border border-slate-300 dark:border-slate-700 text-xs font-semibold text-slate-800 dark:text-slate-100 cursor-pointer ${
+                        lead.status === 'Done' ? 'col-span-2' : ''
+                      }`}
                     >
                       Log Call
                     </button>

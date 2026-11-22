@@ -145,6 +145,7 @@ export const DEFAULT_CALL_SCRIPT = `1. GREETING (Warm & Clear)
 export const DEFAULT_SETTINGS: AppSettings = {
   autoAssignEnabled: true,
   roundRobinIndex: 0,
+  disabledAgentIds: [],
   googleSheetsWebhookUrl: FALLBACK_GOOGLE_SHEETS_WEBHOOK_URL,
   callScript: DEFAULT_CALL_SCRIPT,
   lastSyncedAt: null,
@@ -521,10 +522,7 @@ function doPost(e) {
       if (Array.isArray(payload.callLogs)) {
         for (var ci = 0; ci < payload.callLogs.length; ci++) {
           var cl = payload.callLogs[ci];
-          upsertRowById(logsSheet, cl.id, [
-            cl.id, cl.leadId, cl.customerName, "'" + cl.phone, cl.agentName,
-            cl.previousStatus, cl.newStatus, cl.notes || '', cl.followUpAt || '', cl.timestamp
-          ]);
+          upsertCallLogRow(logsSheet, cl);
         }
       }
       if (Array.isArray(payload.contentPosts)) {
@@ -552,11 +550,7 @@ function doPost(e) {
         upsertRowById(masterSheet, payload.lead.id, formatMasterRow(payload.lead));
         syncLeadAcrossAgentTabs(agentSheets, payload.lead);
       }
-      var c = payload.callLog;
-      logsSheet.appendRow([
-        c.id, c.leadId, c.customerName, "'" + c.phone, c.agentName,
-        c.previousStatus, c.newStatus, c.notes || '', c.followUpAt || '', c.timestamp
-      ]);
+      upsertCallLogRow(logsSheet, payload.callLog);
       if (payload.paidCustomer) {
         upsertRowById(paidSheet, payload.paidCustomer.id, formatPaidCustomerRow(payload.paidCustomer));
       }
@@ -676,6 +670,41 @@ function getOrCreateSheet(ss, name, headers) {
     sheet.setFrozenRows(1);
   }
   return sheet;
+}
+
+function upsertCallLogRow(sheet, c) {
+  var callYmd = toYmd_(c.timestamp);
+  var targetPhone = normalizePhoneKey_(c.phone);
+  var targetLeadId = String(c.leadId || '').trim();
+  var targetAgent = String(c.agentName || '').trim().toLowerCase();
+  var rowData = [
+    c.id, c.leadId, c.customerName, "'" + c.phone, c.agentName,
+    c.previousStatus, c.newStatus, c.notes || '', c.followUpAt || '', c.timestamp
+  ];
+
+  var data = sheet.getDataRange().getValues();
+  for (var i = 1; i < data.length; i++) {
+    var r = data[i];
+    if (r[0] === c.id) {
+      sheet.getRange(i + 1, 1, 1, rowData.length).setValues([rowData]);
+      return;
+    }
+    var rowYmd = toYmd_(r[9]);
+    var rowAgent = String(r[4] || '').trim().toLowerCase();
+    if (callYmd && rowYmd === callYmd && targetAgent && rowAgent === targetAgent) {
+      var rowLeadId = String(r[1] || '').trim();
+      var rowPhone = normalizePhoneKey_(r[3]);
+      if ((targetLeadId && rowLeadId && targetLeadId === rowLeadId) || (targetPhone && rowPhone && targetPhone === rowPhone)) {
+        var preservedRow = [
+          r[0] || c.id, c.leadId, c.customerName, "'" + c.phone, c.agentName,
+          r[5] || c.previousStatus, c.newStatus, c.notes || '', c.followUpAt || '', c.timestamp
+        ];
+        sheet.getRange(i + 1, 1, 1, preservedRow.length).setValues([preservedRow]);
+        return;
+      }
+    }
+  }
+  sheet.appendRow(rowData);
 }
 
 function upsertRowById(sheet, id, rowData) {

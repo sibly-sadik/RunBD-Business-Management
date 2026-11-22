@@ -266,6 +266,35 @@ describe('mergeRemoteCallLogs & mergeRemoteContentPosts', () => {
     assert.equal(merged[0].id, 'CL-2');
     assert.equal(merged[0].phone, '01711111111');
     assert.equal(merged[1].notes, 'First call');
+
+    // In-place update on same ID with newer timestamp & same-day duplicate collapse for same agent
+    const updatedMerged = mergeRemoteCallLogs(merged, [
+      {
+        id: 'CL-1',
+        leadId: 'LD-1',
+        customerName: 'Test',
+        phone: '01711111111',
+        agentName: 'Tanjin',
+        previousStatus: 'Pending',
+        newStatus: 'Done',
+        notes: 'Updated in place',
+        timestamp: '2026-11-18T12:00:00.000Z',
+      },
+      {
+        id: 'CL-1-DUP',
+        leadId: 'LD-1',
+        customerName: 'Test',
+        phone: '+880 1711-111111',
+        agentName: 'Tanjin',
+        previousStatus: 'Done',
+        newStatus: 'Order Confirmed',
+        notes: 'Newer status same day',
+        timestamp: '2026-11-18T14:00:00.000Z',
+      },
+    ]);
+    assert.equal(updatedMerged.length, 2); // 1 for Tanjin (CL-1-DUP) + 1 for Kathy (CL-2)
+    assert.equal(updatedMerged[0].id, 'CL-1-DUP');
+    assert.equal(updatedMerged[0].newStatus, 'Order Confirmed');
   });
 
   it('merges remote Kawsar content posts, normalizes URLs, and handles manual rows without ID', () => {

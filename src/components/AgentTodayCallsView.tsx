@@ -9,12 +9,12 @@ import {
 import { CALL_STATUSES, CallLog, CallStatus, User } from '../types';
 import {
   buildTelUrl,
-  buildWhatsAppUrl,
   formatBdPhoneDisplay,
   formatDateTime,
   formatTime,
   getAgentTodayCallLogs,
   getLocalDateString,
+  openWhatsAppChat,
 } from '../utils/leadLogic';
 import { StatusBadge } from './StatusBadge';
 
@@ -234,16 +234,15 @@ export function AgentTodayCallsView({
                             <PhoneCall className="w-3 h-3" />
                             <span>Call</span>
                           </a>
-                          <a
-                            href={buildWhatsAppUrl(log.phone, log.customerName)}
-                            target="_blank"
-                            rel="noreferrer"
+                          <button
+                            type="button"
+                            onClick={() => openWhatsAppChat(log.phone)}
                             aria-label={`WhatsApp ${log.customerName}`}
-                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-slate-200/80 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-100 text-xs font-medium transition-colors whitespace-nowrap"
+                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-slate-200/80 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-100 text-xs font-medium transition-colors whitespace-nowrap cursor-pointer"
                           >
                             <MessageCircle className="w-3 h-3 text-emerald-600 dark:text-emerald-400" />
                             <span>WhatsApp</span>
-                          </a>
+                          </button>
                         </div>
                       </td>
                       <td className="py-3.5 px-4">
@@ -331,15 +330,15 @@ export function AgentTodayCallsView({
                       <PhoneCall className="w-3.5 h-3.5" />
                       <span>Call</span>
                     </a>
-                    <a
-                      href={buildWhatsAppUrl(log.phone, log.customerName)}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="inline-flex items-center justify-center gap-1.5 py-2 rounded-lg bg-slate-200 dark:bg-slate-800 text-slate-900 dark:text-slate-100 text-xs font-semibold"
+                    <button
+                      type="button"
+                      onClick={() => openWhatsAppChat(log.phone)}
+                      aria-label={`WhatsApp ${log.customerName}`}
+                      className="inline-flex items-center justify-center gap-1.5 py-2 rounded-lg bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-900 dark:text-slate-100 text-xs font-semibold cursor-pointer"
                     >
                       <MessageCircle className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
                       <span>WhatsApp</span>
-                    </a>
+                    </button>
                   </div>
                 </div>
               ))}

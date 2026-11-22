@@ -40,7 +40,9 @@ import {
   filterTodayPosts,
   findDuplicateLead,
   findDuplicatePost,
+  findExistingTodayCallLog,
   formatShortDate,
+  getActiveAgents,
   getAgentTodayCallLogs,
   getDueRenewalCustomers,
   getLocalDateString,
@@ -50,6 +52,7 @@ import {
   normalizeFacebookUrl,
   normalizePostUrl,
   renewPaidCustomer,
+  upsertTodayCallLogInList,
 } from './utils/leadLogic';
 import {
   logoutFromServer,
@@ -60,6 +63,7 @@ import {
   checkPostDuplicateInSupabase,
   createLeadInSupabase,
   createPostInSupabase,
+  fetchAppSettingsFromSupabase,
   fetchBootstrapFromSupabase,
   importLeadsBatchInSupabase,
   saveAuditLogInSupabase,
@@ -292,6 +296,9 @@ export default function App() {
         setSettings((prev) => ({
           ...prev,
           ...res.settings,
+          disabledAgentIds: res.settingsHasDisabledAgentsColumn
+            ? res.settings!.disabledAgentIds
+            : prev.disabledAgentIds,
           googleSheetsWebhookUrl:
             remoteUrl && !isLegacyWebhookUrl(remoteUrl)
               ? remoteUrl
@@ -945,11 +952,23 @@ export default function App() {
       updatedAt: nowIso,
     };
 
+    const remoteSettingsRes = await fetchAppSettingsFromSupabase().catch(() => null);
+    const effectiveDisabledIds = remoteSettingsRes?.hasDisabledAgentsColumn
+      ? remoteSettingsRes.settings.disabledAgentIds
+      : settings.disabledAgentIds;
+    const effectiveAutoAssign = remoteSettingsRes
+      ? remoteSettingsRes.settings.autoAssignEnabled
+      : settings.autoAssignEnabled;
+    const effectiveRoundRobinIndex = remoteSettingsRes
+      ? remoteSettingsRes.settings.roundRobinIndex
+      : settings.roundRobinIndex;
+
     const { assignedLeads, nextIndex } = assignLeadsRoundRobin(
       [baseLead],
       CALL_CENTER_AGENTS,
-      settings.roundRobinIndex,
-      settings.autoAssignEnabled
+      effectiveRoundRobinIndex,
+      effectiveAutoAssign,
+      effectiveDisabledIds
     );
 
     const created = assignedLeads[0];
@@ -980,7 +999,12 @@ export default function App() {
     }
 
     const nextLeads = [created, ...currentLeads];
-    const nextSettings: AppSettings = { ...settings, roundRobinIndex: nextIndex };
+    const nextSettings: AppSettings = {
+      ...settings,
+      autoAssignEnabled: effectiveAutoAssign,
+      disabledAgentIds: effectiveDisabledIds,
+      roundRobinIndex: nextIndex,
+    };
     leadsRef.current = nextLeads;
     setLeads(nextLeads);
     setSettings(nextSettings);
@@ -1170,15 +1194,33 @@ export default function App() {
       updatedAt: nowIso,
     }));
 
+    const remoteSettingsRes = await fetchAppSettingsFromSupabase().catch(() => null);
+    const effectiveDisabledIds = remoteSettingsRes?.hasDisabledAgentsColumn
+      ? remoteSettingsRes.settings.disabledAgentIds
+      : settings.disabledAgentIds;
+    const effectiveAutoAssign = remoteSettingsRes
+      ? remoteSettingsRes.settings.autoAssignEnabled
+      : settings.autoAssignEnabled;
+    const effectiveRoundRobinIndex = remoteSettingsRes
+      ? remoteSettingsRes.settings.roundRobinIndex
+      : settings.roundRobinIndex;
+    const activeAgentsList = getActiveAgents(CALL_CENTER_AGENTS, effectiveDisabledIds);
+
     const { assignedLeads, nextIndex } = assignLeadsRoundRobin(
       baseLeads,
       CALL_CENTER_AGENTS,
-      settings.roundRobinIndex,
-      settings.autoAssignEnabled
+      effectiveRoundRobinIndex,
+      effectiveAutoAssign,
+      effectiveDisabledIds
     );
 
     const nextLeads = [...assignedLeads, ...currentLeads];
-    const nextSettings: AppSettings = { ...settings, roundRobinIndex: nextIndex };
+    const nextSettings: AppSettings = {
+      ...settings,
+      autoAssignEnabled: effectiveAutoAssign,
+      disabledAgentIds: effectiveDisabledIds,
+      roundRobinIndex: nextIndex,
+    };
     leadsRef.current = nextLeads;
     setLeads(nextLeads);
     setSettings(nextSettings);
@@ -1188,7 +1230,9 @@ export default function App() {
       currentUser,
       'BULK_IMPORT',
       `Imported ${assignedLeads.length} valid leads via CSV (${
-        settings.autoAssignEnabled ? 'Round-Robin distributed' : 'Unassigned'
+        effectiveAutoAssign && activeAgentsList.length > 0
+          ? `Round-Robin across ${activeAgentsList.length} active agent${activeAgentsList.length === 1 ? '' : 's'}`
+          : 'Unassigned'
       })${skippedCount > 0 ? `, blocked ${skippedCount} duplicate(s)` : ''}`
     );
 
@@ -1197,8 +1241,10 @@ export default function App() {
       `Imported ${assignedLeads.length} Leads`,
       skippedCount > 0
         ? `Blocked ${skippedCount} duplicate row(s) found against existing/sheet records.`
-        : settings.autoAssignEnabled
-        ? 'Distributed equally across the 6 call center agents.'
+        : effectiveAutoAssign && activeAgentsList.length > 0
+        ? `Distributed equally across ${activeAgentsList.length} active call center agent${
+            activeAgentsList.length === 1 ? '' : 's'
+          }.`
         : 'Added to the unassigned queue.'
     );
 
@@ -1451,7 +1497,7 @@ export default function App() {
     [appendAudit]
   );
 
-  // Agent Call Logging handler
+  // Agent Call Logging handler (1 phone/lead = max 1 Today call entry per day; upserts in place)
   const handleLogCall = (input: {
     leadId: string;
     newStatus: CallStatus;
@@ -1463,6 +1509,16 @@ export default function App() {
     if (!target) return;
 
     const nowIso = new Date().toISOString();
+    const todayYmd = getLocalDateString();
+    const existingTodayLog = findExistingTodayCallLog(
+      callLogsRef.current,
+      currentUser.id,
+      currentUser.name,
+      target.id,
+      target.phone,
+      todayYmd
+    );
+
     const updatedLead: Lead = {
       ...target,
       status: input.newStatus,
@@ -1471,14 +1527,14 @@ export default function App() {
       updatedAt: nowIso,
     };
 
-    const newLog: CallLog = {
-      id: makeId('CL'),
+    const upsertedLog: CallLog = {
+      id: existingTodayLog ? existingTodayLog.id : makeId('CL'),
       leadId: target.id,
       customerName: target.customerName,
       phone: target.phone,
       agentId: currentUser.id,
       agentName: currentUser.name,
-      previousStatus: target.status,
+      previousStatus: existingTodayLog ? existingTodayLog.previousStatus : target.status,
       newStatus: input.newStatus,
       notes: input.notes,
       followUpAt: input.followUpAt,
@@ -1486,7 +1542,7 @@ export default function App() {
     };
 
     const nextLeads = leadsRef.current.map((l) => (l.id === target.id ? updatedLead : l));
-    const nextCallLogs = [newLog, ...callLogsRef.current];
+    const nextCallLogs = upsertTodayCallLogInList(callLogsRef.current, upsertedLog);
     leadsRef.current = nextLeads;
     callLogsRef.current = nextCallLogs;
 
@@ -1498,7 +1554,7 @@ export default function App() {
       paidCustomer = upsertPaidCustomerForOrderConfirmed(updatedLead, currentUser);
     }
 
-    void saveCallLogInSupabase(updatedLead, newLog, paidCustomer).catch(() => {});
+    void saveCallLogInSupabase(updatedLead, upsertedLog, paidCustomer).catch(() => {});
 
     appendAudit(
       currentUser,
@@ -1508,15 +1564,25 @@ export default function App() {
 
     addToast(
       'success',
-      input.newStatus === 'Order Confirmed' ? 'Order Confirmed & Paid Customer Logged' : 'Call Logged',
+      input.newStatus === 'Order Confirmed'
+        ? 'Order Confirmed & Paid Customer Logged'
+        : input.newStatus === 'Done'
+        ? 'Marked as Done & moved to Today calls'
+        : existingTodayLog
+        ? 'Today Call Updated'
+        : 'Call Logged',
       input.newStatus === 'Order Confirmed' && paidCustomer
         ? `${target.customerName} added to Paid Customers (Renewal: ${paidCustomer.renewalDate}).`
+        : input.newStatus === 'Done'
+        ? `${target.customerName} (${upsertedLog.previousStatus} → Done) logged in Today calls.`
+        : existingTodayLog
+        ? `${target.customerName} updated to ${input.newStatus} in Today calls.`
         : `${target.customerName} marked as ${input.newStatus}.`
     );
 
     void triggerRealtimeSync(
       settings.googleSheetsWebhookUrl,
-      { event: 'CALL_LOGGED', lead: updatedLead, callLog: newLog, paidCustomer },
+      { event: 'CALL_LOGGED', lead: updatedLead, callLog: upsertedLog, paidCustomer },
       nextLeads,
       nextCallLogs
     );
@@ -1654,6 +1720,18 @@ export default function App() {
 
   // Admin handlers
   const handleToggleAutoAssign = (enabled: boolean) => {
+    const activeAgentsList = getActiveAgents(
+      CALL_CENTER_AGENTS,
+      settings.disabledAgentIds
+    );
+    if (enabled && activeAgentsList.length === 0) {
+      addToast(
+        'warning',
+        'No Active Agents Selected',
+        'Turn ON at least 1 agent before enabling Round-Robin Auto-Assign.'
+      );
+      return;
+    }
     const nextSettings: AppSettings = { ...settings, autoAssignEnabled: enabled };
     setSettings(nextSettings);
     void saveSettingsInSupabase(nextSettings).catch(() => {});
@@ -1668,8 +1746,61 @@ export default function App() {
       'info',
       `Auto-Assign ${enabled ? 'Enabled' : 'Paused'}`,
       enabled
-        ? 'New leads will automatically distribute across the 6 agents.'
+        ? `New leads will automatically distribute across ${activeAgentsList.length} active agent${
+            activeAgentsList.length === 1 ? '' : 's'
+          }.`
         : 'New leads will remain unassigned until manually assigned.'
+    );
+  };
+
+  const handleToggleAgentAvailability = (agentId: string) => {
+    const agent = CALL_CENTER_AGENTS.find((a) => a.id === agentId);
+    if (!agent) return;
+
+    const currentDisabled = settings.disabledAgentIds ?? [];
+    const isCurrentlyDisabled = currentDisabled.includes(agentId);
+
+    if (!isCurrentlyDisabled) {
+      const remainingActiveCount = CALL_CENTER_AGENTS.filter(
+        (a) => a.id !== agentId && !currentDisabled.includes(a.id)
+      ).length;
+      if (settings.autoAssignEnabled && remainingActiveCount === 0) {
+        addToast(
+          'warning',
+          'Cannot Disable Last Active Agent',
+          'At least 1 agent must stay active while Auto-Assign is ON.'
+        );
+        return;
+      }
+    }
+
+    const nextDisabled = isCurrentlyDisabled
+      ? currentDisabled.filter((id) => id !== agentId)
+      : [...currentDisabled, agentId];
+
+    const nextSettings: AppSettings = {
+      ...settings,
+      disabledAgentIds: nextDisabled,
+    };
+    setSettings(nextSettings);
+    void saveSettingsInSupabase(nextSettings).catch(() => {});
+
+    if (currentUser) {
+      appendAudit(
+        currentUser,
+        'SETTINGS_UPDATED',
+        `${currentUser.name} marked agent ${agent.name} as ${
+          isCurrentlyDisabled ? 'Active/ON' : 'Absent/OFF'
+        } for auto-assignment`
+      );
+    }
+
+    addToast(
+      isCurrentlyDisabled ? 'success' : 'info',
+      `${agent.name} Marked ${isCurrentlyDisabled ? 'Active (ON)' : 'Absent (OFF)'}`,
+      isCurrentlyDisabled
+        ? `${agent.name} is back in the Round-Robin rotation.`
+        : `${agent.name} will be skipped during Round-Robin auto-assignment.`
     );
   };
 
@@ -1881,7 +2012,9 @@ export default function App() {
             leads={leads}
             autoAssignEnabled={settings.autoAssignEnabled}
             roundRobinIndex={settings.roundRobinIndex}
+            disabledAgentIds={settings.disabledAgentIds}
             onToggleAutoAssign={handleToggleAutoAssign}
+            onToggleAgentAvailability={handleToggleAgentAvailability}
             onReassignLead={handleReassignLead}
             onUpdateLeadStatus={handleAdminUpdateLeadStatus}
             onExportCsv={() =>

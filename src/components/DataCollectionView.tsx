@@ -6,6 +6,7 @@ import {
   ExternalLink,
   FileUp,
   Loader2,
+  MessageCircle,
   PlusCircle,
   Search,
   ShieldAlert,
@@ -22,6 +23,7 @@ import {
   formatShortDate,
   getLocalDateString,
   normalizeBdPhone,
+  openWhatsAppChat,
   parseCsvLeads,
 } from '../utils/leadLogic';
 import { StatusBadge } from './StatusBadge';
@@ -894,8 +896,20 @@ export function DataCollectionView({
                           </a>
                         )}
                       </td>
-                      <td className="py-3 px-4 font-mono text-xs tabular-nums text-slate-700 dark:text-slate-300 whitespace-nowrap">
-                        {formatBdPhoneDisplay(lead.phone)}
+                      <td className="py-3 px-4">
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono text-xs tabular-nums text-slate-700 dark:text-slate-300 whitespace-nowrap">
+                            {formatBdPhoneDisplay(lead.phone)}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => openWhatsAppChat(lead.phone)}
+                            aria-label={`WhatsApp ${lead.customerName}`}
+                            className="p-1 rounded bg-slate-200/80 dark:bg-slate-800 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-600 hover:text-white transition-colors cursor-pointer"
+                          >
+                            <MessageCircle className="w-3 h-3" />
+                          </button>
+                        </div>
                       </td>
                       <td className="py-3 px-4 text-xs font-medium text-slate-700 dark:text-slate-300 whitespace-nowrap">
                         {lead.assignedAgentName ?? (

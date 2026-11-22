@@ -317,6 +317,7 @@ export async function getSettingsFromDb(): Promise<AppSettings> {
       return {
         autoAssignEnabled: true,
         roundRobinIndex: 0,
+        disabledAgentIds: [],
         googleSheetsWebhookUrl: DEFAULT_WEBHOOK_URL,
         callScript: DEFAULT_CALL_SCRIPT,
         lastSyncedAt: null,
@@ -326,6 +327,7 @@ export async function getSettingsFromDb(): Promise<AppSettings> {
     return {
       autoAssignEnabled: row.autoAssignEnabled,
       roundRobinIndex: row.roundRobinIndex,
+      disabledAgentIds: [],
       googleSheetsWebhookUrl: row.googleSheetsWebhookUrl || DEFAULT_WEBHOOK_URL,
       callScript: row.callScript || DEFAULT_CALL_SCRIPT,
       lastSyncedAt: row.lastSyncedAt,
@@ -634,23 +636,63 @@ export async function recordCallLogTransaction(
           },
         });
 
-      await tx
-        .insert(callLogs)
-        .values({
-          id: callLog.id,
-          leadId: callLog.leadId,
-          customerName: callLog.customerName,
-          phone: normalizeBdPhoneServer(callLog.phone) || callLog.phone,
-          agentId: callLog.agentId,
-          agentName: callLog.agentName,
-          previousStatus: sanitizeCallStatus(callLog.previousStatus),
-          newStatus: sanitizeCallStatus(callLog.newStatus),
-          notes: callLog.notes ?? '',
-          followUpAt: callLog.followUpAt ?? null,
-          callDate,
-          createdAt: callLog.timestamp,
-        })
-        .onConflictDoNothing();
+      const normalizedPhone = normalizeBdPhoneServer(callLog.phone) || callLog.phone;
+      const existingSameDay = await tx
+        .select()
+        .from(callLogs)
+        .where(eq(callLogs.callDate, callDate));
+
+      const targetCore = normalizedPhone.replace(/\D/g, '').slice(-10);
+      const matched = existingSameDay.find((row) => {
+        const sameAgent =
+          (callLog.agentId && row.agentId === callLog.agentId) ||
+          row.agentName.trim().toLowerCase() === callLog.agentName.trim().toLowerCase();
+        if (!sameAgent) return false;
+        if (callLog.leadId && row.leadId === callLog.leadId) return true;
+        const rowCore = row.phone.replace(/\D/g, '').slice(-10);
+        return Boolean(targetCore && rowCore && targetCore === rowCore);
+      });
+
+      if (matched) {
+        await tx
+          .update(callLogs)
+          .set({
+            leadId: callLog.leadId,
+            customerName: callLog.customerName,
+            phone: normalizedPhone,
+            newStatus: sanitizeCallStatus(callLog.newStatus),
+            notes: callLog.notes ?? '',
+            followUpAt: callLog.followUpAt ?? null,
+            createdAt: callLog.timestamp,
+          })
+          .where(eq(callLogs.id, matched.id));
+      } else {
+        await tx
+          .insert(callLogs)
+          .values({
+            id: callLog.id,
+            leadId: callLog.leadId,
+            customerName: callLog.customerName,
+            phone: normalizedPhone,
+            agentId: callLog.agentId,
+            agentName: callLog.agentName,
+            previousStatus: sanitizeCallStatus(callLog.previousStatus),
+            newStatus: sanitizeCallStatus(callLog.newStatus),
+            notes: callLog.notes ?? '',
+            followUpAt: callLog.followUpAt ?? null,
+            callDate,
+            createdAt: callLog.timestamp,
+          })
+          .onConflictDoUpdate({
+            target: callLogs.id,
+            set: {
+              newStatus: sanitizeCallStatus(callLog.newStatus),
+              notes: callLog.notes ?? '',
+              followUpAt: callLog.followUpAt ?? null,
+              createdAt: callLog.timestamp,
+            },
+          });
+      }
 
       if (paidCustomer) {
         const paidValues = buildPaidInsertValues(

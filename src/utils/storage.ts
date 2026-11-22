@@ -109,6 +109,16 @@ export const storage = {
       googleSheetsWebhookUrl: DEFAULT_GOOGLE_SHEETS_WEBHOOK_URL,
     }));
 
+    const normalizedDisabledAgentIds = Array.isArray(settings.disabledAgentIds)
+      ? Array.from(
+          new Set(
+            settings.disabledAgentIds.filter(
+              (id): id is string => typeof id === 'string' && id.trim().length > 0
+            )
+          )
+        )
+      : [];
+
     let migratedVersion: string | null = null;
     try {
       migratedVersion = localStorage.getItem(STORAGE_KEYS.WEBHOOK_VERSION);
@@ -124,6 +134,7 @@ export const storage = {
       }
       const upgraded: AppSettings = {
         ...settings,
+        disabledAgentIds: normalizedDisabledAgentIds,
         googleSheetsWebhookUrl: DEFAULT_GOOGLE_SHEETS_WEBHOOK_URL,
       };
       safeWrite(STORAGE_KEYS.SETTINGS, upgraded);
@@ -134,15 +145,22 @@ export const storage = {
       settings.googleSheetsWebhookUrl,
       ENV_GOOGLE_SHEET_WEBHOOK_URL
     );
-    if (settings.googleSheetsWebhookUrl !== resolvedUrl) {
+    if (
+      settings.googleSheetsWebhookUrl !== resolvedUrl ||
+      !Array.isArray(settings.disabledAgentIds)
+    ) {
       const updated: AppSettings = {
         ...settings,
+        disabledAgentIds: normalizedDisabledAgentIds,
         googleSheetsWebhookUrl: resolvedUrl,
       };
       safeWrite(STORAGE_KEYS.SETTINGS, updated);
       return updated;
     }
-    return settings;
+    return {
+      ...settings,
+      disabledAgentIds: normalizedDisabledAgentIds,
+    };
   },
   saveSettings: (settings: AppSettings) => {
     try {

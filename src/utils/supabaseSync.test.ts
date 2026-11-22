@@ -3,13 +3,17 @@ import assert from 'node:assert/strict';
 import {
   callLogToSupabaseRow,
   contentPostToSupabaseRow,
+  isMissingColumnError,
   isSchemaMissingError,
   leadToSupabaseRow,
   paidCustomerToSupabaseRow,
+  resolveUpsertSupabaseCallLogRow,
   rowToCallLog,
   rowToContentPost,
   rowToLead,
   rowToPaidCustomer,
+  rowToSettings,
+  sanitizeDisabledAgentIds,
 } from './supabaseSync';
 import type { CallLog, ContentPost, Lead, PaidCustomer } from '../types';
 
@@ -160,3 +164,117 @@ test('loginWithServer and restoreServerSession handle static Shared App HTML/404
     globalThis.fetch = originalFetch;
   }
 });
+
+test('Supabase settings mapper sanitizes disabled_agents and detects missing column errors cleanly', () => {
+  assert.deepEqual(sanitizeDisabledAgentIds(['agent-tania', ' agent-tania ', 'agent-sakib', 123, '']), [
+    'agent-tania',
+    'agent-sakib',
+  ]);
+  assert.deepEqual(sanitizeDisabledAgentIds('["agent-kathy"]'), ['agent-kathy']);
+  assert.deepEqual(sanitizeDisabledAgentIds(undefined), []);
+
+  const mapped = rowToSettings({
+    id: 'global',
+    auto_assign_enabled: true,
+    round_robin_index: 3,
+    disabled_agents: ['agent-tania', 'agent-sakib'],
+    google_sheets_webhook_url: 'https://script.google.com/macros/s/abc/exec',
+    call_script: 'Script',
+    last_synced_at: null,
+    updated_at: '2026-11-22T10:00:00.000Z',
+  });
+  assert.deepEqual(mapped.disabledAgentIds, ['agent-tania', 'agent-sakib']);
+  assert.equal(mapped.roundRobinIndex, 3);
+
+  assert.equal(
+    isMissingColumnError(
+      { code: 'PGRST204', message: "Could not find the 'disabled_agents' column of 'app_settings' in the schema cache" },
+      'disabled_agents'
+    ),
+    true
+  );
+  assert.equal(
+    isMissingColumnError({ code: '42703', message: 'column "disabled_agents" does not exist' }, 'disabled_agents'),
+    true
+  );
+  assert.equal(isMissingColumnError({ code: '23505', message: 'duplicate key' }, 'disabled_agents'), false);
+});
+
+test('resolveUpsertSupabaseCallLogRow reuses existing same-day row id by lead_id or normalized phone and flags duplicates for cleanup', () => {
+  const existingRows = [
+    {
+      id: 'CL-MORNING',
+      lead_id: 'L-1817',
+      customer_name: 'Nadia Akter',
+      phone: '01817705593',
+      agent_id: 'agent-tanjin',
+      agent_name: 'Tanjin',
+      previous_status: 'Pending',
+      new_status: 'Interested',
+      notes: 'Call later',
+      follow_up_at: null,
+      call_date: '2026-11-22',
+      created_at: '2026-11-22T09:00:00.000Z',
+    },
+    {
+      id: 'CL-STRAY-DUP',
+      lead_id: 'L-OTHER',
+      customer_name: 'Nadia Akter',
+      phone: '+880 1817-705593',
+      agent_id: 'agent-tanjin',
+      agent_name: 'Tanjin',
+      previous_status: 'Interested',
+      new_status: 'Busy / Call Later',
+      notes: 'Stray row',
+      follow_up_at: null,
+      call_date: '2026-11-22',
+      created_at: '2026-11-22T11:00:00.000Z',
+    },
+  ];
+
+  const resolved = resolveUpsertSupabaseCallLogRow(
+    {
+      id: 'CL-FRESH-ID',
+      lead_id: 'L-1817',
+      customer_name: 'Nadia Akter',
+      phone: '01817705593',
+      agent_id: 'agent-tanjin',
+      agent_name: 'Tanjin',
+      previous_status: 'Busy / Call Later',
+      new_status: 'Done',
+      notes: 'Final Done',
+      follow_up_at: null,
+      call_date: '2026-11-22',
+      created_at: '2026-11-22T14:00:00.000Z',
+    },
+    existingRows
+  );
+
+  // Reuses existing row ID, keeps earliest previous_status ('Pending'), and cleans up extra same-day duplicate
+  assert.equal(resolved.rowToUpsert.id, 'CL-STRAY-DUP');
+  assert.equal(resolved.rowToUpsert.previous_status, 'Pending');
+  assert.equal(resolved.rowToUpsert.new_status, 'Done');
+  assert.deepEqual(resolved.duplicateIdsToDelete, ['CL-MORNING']);
+
+  // Different day does not match
+  const nextDay = resolveUpsertSupabaseCallLogRow(
+    {
+      id: 'CL-NEXT-DAY',
+      lead_id: 'L-1817',
+      customer_name: 'Nadia Akter',
+      phone: '01817705593',
+      agent_id: 'agent-tanjin',
+      agent_name: 'Tanjin',
+      previous_status: 'Done',
+      new_status: 'Order Confirmed',
+      notes: '',
+      follow_up_at: null,
+      call_date: '2026-11-23',
+      created_at: '2026-11-23T10:00:00.000Z',
+    },
+    existingRows
+  );
+  assert.equal(nextDay.rowToUpsert.id, 'CL-NEXT-DAY');
+  assert.deepEqual(nextDay.duplicateIdsToDelete, []);
+});
+

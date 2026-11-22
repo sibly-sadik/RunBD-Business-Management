@@ -16,6 +16,7 @@ import {
   UserRole,
 } from '../types';
 import {
+  extractPhoneCoreKey,
   getLocalDateString,
   normalizeBdPhone,
   normalizeFacebookUrl,
@@ -119,10 +120,51 @@ export interface SupabaseSettingsRow {
   id: string;
   auto_assign_enabled: boolean;
   round_robin_index: number;
+  disabled_agents?: string[] | string | null;
   google_sheets_webhook_url: string;
   call_script: string;
   last_synced_at: string | null;
   updated_at: string;
+}
+
+export function sanitizeDisabledAgentIds(raw: unknown): string[] {
+  let list: unknown[] = [];
+  if (Array.isArray(raw)) {
+    list = raw;
+  } else if (typeof raw === 'string' && raw.trim().startsWith('[')) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) list = parsed;
+    } catch {
+      list = [];
+    }
+  }
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const item of list) {
+    if (typeof item === 'string') {
+      const trimmed = item.trim();
+      if (trimmed && !seen.has(trimmed)) {
+        seen.add(trimmed);
+        result.push(trimmed);
+      }
+    }
+  }
+  return result;
+}
+
+export function isMissingColumnError(
+  err: { code?: string; message?: string } | null,
+  columnName?: string
+): boolean {
+  if (!err) return false;
+  const code = (err.code ?? '').toUpperCase();
+  const msg = (err.message ?? '').toLowerCase();
+  if (code === '42703' || code === 'PGRST204') return true;
+  if (columnName && msg.includes(columnName.toLowerCase()) && (msg.includes('column') || msg.includes('schema cache'))) {
+    return true;
+  }
+  return false;
 }
 
 function sanitizeCallStatus(raw: string | undefined | null): CallStatus {
@@ -381,6 +423,7 @@ export function rowToSettings(row: SupabaseSettingsRow): AppSettings {
   return {
     autoAssignEnabled: row.auto_assign_enabled,
     roundRobinIndex: row.round_robin_index,
+    disabledAgentIds: sanitizeDisabledAgentIds(row.disabled_agents),
     googleSheetsWebhookUrl:
       row.google_sheets_webhook_url || FALLBACK_GOOGLE_SHEETS_WEBHOOK_URL,
     callScript: row.call_script || DEFAULT_CALL_SCRIPT,
@@ -401,6 +444,7 @@ export async function fetchBootstrapFromSupabase(
   duplicateAttempts?: DuplicateAttempt[];
   auditLogs?: AuditLog[];
   settings?: AppSettings;
+  settingsHasDisabledAgentsColumn?: boolean;
   error?: string;
 }> {
   try {
@@ -522,6 +566,11 @@ export async function fetchBootstrapFromSupabase(
       settings: settingsRes.data
         ? rowToSettings(settingsRes.data as SupabaseSettingsRow)
         : undefined,
+      settingsHasDisabledAgentsColumn: Boolean(
+        settingsRes.data &&
+          'disabled_agents' in (settingsRes.data as Record<string, unknown>) &&
+          (settingsRes.data as Record<string, unknown>).disabled_agents !== undefined
+      ),
     };
   } catch (err) {
     return {
@@ -772,21 +821,100 @@ export async function updateLeadInSupabase(
   }
 }
 
+export function resolveUpsertSupabaseCallLogRow(
+  candidate: SupabaseCallLogRow,
+  existingSameDayRows: SupabaseCallLogRow[]
+): { rowToUpsert: SupabaseCallLogRow; duplicateIdsToDelete: string[] } {
+  const candidateAgentName = (candidate.agent_name || '').trim().toLowerCase();
+  const candidateAgentId = (candidate.agent_id || '').trim();
+  const candidateLeadId = (candidate.lead_id || '').trim();
+  const candidatePhoneCore = extractPhoneCoreKey(candidate.phone);
+
+  const matching = existingSameDayRows
+    .filter((row) => {
+      if (row.call_date !== candidate.call_date) return false;
+      const rowAgentName = (row.agent_name || '').trim().toLowerCase();
+      const rowAgentId = (row.agent_id || '').trim();
+      const sameAgent =
+        (candidateAgentId && rowAgentId && candidateAgentId === rowAgentId) ||
+        (candidateAgentName && rowAgentName && candidateAgentName === rowAgentName);
+      if (!sameAgent) return false;
+
+      if (candidateLeadId && row.lead_id && row.lead_id.trim() === candidateLeadId) {
+        return true;
+      }
+      const rowPhoneCore = extractPhoneCoreKey(row.phone);
+      return Boolean(candidatePhoneCore && rowPhoneCore && candidatePhoneCore === rowPhoneCore);
+    })
+    .sort((a, b) => (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0));
+
+  if (matching.length === 0) {
+    return { rowToUpsert: candidate, duplicateIdsToDelete: [] };
+  }
+
+  // Keep the primary (or candidate-id-matching) row, preserve original starting status, and clean any stale extras
+  const exactIdMatch = matching.find((r) => r.id === candidate.id);
+  const primary = exactIdMatch ?? matching[0];
+  const earliest = matching[matching.length - 1];
+  const duplicateIdsToDelete = matching
+    .map((r) => r.id)
+    .filter((id) => id !== primary.id);
+
+  return {
+    rowToUpsert: {
+      ...candidate,
+      id: primary.id,
+      previous_status: sanitizeCallStatus(earliest.previous_status || candidate.previous_status),
+    },
+    duplicateIdsToDelete,
+  };
+}
+
 export async function saveCallLogInSupabase(
   updatedLead: Lead,
   callLog: CallLog,
   paidCustomer?: PaidCustomer
 ): Promise<void> {
   const leadRow = leadToSupabaseRow(updatedLead);
-  const logRow = callLogToSupabaseRow(callLog);
+  const candidateLogRow = callLogToSupabaseRow(callLog);
 
-  await Promise.all([
-    supabase.from('leads').upsert(leadRow, { onConflict: 'id' }),
-    supabase.from('call_logs').upsert(logRow, { onConflict: 'id' }),
-    paidCustomer
-      ? upsertPaidCustomerInSupabase(paidCustomer, updatedLead.facebookLink)
-      : Promise.resolve(),
-  ]);
+  let finalLogRow = candidateLogRow;
+  let duplicateIdsToDelete: string[] = [];
+
+  try {
+    const { data: existingRows } = await supabase
+      .from('call_logs')
+      .select('*')
+      .eq('call_date', candidateLogRow.call_date);
+
+    if (Array.isArray(existingRows) && existingRows.length > 0) {
+      const resolved = resolveUpsertSupabaseCallLogRow(
+        candidateLogRow,
+        existingRows as SupabaseCallLogRow[]
+      );
+      finalLogRow = resolved.rowToUpsert;
+      duplicateIdsToDelete = resolved.duplicateIdsToDelete;
+    }
+  } catch {
+    // Fall back to direct id upsert if lookup fails
+  }
+
+  const ops: Promise<unknown>[] = [
+    Promise.resolve(supabase.from('leads').upsert(leadRow, { onConflict: 'id' })),
+    Promise.resolve(supabase.from('call_logs').upsert(finalLogRow, { onConflict: 'id' })),
+  ];
+
+  if (duplicateIdsToDelete.length > 0) {
+    ops.push(
+      Promise.resolve(supabase.from('call_logs').delete().in('id', duplicateIdsToDelete))
+    );
+  }
+
+  if (paidCustomer) {
+    ops.push(upsertPaidCustomerInSupabase(paidCustomer, updatedLead.facebookLink));
+  }
+
+  await Promise.all(ops);
 }
 
 export async function createPostInSupabase(post: ContentPost): Promise<{
@@ -852,19 +980,49 @@ export async function saveAuditLogInSupabase(log: AuditLog): Promise<void> {
   );
 }
 
+export async function fetchAppSettingsFromSupabase(): Promise<{
+  settings: AppSettings;
+  hasDisabledAgentsColumn: boolean;
+} | null> {
+  try {
+    const { data, error } = await supabase
+      .from('app_settings')
+      .select('*')
+      .eq('id', 'global')
+      .maybeSingle();
+    if (error || !data) return null;
+    const row = data as SupabaseSettingsRow;
+    return {
+      settings: rowToSettings(row),
+      hasDisabledAgentsColumn:
+        'disabled_agents' in (row as unknown as Record<string, unknown>) &&
+        row.disabled_agents !== undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export async function saveSettingsInSupabase(settings: AppSettings): Promise<void> {
-  await supabase.from('app_settings').upsert(
-    {
-      id: 'global',
-      auto_assign_enabled: Boolean(settings.autoAssignEnabled),
-      round_robin_index: Math.max(0, Math.floor(Number(settings.roundRobinIndex) || 0)),
-      google_sheets_webhook_url: settings.googleSheetsWebhookUrl,
-      call_script: settings.callScript,
-      last_synced_at: settings.lastSyncedAt,
-      updated_at: new Date().toISOString(),
-    },
-    { onConflict: 'id' }
-  );
+  const payload = {
+    id: 'global',
+    auto_assign_enabled: Boolean(settings.autoAssignEnabled),
+    round_robin_index: Math.max(0, Math.floor(Number(settings.roundRobinIndex) || 0)),
+    disabled_agents: sanitizeDisabledAgentIds(settings.disabledAgentIds),
+    google_sheets_webhook_url: settings.googleSheetsWebhookUrl,
+    call_script: settings.callScript,
+    last_synced_at: settings.lastSyncedAt,
+    updated_at: new Date().toISOString(),
+  };
+
+  const { error } = await supabase
+    .from('app_settings')
+    .upsert(payload, { onConflict: 'id' });
+
+  if (error && isMissingColumnError(error, 'disabled_agents')) {
+    const { disabled_agents: _ignored, ...legacyPayload } = payload;
+    await supabase.from('app_settings').upsert(legacyPayload, { onConflict: 'id' });
+  }
 }
 
 export async function syncPulledRecordsToSupabase(payload: {

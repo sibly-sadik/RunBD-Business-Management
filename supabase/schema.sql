@@ -115,16 +115,20 @@ CREATE TABLE IF NOT EXISTS public.audit_logs (
 
 CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON public.audit_logs (created_at DESC);
 
--- 7. App Settings table (Round-Robin pointer, Webhook URL, Call Script)
+-- 7. App Settings table (Round-Robin pointer, Disabled Agents, Webhook URL, Call Script)
 CREATE TABLE IF NOT EXISTS public.app_settings (
   id TEXT PRIMARY KEY,
   auto_assign_enabled BOOLEAN NOT NULL DEFAULT TRUE,
   round_robin_index INTEGER NOT NULL DEFAULT 0,
+  disabled_agents JSONB NOT NULL DEFAULT '[]'::jsonb,
   google_sheets_webhook_url TEXT NOT NULL DEFAULT '',
   call_script TEXT NOT NULL DEFAULT '',
   last_synced_at TEXT,
   updated_at TEXT NOT NULL
 );
+
+ALTER TABLE public.app_settings
+  ADD COLUMN IF NOT EXISTS disabled_agents JSONB NOT NULL DEFAULT '[]'::jsonb;
 
 -- Disable Row Level Security (RLS) so team workspaces read/write immediately with the configured Supabase client
 ALTER TABLE public.leads DISABLE ROW LEVEL SECURITY;

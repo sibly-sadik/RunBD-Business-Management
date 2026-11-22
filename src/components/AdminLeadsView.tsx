@@ -11,12 +11,14 @@ import { CALL_CENTER_AGENTS } from '../data/seedData';
 import { CALL_STATUSES, CallStatus, Lead } from '../types';
 import {
   buildTelUrl,
-  buildWhatsAppUrl,
   filterTodayLeads,
   formatBdPhoneDisplay,
   formatShortDate,
   generateLeadsCsv,
+  getActiveAgents,
   getLocalDateString,
+  getNextRoundRobinAgent,
+  openWhatsAppChat,
 } from '../utils/leadLogic';
 import { StatusBadge } from './StatusBadge';
 
@@ -24,7 +26,9 @@ interface AdminLeadsViewProps {
   leads: Lead[];
   autoAssignEnabled: boolean;
   roundRobinIndex: number;
+  disabledAgentIds: string[];
   onToggleAutoAssign: (enabled: boolean) => void;
+  onToggleAgentAvailability: (agentId: string) => void;
   onReassignLead: (leadId: string, newAgentId: string | null) => void;
   onUpdateLeadStatus: (leadId: string, newStatus: CallStatus) => void;
   onExportCsv: () => void;
@@ -34,7 +38,9 @@ export function AdminLeadsView({
   leads,
   autoAssignEnabled,
   roundRobinIndex,
+  disabledAgentIds,
   onToggleAutoAssign,
+  onToggleAgentAvailability,
   onReassignLead,
   onUpdateLeadStatus,
   onExportCsv,
@@ -48,8 +54,14 @@ export function AdminLeadsView({
   // Hide 28k+ historical Master_Data rows: display ONLY leads collected Today (YYYY-MM-DD)
   const todayLeads = useMemo(() => filterTodayLeads(leads), [leads]);
 
+  const disabledSet = useMemo(() => new Set(disabledAgentIds), [disabledAgentIds]);
+  const activeAgents = useMemo(
+    () => getActiveAgents(CALL_CENTER_AGENTS, disabledAgentIds),
+    [disabledAgentIds]
+  );
   const nextAgent =
-    CALL_CENTER_AGENTS[roundRobinIndex % CALL_CENTER_AGENTS.length]?.name ?? 'Tanjin';
+    getNextRoundRobinAgent(CALL_CENTER_AGENTS, roundRobinIndex, disabledAgentIds)?.name ??
+    'None';
 
   const filteredLeads = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -106,43 +118,99 @@ export function AdminLeadsView({
       </div>
 
       {/* Round-Robin Control Panel */}
-      <section className="glass-panel rounded-2xl p-5 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
-        <div className="flex items-start gap-3">
+      <section className="glass-panel rounded-2xl p-5 flex flex-col xl:flex-row xl:items-center xl:justify-between gap-4">
+        <div className="flex items-start gap-3 min-w-0">
           <div className="w-10 h-10 rounded-xl bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 flex items-center justify-center shrink-0">
             <Repeat className="w-5 h-5" />
           </div>
-          <div>
+          <div className="min-w-0">
             <h2 className="text-sm font-semibold text-slate-900 dark:text-white">
               Automated Round-Robin Engine
             </h2>
-            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+            <p
+              data-testid="round-robin-subtitle"
+              className="text-xs text-slate-500 dark:text-slate-400 mt-0.5 leading-relaxed"
+            >
               Equally distributes newly collected leads across{' '}
-              <strong>Tanjin, Kathy, Tania, Shanaz, Sizon, Sakib</strong>. Next in queue:{' '}
-              <strong className="text-emerald-600 dark:text-emerald-400">{nextAgent}</strong>.
+              <strong>
+                {activeAgents.length > 0
+                  ? activeAgents.map((a) => a.name).join(', ')
+                  : 'No active agents'}
+              </strong>
+              . Next in queue:{' '}
+              <strong
+                data-testid="round-robin-next-agent"
+                className="text-emerald-600 dark:text-emerald-400"
+              >
+                {nextAgent}
+              </strong>
+              .
             </p>
           </div>
         </div>
 
-        <div className="flex items-center gap-3 shrink-0">
-          <span className="text-xs font-medium text-slate-600 dark:text-slate-300">
-            Auto-Assign: <strong>{autoAssignEnabled ? 'ON' : 'OFF'}</strong>
-          </span>
-          <button
-            type="button"
-            role="switch"
-            aria-checked={autoAssignEnabled}
-            aria-label="Toggle Round-Robin Auto-Assign"
-            onClick={() => onToggleAutoAssign(!autoAssignEnabled)}
-            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer ${
-              autoAssignEnabled ? 'bg-emerald-600' : 'bg-slate-300 dark:bg-slate-700'
-            }`}
+        <div className="flex flex-col sm:flex-row sm:items-center gap-3 xl:justify-end shrink-0">
+          <div
+            role="group"
+            aria-label="Per-agent auto-assignment availability toggles"
+            data-testid="agent-availability-toggles"
+            className="flex flex-wrap items-center gap-1.5"
           >
-            <span
-              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                autoAssignEnabled ? 'translate-x-6' : 'translate-x-1'
+            {CALL_CENTER_AGENTS.map((agent) => {
+              const isActive = !disabledSet.has(agent.id);
+              return (
+                <button
+                  key={agent.id}
+                  type="button"
+                  role="switch"
+                  aria-checked={isActive}
+                  aria-label={`Toggle ${agent.name} availability (${isActive ? 'ON' : 'OFF'})`}
+                  data-testid={`agent-availability-toggle-${agent.id}`}
+                  onClick={() => onToggleAgentAvailability(agent.id)}
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap ${
+                    isActive
+                      ? 'bg-emerald-500/12 border-emerald-500/35 text-emerald-700 dark:bg-emerald-500/15 dark:border-emerald-500/40 dark:text-emerald-300 hover:bg-emerald-500/20'
+                      : 'bg-slate-100 border-slate-200 text-slate-400 dark:bg-slate-900/70 dark:border-slate-800 dark:text-slate-500 hover:text-slate-600 dark:hover:text-slate-300'
+                  }`}
+                >
+                  <span className={isActive ? '' : 'line-through'}>{agent.name}</span>
+                  <span
+                    className={`text-[10px] font-bold ${
+                      isActive
+                        ? 'text-emerald-600 dark:text-emerald-400'
+                        : 'text-slate-400 dark:text-slate-500'
+                    }`}
+                  >
+                    {isActive ? '● ON' : '○ OFF'}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="hidden sm:block h-6 w-px bg-slate-200 dark:bg-slate-800 shrink-0" />
+
+          <div className="flex items-center gap-3 shrink-0 self-start sm:self-center">
+            <span className="text-xs font-medium text-slate-600 dark:text-slate-300 whitespace-nowrap">
+              Auto-Assign: <strong>{autoAssignEnabled ? 'ON' : 'OFF'}</strong>
+            </span>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={autoAssignEnabled}
+              aria-label="Toggle Round-Robin Auto-Assign"
+              onClick={() => onToggleAutoAssign(!autoAssignEnabled)}
+              className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer ${
+                autoAssignEnabled ? 'bg-emerald-600' : 'bg-slate-300 dark:bg-slate-700'
               }`}
-            />
-          </button>
+            >
+              <span
+                className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                  autoAssignEnabled ? 'translate-x-6' : 'translate-x-1'
+                }`}
+              />
+            </button>
+          </div>
         </div>
       </section>
 
@@ -254,15 +322,14 @@ export function AdminLeadsView({
                       >
                         <PhoneCall className="w-3 h-3" />
                       </a>
-                      <a
-                        href={buildWhatsAppUrl(lead.phone, lead.customerName)}
-                        target="_blank"
-                        rel="noreferrer"
+                      <button
+                        type="button"
+                        onClick={() => openWhatsAppChat(lead.phone)}
                         aria-label={`WhatsApp ${lead.customerName}`}
-                        className="p-1 rounded bg-slate-200/80 dark:bg-slate-800 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-600 hover:text-white transition-colors"
+                        className="p-1 rounded bg-slate-200/80 dark:bg-slate-800 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-600 hover:text-white transition-colors cursor-pointer"
                       >
                         <MessageCircle className="w-3 h-3" />
-                      </a>
+                      </button>
                     </div>
                   </td>
                   <td className="py-3 px-4 text-xs text-slate-600 dark:text-slate-400 whitespace-nowrap">
@@ -279,6 +346,7 @@ export function AdminLeadsView({
                       {CALL_CENTER_AGENTS.map((agent) => (
                         <option key={agent.id} value={agent.id}>
                           {agent.name}
+                          {disabledSet.has(agent.id) ? ' (OFF)' : ''}
                         </option>
                       ))}
                     </select>

@@ -105,6 +105,7 @@ export interface DuplicateAttempt {
 export interface AppSettings {
   autoAssignEnabled: boolean;
   roundRobinIndex: number;
+  disabledAgentIds: string[];
   googleSheetsWebhookUrl: string;
   callScript: string;
   lastSyncedAt: string | null;

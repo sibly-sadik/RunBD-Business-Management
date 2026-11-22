@@ -14,11 +14,11 @@ import { CALL_CENTER_AGENTS } from '../data/seedData';
 import { PaidCustomer, RENEWAL_STATUSES, RenewalStatus, User } from '../types';
 import {
   buildTelUrl,
-  buildWhatsAppUrl,
   computeDaysRemaining,
   computeEffectiveRenewalStatus,
   formatBdPhoneDisplay,
   generatePaidCustomersCsv,
+  openWhatsAppChat,
 } from '../utils/leadLogic';
 
 interface PaidCustomersViewProps {
@@ -350,15 +350,14 @@ export function PaidCustomersView({
                             >
                               <PhoneCall className="w-3 h-3" />
                             </a>
-                            <a
-                              href={buildWhatsAppUrl(customer.phone, customer.customerName)}
-                              target="_blank"
-                              rel="noreferrer"
+                            <button
+                              type="button"
+                              onClick={() => openWhatsAppChat(customer.phone)}
                               aria-label={`WhatsApp ${customer.customerName}`}
-                              className="p-1 rounded bg-slate-200/80 dark:bg-slate-800 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-600 hover:text-white transition-colors"
+                              className="p-1 rounded bg-slate-200/80 dark:bg-slate-800 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-600 hover:text-white transition-colors cursor-pointer"
                             >
                               <MessageCircle className="w-3 h-3" />
-                            </a>
+                            </button>
                           </div>
                         </td>
                         <td className="py-3.5 px-4 text-xs font-medium text-slate-700 dark:text-slate-300 whitespace-nowrap">
@@ -467,6 +466,26 @@ export function PaidCustomersView({
                       <span className="text-[11px] text-slate-400 block">Renewal Date</span>
                       <span className="font-mono font-semibold">{customer.renewalDate}</span>
                     </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <a
+                      href={buildTelUrl(customer.phone)}
+                      aria-label={`Call ${customer.customerName}`}
+                      className="inline-flex items-center justify-center gap-1.5 py-2 rounded-lg bg-emerald-600 text-white text-xs font-semibold"
+                    >
+                      <PhoneCall className="w-3.5 h-3.5" />
+                      <span>Call</span>
+                    </a>
+                    <button
+                      type="button"
+                      onClick={() => openWhatsAppChat(customer.phone)}
+                      aria-label={`WhatsApp ${customer.customerName}`}
+                      className="inline-flex items-center justify-center gap-1.5 py-2 rounded-lg bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-900 dark:text-slate-100 text-xs font-semibold cursor-pointer"
+                    >
+                      <MessageCircle className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                      <span>WhatsApp</span>
+                    </button>
                   </div>
 
                   <button

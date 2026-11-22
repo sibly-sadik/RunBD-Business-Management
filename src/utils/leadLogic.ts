@@ -1,6 +1,7 @@
 import {
   AgentPerformanceMetric,
   CallLog,
+  CallStatus,
   CollectorStat,
   ContentPost,
   CsvPreviewRow,
@@ -82,16 +83,127 @@ export function formatBdPhoneDisplay(phone: string): string {
   return `+880 ${norm.slice(1, 5)}-${norm.slice(5)}`;
 }
 
+export const WHATSAPP_WINDOW_NAME = 'runbd_whatsapp_tab';
+
+export interface WhatsAppWindowTarget {
+  focus?: () => void;
+}
+
+export interface WhatsAppAnchorElement {
+  href: string;
+  target: string;
+  rel?: string;
+  style?: { display?: string };
+  click: () => void;
+  remove?: () => void;
+}
+
+export interface WhatsAppDocumentLike {
+  createElement: (tag: 'a') => WhatsAppAnchorElement;
+  body?: {
+    appendChild: (node: WhatsAppAnchorElement) => void;
+    removeChild?: (node: WhatsAppAnchorElement) => void;
+  } | null;
+}
+
+export interface OpenWhatsAppOptions {
+  /** Optional window-like object for unit testing */
+  win?: {
+    open: (url: string, target?: string, features?: string) => WhatsAppWindowTarget | null;
+  };
+  /** Optional document-like object for popup-blocker fallback testing */
+  doc?: WhatsAppDocumentLike;
+  /** Optional callback when popup was blocked and anchor fallback ran */
+  onPopupBlocked?: () => void;
+}
+
 /**
- * Builds a WhatsApp link (https://wa.me/8801XXXXXXXXX) for a Bangladeshi phone number.
+ * Normalizes a Bangladeshi phone number to WhatsApp international digits: 8801XXXXXXXXX.
  */
-export function buildWhatsAppUrl(phone: string, customerName?: string): string {
-  const norm = normalizeBdPhone(phone) ?? phone.replace(/\D/g, '');
-  const international = norm.startsWith('0') ? `88${norm}` : norm;
-  const text = customerName
-    ? `?text=${encodeURIComponent(`Assalamu Alaikum ${customerName}, contacting you from RunBD regarding your inquiry.`)}`
-    : '';
-  return `https://wa.me/${international}${text}`;
+export function normalizeWhatsAppPhone(phone: string): string {
+  const norm = normalizeBdPhone(phone);
+  if (norm) {
+    return `88${norm}`;
+  }
+  const digits = phone.replace(/\D/g, '');
+  if (!digits) return '';
+  if (digits.startsWith('00')) return digits.slice(2);
+  if (digits.startsWith('0') && digits.length >= 10) return `88${digits}`;
+  return digits;
+}
+
+/**
+ * Builds a direct WhatsApp Web URL (https://web.whatsapp.com/send?phone=8801XXXXXXXXX)
+ * without intermediate wa.me redirect hops for fast chat loading.
+ */
+export function buildWhatsAppUrl(phone: string): string {
+  const international = normalizeWhatsAppPhone(phone);
+  if (!international) return 'https://web.whatsapp.com/';
+  return `https://web.whatsapp.com/send?phone=${international}`;
+}
+
+/**
+ * Opens or reuses a single dedicated WhatsApp Web tab ('runbd_whatsapp_tab')
+ * and focuses it, with a safe fallback if popups are blocked.
+ */
+export function openWhatsAppChat(
+  phone: string,
+  options?: OpenWhatsAppOptions
+): { url: string; opened: boolean; fallbackUsed: boolean } {
+  const url = buildWhatsAppUrl(phone);
+  const win = options?.win ?? (typeof window !== 'undefined' ? window : undefined);
+  const doc: WhatsAppDocumentLike | undefined =
+    options?.doc ??
+    (typeof document !== 'undefined'
+      ? (document as unknown as WhatsAppDocumentLike)
+      : undefined);
+
+  if (!win) {
+    return { url, opened: false, fallbackUsed: false };
+  }
+
+  let targetWin: WhatsAppWindowTarget | null = null;
+  try {
+    // Omit noopener/noreferrer so the browser keeps the named context and reuses
+    // the exact same 'runbd_whatsapp_tab' tab on every subsequent click.
+    targetWin = win.open(url, WHATSAPP_WINDOW_NAME);
+  } catch {
+    targetWin = null;
+  }
+
+  if (targetWin) {
+    try {
+      targetWin.focus?.();
+    } catch {
+      // Cross-origin focus may be restricted by browser policies; ignore safely.
+    }
+    return { url, opened: true, fallbackUsed: false };
+  }
+
+  // Safe fallback if browser popup blocker prevented window.open
+  options?.onPopupBlocked?.();
+  if (doc) {
+    try {
+      const link = doc.createElement('a');
+      link.href = url;
+      link.target = WHATSAPP_WINDOW_NAME;
+      if (link.style) {
+        link.style.display = 'none';
+      }
+      doc.body?.appendChild(link);
+      link.click();
+      if (typeof link.remove === 'function') {
+        link.remove();
+      } else {
+        doc.body?.removeChild?.(link);
+      }
+      return { url, opened: false, fallbackUsed: true };
+    } catch {
+      return { url, opened: false, fallbackUsed: false };
+    }
+  }
+
+  return { url, opened: false, fallbackUsed: false };
 }
 
 /**
@@ -304,16 +416,47 @@ export function parseCsvLeads(csvText: string, existingLeads: Lead[]): CsvPrevie
 }
 
 /**
- * Distributes new leads equally among Call Center Agents using Round-Robin.
- * If autoAssignEnabled is false, leaves assignedAgentId/Name as null.
+ * Returns only Call Center Agents that are currently active (not in disabledAgentIds).
+ */
+export function getActiveAgents(
+  agents: User[],
+  disabledAgentIds: readonly string[] = []
+): User[] {
+  if (!disabledAgentIds || disabledAgentIds.length === 0) return agents;
+  const disabledSet = new Set(disabledAgentIds);
+  return agents.filter((agent) => !disabledSet.has(agent.id));
+}
+
+/**
+ * Resolves the next active agent in the Round-Robin queue.
+ */
+export function getNextRoundRobinAgent(
+  agents: User[],
+  roundRobinIndex: number,
+  disabledAgentIds: readonly string[] = []
+): User | null {
+  const activeAgents = getActiveAgents(agents, disabledAgentIds);
+  if (activeAgents.length === 0) return null;
+  const normalizedIdx =
+    ((roundRobinIndex % activeAgents.length) + activeAgents.length) %
+    activeAgents.length;
+  return activeAgents[normalizedIdx] ?? null;
+}
+
+/**
+ * Distributes new leads equally among active Call Center Agents using Round-Robin.
+ * Skips any agent whose id is listed in disabledAgentIds.
+ * If autoAssignEnabled is false or no active agents remain, leaves assignedAgentId/Name as null.
  */
 export function assignLeadsRoundRobin(
   newLeads: Omit<Lead, 'assignedAgentId' | 'assignedAgentName'>[],
   agents: User[],
   startIndex: number,
-  autoAssignEnabled: boolean
+  autoAssignEnabled: boolean,
+  disabledAgentIds: readonly string[] = []
 ): { assignedLeads: Lead[]; nextIndex: number } {
-  if (!autoAssignEnabled || agents.length === 0) {
+  const activeAgents = getActiveAgents(agents, disabledAgentIds);
+  if (!autoAssignEnabled || activeAgents.length === 0) {
     return {
       assignedLeads: newLeads.map((l) => ({
         ...l,
@@ -324,10 +467,10 @@ export function assignLeadsRoundRobin(
     };
   }
 
-  let pointer = ((startIndex % agents.length) + agents.length) % agents.length;
+  let pointer = ((startIndex % activeAgents.length) + activeAgents.length) % activeAgents.length;
   const assignedLeads: Lead[] = newLeads.map((lead) => {
-    const agent = agents[pointer];
-    pointer = (pointer + 1) % agents.length;
+    const agent = activeAgents[pointer];
+    pointer = (pointer + 1) % activeAgents.length;
     return {
       ...lead,
       assignedAgentId: agent.id,
@@ -493,15 +636,140 @@ export function filterTodayLeads(leads: Lead[], now: Date = new Date()): Lead[] 
 }
 
 /**
- * Returns only call logs recorded today (YYYY-MM-DD local date).
+ * Checks whether a call log matches a target lead by `leadId` or normalized BD phone core key.
+ */
+export function doesCallLogMatchTarget(
+  log: Pick<CallLog, 'leadId' | 'phone'>,
+  leadId: string,
+  phone: string
+): boolean {
+  const cleanLeadId = String(leadId || '').trim();
+  const existingLeadId = String(log.leadId || '').trim();
+  if (cleanLeadId && existingLeadId && cleanLeadId === existingLeadId) {
+    return true;
+  }
+  const targetPhone = extractPhoneCoreKey(phone);
+  const existingPhone = extractPhoneCoreKey(log.phone);
+  return Boolean(targetPhone && existingPhone && targetPhone === existingPhone);
+}
+
+/**
+ * Deduplicates call logs so there is at most 1 call entry per lead/phone per calendar day (YYYY-MM-DD),
+ * always keeping the entry with the newest timestamp.
+ */
+export function deduplicateSameDayCallLogs(
+  logs: CallLog[],
+  options?: { perAgent?: boolean }
+): CallLog[] {
+  if (logs.length <= 1) return [...logs];
+
+  const sorted = [...logs].sort(
+    (a, b) => (Date.parse(b.timestamp) || 0) - (Date.parse(a.timestamp) || 0)
+  );
+  const perAgent = Boolean(options?.perAgent);
+  const seenBuckets = new Map<string, { leadIds: Set<string>; phones: Set<string> }>();
+  const deduped: CallLog[] = [];
+
+  for (const log of sorted) {
+    const day = parseDateToYmd(log.timestamp) ?? 'unknown';
+    const agentKey = perAgent
+      ? (log.agentId?.trim() || log.agentName?.trim().toLowerCase() || '*')
+      : '*';
+    const bucketKey = `${day}::${agentKey}`;
+    let bucket = seenBuckets.get(bucketKey);
+    if (!bucket) {
+      bucket = { leadIds: new Set<string>(), phones: new Set<string>() };
+      seenBuckets.set(bucketKey, bucket);
+    }
+
+    const cleanLeadId = String(log.leadId || '').trim();
+    const phoneCore = extractPhoneCoreKey(log.phone);
+
+    if (
+      (cleanLeadId && bucket.leadIds.has(cleanLeadId)) ||
+      (phoneCore && bucket.phones.has(phoneCore))
+    ) {
+      continue;
+    }
+
+    if (cleanLeadId) bucket.leadIds.add(cleanLeadId);
+    if (phoneCore) bucket.phones.add(phoneCore);
+    deduped.push(log);
+  }
+
+  return deduped;
+}
+
+/**
+ * Finds an existing call log recorded on `targetDateStr` (default Today YYYY-MM-DD)
+ * for the specified agent and target `leadId` / normalized phone number.
+ * Returns the newest matching entry if multiple legacy entries exist.
+ */
+export function findExistingTodayCallLog(
+  logs: CallLog[],
+  agentId: string,
+  agentName: string,
+  leadId: string,
+  phone: string,
+  targetDateStr: string = getLocalDateString()
+): CallLog | undefined {
+  const normalizedAgentName = agentName.trim().toLowerCase();
+  const matches = logs.filter((c) => {
+    if (parseDateToYmd(c.timestamp) !== targetDateStr) return false;
+    const sameAgent =
+      (agentId && c.agentId === agentId) ||
+      (normalizedAgentName && c.agentName.trim().toLowerCase() === normalizedAgentName);
+    if (!sameAgent) return false;
+    return doesCallLogMatchTarget(c, leadId, phone);
+  });
+
+  if (matches.length === 0) return undefined;
+  return matches.sort(
+    (a, b) => (Date.parse(b.timestamp) || 0) - (Date.parse(a.timestamp) || 0)
+  )[0];
+}
+
+/**
+ * Upserts a call log in place for the same `(day, agent, leadId / normalized phone)`:
+ * removes any older same-day entries for that same agent & phone/lead and places the updated
+ * record at the top (sorted newest-first).
+ */
+export function upsertTodayCallLogInList(
+  logs: CallLog[],
+  upsertedLog: CallLog
+): CallLog[] {
+  const targetDay = parseDateToYmd(upsertedLog.timestamp) ?? getLocalDateString();
+  const normalizedAgentName = upsertedLog.agentName.trim().toLowerCase();
+
+  const remaining = logs.filter((c) => {
+    if (c.id === upsertedLog.id) return false;
+    if (parseDateToYmd(c.timestamp) !== targetDay) return true;
+    const sameAgent =
+      (upsertedLog.agentId && c.agentId === upsertedLog.agentId) ||
+      (normalizedAgentName && c.agentName.trim().toLowerCase() === normalizedAgentName);
+    if (!sameAgent) return true;
+    return !doesCallLogMatchTarget(c, upsertedLog.leadId, upsertedLog.phone);
+  });
+
+  return [upsertedLog, ...remaining].sort(
+    (a, b) => (Date.parse(b.timestamp) || 0) - (Date.parse(a.timestamp) || 0)
+  );
+}
+
+/**
+ * Returns only unique call logs recorded today (YYYY-MM-DD local date),
+ * deduplicated by leadId / normalized phone number (keeping the latest entry per number).
  */
 export function filterTodayCallLogs(logs: CallLog[], now: Date = new Date()): CallLog[] {
-  return logs.filter((c) => isTimestampToday(c.timestamp, now));
+  return deduplicateSameDayCallLogs(
+    logs.filter((c) => isTimestampToday(c.timestamp, now))
+  );
 }
 
 /**
  * Returns only call logs recorded Today (YYYY-MM-DD local date) by the specified agent,
- * sorted newest-first by timestamp. Excludes previous-day logs and other agents' calls.
+ * deduplicated to max 1 entry per lead/phone and sorted newest-first by timestamp.
+ * Excludes previous-day logs and other agents' calls.
  */
 export function getAgentTodayCallLogs(
   logs: CallLog[],
@@ -509,9 +777,10 @@ export function getAgentTodayCallLogs(
   now: Date = new Date()
 ): CallLog[] {
   if (!agentId) return [];
-  return filterTodayCallLogs(logs, now)
-    .filter((c) => c.agentId === agentId)
-    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+  const todayForAgent = logs.filter(
+    (c) => c.agentId === agentId && isTimestampToday(c.timestamp, now)
+  );
+  return deduplicateSameDayCallLogs(todayForAgent);
 }
 
 /**
@@ -555,9 +824,13 @@ export function computeDashboardMetrics(
   now: Date = new Date()
 ) {
   const filteredLeads = leads.filter((l) => isWithinDateRange(l.createdAt, filter, now));
-  const filteredCalls = callLogs.filter((c) => isWithinDateRange(c.timestamp, filter, now));
-  const todayCalls = callLogs.filter((c) =>
-    isWithinDateRange(c.timestamp, { preset: 'today', startDate: '', endDate: '' }, now)
+  const filteredCalls = deduplicateSameDayCallLogs(
+    callLogs.filter((c) => isWithinDateRange(c.timestamp, filter, now))
+  );
+  const todayCalls = deduplicateSameDayCallLogs(
+    callLogs.filter((c) =>
+      isWithinDateRange(c.timestamp, { preset: 'today', startDate: '', endDate: '' }, now)
+    )
   );
 
   const orderConfirmedCount = filteredLeads.filter((l) => l.status === 'Order Confirmed').length;
@@ -592,7 +865,9 @@ export function computeAgentPerformance(
   return agents
     .map((agent) => {
       const agentLeads = filteredLeads.filter((l) => l.assignedAgentId === agent.id);
-      const agentCalls = filteredCalls.filter((c) => c.agentId === agent.id);
+      const agentCalls = deduplicateSameDayCallLogs(
+        filteredCalls.filter((c) => c.agentId === agent.id)
+      );
       const orderConfirmed = agentLeads.filter((l) => l.status === 'Order Confirmed').length;
       const interested = agentLeads.filter((l) => l.status === 'Interested').length;
       const conversions = orderConfirmed + interested;
@@ -768,8 +1043,10 @@ export function generateDailyReportCsv(
   let totalFollowUps = 0;
 
   const agentRows = agents.map((agent) => {
-    const todaysCalls = callLogs.filter(
-      (c) => c.agentId === agent.id && isWithinDateRange(c.timestamp, todayFilter, reportDate)
+    const todaysCalls = deduplicateSameDayCallLogs(
+      callLogs.filter(
+        (c) => c.agentId === agent.id && isWithinDateRange(c.timestamp, todayFilter, reportDate)
+      )
     );
     const successfulOrders = todaysCalls.filter((c) => c.newStatus === 'Order Confirmed').length;
     const interested = todaysCalls.filter((c) => c.newStatus === 'Interested').length;
@@ -1033,8 +1310,10 @@ export function computeFinalDailySummary(
 
   const agentRows: FinalDailyAgentRow[] = agents.map((agent) => {
     const agentDateLeads = dateLeads.filter((l) => l.assignedAgentId === agent.id);
-    const dateCalls = callLogs.filter(
-      (c) => c.agentId === agent.id && isIsoOnLocalDate(c.timestamp, dateStr)
+    const dateCalls = deduplicateSameDayCallLogs(
+      callLogs.filter(
+        (c) => c.agentId === agent.id && isIsoOnLocalDate(c.timestamp, dateStr)
+      )
     );
     const confirmedOnDate = dateCalls.filter((c) => c.newStatus === 'Order Confirmed').length;
     const interested = dateCalls.filter((c) => c.newStatus === 'Interested').length;
@@ -1419,4 +1698,29 @@ export function generatePaidCustomersCsv(
   return '\uFEFF' + [headers.join(','), ...rows].join('\n');
 }
 
-
+/**
+ * Filters an agent's assigned leads queue for the "My Assigned Leads" table.
+ * By default (`statusFilter === 'ALL'`), leads marked `'Done'` are automatically excluded
+ * so they cleanly move out of the active call queue into "Today calls".
+ * When the agent explicitly selects `'Done'` in the status filter dropdown, `'Done'` leads remain accessible.
+ */
+export function filterAgentAssignedQueueLeads(
+  leads: Lead[],
+  statusFilter: CallStatus | 'ALL',
+  searchQuery: string = ''
+): Lead[] {
+  const q = searchQuery.trim().toLowerCase();
+  return leads.filter((l) => {
+    if (statusFilter === 'ALL') {
+      if (l.status === 'Done') return false;
+    } else if (l.status !== statusFilter) {
+      return false;
+    }
+    if (!q) return true;
+    return (
+      l.customerName.toLowerCase().includes(q) ||
+      l.phone.toLowerCase().includes(q) ||
+      l.lastCallNotes.toLowerCase().includes(q)
+    );
+  });
+}
