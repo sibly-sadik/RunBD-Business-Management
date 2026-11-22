@@ -976,6 +976,7 @@ export interface FinalDailyAgentRow {
   followUp: number;
   noResponse: number;
   cancelled: number;
+  done: number;
   pending: number;
 }
 
@@ -997,6 +998,7 @@ export interface FinalDailySummary {
     followUp: number;
     noResponse: number;
     cancelled: number;
+    done: number;
     pending: number;
   };
   collectors: FinalDailyCollectorRow[];
@@ -1012,6 +1014,13 @@ function isIsoOnLocalDate(iso: string, targetDateStr: string): boolean {
   return parseDateToYmd(iso) === targetDateStr;
 }
 
+function isLeadOnLocalDate(
+  lead: Partial<Pick<Lead, 'createdAt' | 'collectedDate' | 'date'>>,
+  targetDateStr: string
+): boolean {
+  return getLeadCollectedYmd(lead) === targetDateStr;
+}
+
 export function computeFinalDailySummary(
   agents: User[],
   collectors: User[],
@@ -1020,31 +1029,36 @@ export function computeFinalDailySummary(
   contentPosts: ContentPost[],
   dateStr: string = getLocalDateString()
 ): FinalDailySummary {
+  const dateLeads = leads.filter((l) => isLeadOnLocalDate(l, dateStr));
+
   const agentRows: FinalDailyAgentRow[] = agents.map((agent) => {
-    const agentLeads = leads.filter((l) => l.assignedAgentId === agent.id);
+    const agentDateLeads = dateLeads.filter((l) => l.assignedAgentId === agent.id);
     const dateCalls = callLogs.filter(
       (c) => c.agentId === agent.id && isIsoOnLocalDate(c.timestamp, dateStr)
     );
     const confirmedOnDate = dateCalls.filter((c) => c.newStatus === 'Order Confirmed').length;
-
-    const interested = agentLeads.filter((l) => l.status === 'Interested').length;
-    const followUp = agentLeads.filter((l) => l.status === 'Busy / Call Later').length;
-    const noResponse = agentLeads.filter((l) => l.status === 'Switched Off / No Answer').length;
-    const cancelled = agentLeads.filter(
-      (l) => l.status === 'Not Interested' || l.status === 'Wrong Number'
+    const interested = dateCalls.filter((c) => c.newStatus === 'Interested').length;
+    const followUp = dateCalls.filter((c) => c.newStatus === 'Busy / Call Later').length;
+    const noResponse = dateCalls.filter(
+      (c) => c.newStatus === 'Switched Off / No Answer'
     ).length;
-    const pending = agentLeads.filter((l) => l.status === 'Pending').length;
+    const cancelled = dateCalls.filter(
+      (c) => c.newStatus === 'Not Interested' || c.newStatus === 'Wrong Number'
+    ).length;
+    const done = dateCalls.filter((c) => c.newStatus === 'Done').length;
+    const pending = agentDateLeads.filter((l) => l.status === 'Pending').length;
 
     return {
       agentId: agent.id,
       agentName: agent.name,
-      assignedLeads: agentLeads.length,
+      assignedLeads: agentDateLeads.length,
       callsMade: dateCalls.length,
       orderConfirmed: confirmedOnDate,
       interested,
       followUp,
       noResponse,
       cancelled,
+      done,
       pending,
     };
   });
@@ -1058,6 +1072,7 @@ export function computeFinalDailySummary(
       followUp: acc.followUp + row.followUp,
       noResponse: acc.noResponse + row.noResponse,
       cancelled: acc.cancelled + row.cancelled,
+      done: acc.done + row.done,
       pending: acc.pending + row.pending,
     }),
     {
@@ -1068,13 +1083,14 @@ export function computeFinalDailySummary(
       followUp: 0,
       noResponse: 0,
       cancelled: 0,
+      done: 0,
       pending: 0,
     }
   );
 
   const collectorRows: FinalDailyCollectorRow[] = collectors.map((collector) => {
     const allMine = leads.filter((l) => l.collectorId === collector.id);
-    const onDate = allMine.filter((l) => isIsoOnLocalDate(l.createdAt, dateStr)).length;
+    const onDate = allMine.filter((l) => isLeadOnLocalDate(l, dateStr)).length;
     return {
       collectorId: collector.id,
       collectorName: collector.name,
@@ -1121,17 +1137,18 @@ export function generateFinalDailySummaryCsv(summary: FinalDailySummary): string
   lines.push('');
 
   // Section 1: Call Center Agents
-  lines.push('CALL CENTER AGENTS PERFORMANCE');
+  lines.push(`CALL CENTER AGENTS PERFORMANCE (${summary.date})`);
   lines.push(
     [
       'Agent Name',
-      'Assigned Leads',
+      `Assigned (${summary.date})`,
       'Calls Made',
       'Order Confirmed',
       'Interested',
       'Follow-up',
       'No Response',
       'Cancelled / Wrong No',
+      'Done',
       'Pending',
     ]
       .map(escape)
@@ -1149,6 +1166,7 @@ export function generateFinalDailySummaryCsv(summary: FinalDailySummary): string
         a.followUp,
         a.noResponse,
         a.cancelled,
+        a.done,
         a.pending,
       ]
         .map(escape)
@@ -1166,6 +1184,7 @@ export function generateFinalDailySummaryCsv(summary: FinalDailySummary): string
       summary.agentTotals.followUp,
       summary.agentTotals.noResponse,
       summary.agentTotals.cancelled,
+      summary.agentTotals.done,
       summary.agentTotals.pending,
     ]
       .map(escape)
@@ -1174,32 +1193,18 @@ export function generateFinalDailySummaryCsv(summary: FinalDailySummary): string
 
   lines.push('');
 
-  // Section 2: Data Collectors
-  lines.push('DATA COLLECTORS HISTORY');
-  lines.push(
-    ['Collector Name', `Leads Collected (${summary.date})`, 'Total Leads (All Time)']
-      .map(escape)
-      .join(',')
-  );
+  // Section 2: Data Collectors (Selected Date Only)
+  lines.push(`DATA COLLECTORS (${summary.date})`);
+  lines.push(['Collector Name', `Leads Collected (${summary.date})`].map(escape).join(','));
   for (const c of summary.collectors) {
-    lines.push(
-      [c.collectorName, c.leadsCollectedOnDate, c.totalLeadsAllTime].map(escape).join(',')
-    );
+    lines.push([c.collectorName, c.leadsCollectedOnDate].map(escape).join(','));
   }
-  lines.push(
-    [
-      'TOTAL',
-      summary.totalCollectedOnDate,
-      summary.collectors.reduce((sum, c) => sum + c.totalLeadsAllTime, 0),
-    ]
-      .map(escape)
-      .join(',')
-  );
+  lines.push(['TOTAL', summary.totalCollectedOnDate].map(escape).join(','));
 
   lines.push('');
 
   // Section 3: Content & Link Poster (Kawsar)
-  lines.push('CONTENT & LINK POSTER (KAWSAR)');
+  lines.push(`CONTENT & LINK POSTER (KAWSAR - ${summary.date})`);
   lines.push(
     ['Poster Name', `Total Entries (${summary.date})`, 'Facebook Post Links', 'Website Post Links']
       .map(escape)

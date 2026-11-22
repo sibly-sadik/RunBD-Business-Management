@@ -1,6 +1,6 @@
 export function AppFooter() {
   return (
-    <footer className="w-full border-t border-slate-200/80 dark:border-slate-800/80 py-4 px-6 text-center text-xs text-slate-500 dark:text-slate-400 shrink-0">
+    <footer className="w-full border-t border-slate-200/80 dark:border-slate-800/80 py-4 px-6 text-center text-xs text-slate-500 dark:text-slate-400 shrink-0 print:hidden">
       <span>Developed by </span>
       <a
         href="https://siblysadik-dev.vercel.app/"

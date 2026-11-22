@@ -551,8 +551,21 @@ test('computeFinalDailySummary and generateFinalDailySummaryCsv consolidate 6 ag
   );
 
   assert.equal(summary.agents.length, 6);
+  // Historical L-OLD assigned to Kathy (a2) on otherDayIso must NOT appear in targetDate assignedLeads or pending
+  const tanjinRow = summary.agents.find((a) => a.agentId === 'a1');
+  const kathyRow = summary.agents.find((a) => a.agentId === 'a2');
+  const sakibRow = summary.agents.find((a) => a.agentId === 'a6');
+  assert.equal(tanjinRow?.assignedLeads, 1);
+  assert.equal(tanjinRow?.orderConfirmed, 1);
+  assert.equal(kathyRow?.assignedLeads, 0);
+  assert.equal(kathyRow?.pending, 0);
+  assert.equal(sakibRow?.assignedLeads, 1);
+  assert.equal(sakibRow?.interested, 1);
+  assert.equal(summary.agentTotals.assignedLeads, 2);
   assert.equal(summary.agentTotals.callsMade, 2);
   assert.equal(summary.agentTotals.orderConfirmed, 1);
+  assert.equal(summary.agentTotals.interested, 1);
+  assert.equal(summary.agentTotals.pending, 0);
   assert.equal(summary.collectors[0].leadsCollectedOnDate, 1); // Farhan on targetDate
   assert.equal(summary.collectors[1].leadsCollectedOnDate, 1); // Naim on targetDate
   assert.equal(summary.totalCollectedOnDate, 2);
@@ -561,9 +574,10 @@ test('computeFinalDailySummary and generateFinalDailySummaryCsv consolidate 6 ag
 
   const csv = generateFinalDailySummaryCsv(summary);
   assert.ok(csv.startsWith('\uFEFF'));
-  assert.ok(csv.includes('CALL CENTER AGENTS PERFORMANCE'));
-  assert.ok(csv.includes('DATA COLLECTORS HISTORY'));
-  assert.ok(csv.includes('CONTENT & LINK POSTER (KAWSAR)'));
+  assert.ok(csv.includes(`CALL CENTER AGENTS PERFORMANCE (${targetDate})`));
+  assert.ok(csv.includes(`DATA COLLECTORS (${targetDate})`));
+  assert.ok(csv.includes(`CONTENT & LINK POSTER (KAWSAR - ${targetDate})`));
+  assert.ok(!csv.includes('All Time'));
   assert.ok(csv.includes('Kawsar,2,1,2'));
 });
 
