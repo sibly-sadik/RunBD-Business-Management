@@ -21,6 +21,7 @@ import { formatDateTime } from '../utils/leadLogic';
 import {
   getAgentTabName,
   getCollectorTabName,
+  getPaidAgentTabName,
   SheetDuplicateReport,
 } from '../utils/sheetsSync';
 
@@ -604,6 +605,45 @@ export function AdminSheetsView({
                 </p>
                 <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
                   Assigned leads only
+                </p>
+              </div>
+            );
+          })}
+        </div>
+      </section>
+
+      <section className="glass-panel rounded-2xl p-5">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 pb-3 border-b border-slate-200 dark:border-slate-800">
+          <div>
+            <h2 className="text-sm font-semibold text-slate-900 dark:text-white">
+              Dedicated Per-Agent Paid Tabs (Auto-Synced)
+            </h2>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+              Order Confirmed leads are automatically provisioned and upserted into each
+              agent&apos;s <code className="font-mono text-[11px]">Paid_&lt;AgentName&gt;</code>{' '}
+              sheet tab with Facebook links, collector details, package info, and phone deduplication.
+            </p>
+          </div>
+        </div>
+        <div
+          data-testid="dedicated-paid-agent-tabs-grid"
+          className="mt-4 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3"
+        >
+          {(agents && agents.length > 0
+            ? agents.map((a) => a.name)
+            : DEFAULT_AGENT_NAMES
+          ).map((name) => {
+            const tabName = getPaidAgentTabName(name);
+            return (
+              <div
+                key={tabName}
+                className="rounded-xl px-3.5 py-2.5 bg-slate-50 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800"
+              >
+                <p className="text-xs font-mono font-semibold text-sky-700 dark:text-sky-400 truncate">
+                  {tabName}
+                </p>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                  {name}&apos;s paid orders
                 </p>
               </div>
             );

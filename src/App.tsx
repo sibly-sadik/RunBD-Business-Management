@@ -56,6 +56,7 @@ import {
   normalizeBdPhone,
   normalizeFacebookUrl,
   normalizePostUrl,
+  normalizeVehicleType,
   renewPaidCustomer,
   upsertTodayCallLogInList,
 } from './utils/leadLogic';
@@ -92,6 +93,7 @@ import {
 import {
   detectLeadDuplicatesInList,
   detectPostDuplicatesInList,
+  enrichPaidCustomersForSheetSync,
   isLegacyWebhookUrl,
   mergeRemoteCallLogs,
   mergeRemoteContentPosts,
@@ -445,12 +447,28 @@ export default function App() {
       const reqId = ++syncRequestIdRef.current;
       setSyncStatus('syncing');
       try {
+        const dynamicAgents = getCallCenterAgents(teamMembersRef.current);
+        const dynamicCollectors = getDataCollectors(teamMembersRef.current);
+        const enrichmentLeads =
+          leadsRef.current.length >= nextLeads.length ? leadsRef.current : nextLeads;
+
+        const enrichedPaidCustomer = payload.paidCustomer
+          ? enrichPaidCustomersForSheetSync([payload.paidCustomer], enrichmentLeads)[0]
+          : undefined;
+        const enrichedPaidCustomers = payload.paidCustomers
+          ? enrichPaidCustomersForSheetSync(payload.paidCustomers, enrichmentLeads)
+          : undefined;
+
         const res = await pushToGoogleSheetsWebhook(webhookUrl, {
           ...payload,
+          ...(enrichedPaidCustomer ? { paidCustomer: enrichedPaidCustomer } : {}),
+          ...(enrichedPaidCustomers ? { paidCustomers: enrichedPaidCustomers } : {}),
+          agentNames: payload.agentNames ?? dynamicAgents.map((a) => a.name),
+          collectorNames: payload.collectorNames ?? dynamicCollectors.map((c) => c.name),
           dailySummary: buildDailySummary(nextLeads, nextCallLogs),
           finalDailySummary: computeFinalDailySummary(
-            getCallCenterAgents(teamMembersRef.current),
-            getDataCollectors(teamMembersRef.current),
+            dynamicAgents,
+            dynamicCollectors,
             nextLeads,
             nextCallLogs,
             nextContentPosts
@@ -1025,7 +1043,7 @@ export default function App() {
     const clampedCollectedDate = clampDateToDhakaToday(nowIso, authoritativeToday).ymd;
     const baseLead = {
       id: makeId('RBD'),
-      customerName: input.customerName,
+      customerName: normalizeVehicleType(input.customerName) || input.customerName.trim(),
       phone: normalizedPhone,
       rawPhone: input.rawPhone,
       facebookLink: input.facebookLink,
@@ -1272,7 +1290,7 @@ export default function App() {
     const clampedCollectedDate = clampDateToDhakaToday(nowIso, authoritativeToday).ymd;
     const baseLeads = acceptedRows.map((r) => ({
       id: makeId('RBD'),
-      customerName: r.customerName,
+      customerName: normalizeVehicleType(r.customerName) || r.customerName,
       phone: r.normalizedPhone as string,
       rawPhone: r.rawPhone,
       facebookLink: r.facebookLink,
@@ -1921,7 +1939,30 @@ export default function App() {
     const nextLeads = leadsRef.current.map((l) => (l.id === leadId ? updated : l));
     leadsRef.current = nextLeads;
     setLeads(nextLeads);
-    void updateLeadInSupabase(updated).catch(() => {});
+
+    let updatedPaidCustomer: PaidCustomer | undefined;
+    const basePaid = mergeRemotePaidCustomers(
+      paidCustomersRef.current,
+      storage.getPaidCustomers()
+    );
+    const matchingPaid = basePaid.find(
+      (c) => c.leadId === target.id || c.id === `PC-${target.id}`
+    );
+    if (matchingPaid) {
+      updatedPaidCustomer = {
+        ...matchingPaid,
+        assignedAgentId: updated.assignedAgentId,
+        assignedAgentName: updated.assignedAgentName,
+        updatedAt: updated.updatedAt,
+      };
+      const nextPaid = basePaid.map((c) =>
+        c.id === matchingPaid.id ? updatedPaidCustomer! : c
+      );
+      paidCustomersRef.current = nextPaid;
+      setPaidCustomers(nextPaid);
+    }
+
+    void updateLeadInSupabase(updated, updatedPaidCustomer).catch(() => {});
 
     appendAudit(
       currentUser,
@@ -1939,7 +1980,7 @@ export default function App() {
 
     void triggerRealtimeSync(
       settings.googleSheetsWebhookUrl,
-      { event: 'LEAD_UPSERT', lead: updated },
+      { event: 'LEAD_UPSERT', lead: updated, paidCustomer: updatedPaidCustomer },
       nextLeads,
       callLogsRef.current
     );
@@ -2117,19 +2158,19 @@ export default function App() {
 
   const handleTestAndSyncSheets = async (url: string) => {
     setSettings((prev) => ({ ...prev, googleSheetsWebhookUrl: url }));
-    const todayLeads = filterTodayLeads(leads);
+    const syncLeads = leadsRef.current.length > 0 ? leadsRef.current : leads;
     const todayCallLogs = filterTodayCallLogs(callLogs);
     const todayPosts = filterTodayPosts(contentPosts);
     const res = await triggerRealtimeSync(
       url,
       {
         event: 'TEST_SYNC',
-        leads: todayLeads,
+        leads: syncLeads,
         callLogs: todayCallLogs,
         contentPosts: todayPosts,
         paidCustomers,
       },
-      todayLeads,
+      syncLeads,
       todayCallLogs
     );
     if (res.ok) {
@@ -2137,13 +2178,13 @@ export default function App() {
         appendAudit(
           currentUser,
           'SHEETS_SYNCED',
-          `Synced ${todayLeads.length} today leads, ${todayCallLogs.length} call logs, ${todayPosts.length} posts, and ${paidCustomers.length} paid customers to Google Sheets`
+          `Synced ${syncLeads.length} leads, ${todayCallLogs.length} today call logs, ${todayPosts.length} posts, and ${paidCustomers.length} paid customers to Google Sheets (Master, Collector_*, Agent_*, Paid_*)`
         );
       }
       addToast(
         'success',
         'Google Sheets Synced',
-        'Master_Data, Agent_Logs, Daily_Summary, Kawsar_Posts_Log, and Paid_Customers synced.'
+        'Master_Data, Collector_<Name>, Agent_<Name>, Paid_<Agent>, Daily_Summary, and Paid_Customers synced.'
       );
     } else {
       addToast(

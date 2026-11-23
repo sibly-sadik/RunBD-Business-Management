@@ -50,6 +50,7 @@ import {
   normalizeBdPhone,
   normalizeFacebookUrl,
   normalizePostUrl,
+  normalizeVehicleType,
   parseCsvLeads,
   parseDateToYmd,
   renewPaidCustomer,
@@ -57,7 +58,7 @@ import {
 } from './leadLogic';
 import { DATA_COLLECTORS, DEMO_USERS } from '../data/seedData';
 import { authenticateServerTeamUser } from '../server/teamUsers';
-import { CALL_STATUSES, CallLog, ContentPost, DuplicateAttempt, Lead, PaidCustomer, User } from '../types';
+import { CALL_STATUSES, CallLog, ContentPost, DuplicateAttempt, Lead, PaidCustomer, User, VEHICLE_TYPES } from '../types';
 
 const mockAgents: User[] = [
   { id: 'a1', name: 'Tanjin', email: 'tanjin@runbd.com', password: '123', role: 'agent', title: 'Agent', avatarInitials: 'TJ' },
@@ -1384,6 +1385,40 @@ test('Asia/Dhaka (UTC+6) date formatting, zero double-shift on bare YYYY-MM-DD, 
     ['L-TODAY', 'L-FUTURE-MISDATED']
   );
 });
+
+test('VEHICLE_TYPES, normalizeVehicleType (Track -> Truck), and Bulk CSV Vehicle_Type header parsing work seamlessly', () => {
+  assert.deepEqual(VEHICLE_TYPES, ['Car', 'Bike', 'Truck', 'Bus', 'Pickup Truck']);
+
+  assert.equal(normalizeVehicleType('car'), 'Car');
+  assert.equal(normalizeVehicleType('  BIKE '), 'Bike');
+  assert.equal(normalizeVehicleType('Track'), 'Truck');
+  assert.equal(normalizeVehicleType('track'), 'Truck');
+  assert.equal(normalizeVehicleType('truck'), 'Truck');
+  assert.equal(normalizeVehicleType('bus'), 'Bus');
+  assert.equal(normalizeVehicleType('pickup'), 'Pickup Truck');
+  assert.equal(normalizeVehicleType('Pick up   truck'), 'Pickup Truck');
+  assert.equal(normalizeVehicleType('Rafiqul Islam'), 'Rafiqul Islam');
+  assert.equal(normalizeVehicleType('   '), '');
+
+  const csv = [
+    'Vehicle_Type,Phone,Facebook_Link',
+    'car,+8801812345678,https://facebook.com/car.owner',
+    'Track,01912345678,https://facebook.com/truck.owner',
+    'pickup truck,01612345678,https://facebook.com/pickup.owner',
+    ',01799887766,https://facebook.com/missing.vehicle',
+  ].join('\n');
+
+  const preview = parseCsvLeads(csv, existingLeads);
+  assert.equal(preview.length, 4);
+  assert.equal(preview[0].status, 'valid');
+  assert.equal(preview[0].customerName, 'Car');
+  assert.equal(preview[1].status, 'valid');
+  assert.equal(preview[1].customerName, 'Truck');
+  assert.equal(preview[2].status, 'valid');
+  assert.equal(preview[2].customerName, 'Pickup Truck');
+  assert.equal(preview[3].status, 'invalid');
+});
+
 
 
 

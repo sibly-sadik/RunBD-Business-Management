@@ -234,8 +234,20 @@ export interface SheetsSyncPayload {
   callLogs?: CallLog[];
   post?: ContentPost;
   contentPosts?: ContentPost[];
-  paidCustomer?: PaidCustomer;
-  paidCustomers?: PaidCustomer[];
+  paidCustomer?: PaidCustomer & {
+    facebookLink?: string;
+    collectorName?: string;
+    amountOrPackage?: string;
+  };
+  paidCustomers?: Array<
+    PaidCustomer & {
+      facebookLink?: string;
+      collectorName?: string;
+      amountOrPackage?: string;
+    }
+  >;
+  collectorNames?: string[];
+  agentNames?: string[];
   dailySummary: {
     date: string;
     totalLeads: number;
@@ -253,7 +265,8 @@ export interface SheetsSyncPayload {
  */
 export async function pushToGoogleSheetsWebhook(
   webhookUrl: string,
-  payload: SheetsSyncPayload
+  payload: SheetsSyncPayload,
+  options?: { timeoutMs?: number }
 ): Promise<{ ok: boolean; error?: string }> {
   const trimmed = webhookUrl.trim();
   if (!trimmed) {
@@ -267,7 +280,10 @@ export async function pushToGoogleSheetsWebhook(
   }
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 10000);
+  const timeoutMs =
+    options?.timeoutMs ??
+    (payload.event === 'FULL_SYNC' || payload.event === 'TEST_SYNC' ? 30000 : 10000);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     await fetch(trimmed, {

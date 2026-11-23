@@ -310,6 +310,42 @@ export function findDuplicateLead(
 }
 
 /**
+ * Normalizes vehicle category names (including the common "Track" -> "Truck" typo
+ * and case/spacing variations) while preserving non-vehicle customer names for
+ * backward compatibility with older records.
+ */
+export function normalizeVehicleType(raw: string | null | undefined): string {
+  const cleaned = String(raw ?? '')
+    .trim()
+    .replace(/\s+/g, ' ');
+  if (!cleaned) return '';
+
+  const key = cleaned.toLowerCase();
+  if (key === 'car' || key === 'cars') return 'Car';
+  if (key === 'bike' || key === 'bikes' || key === 'motorbike' || key === 'motorcycle') {
+    return 'Bike';
+  }
+  if (key === 'truck' || key === 'trucks' || key === 'track' || key === 'tracks' || key === 'trak') {
+    return 'Truck';
+  }
+  if (key === 'bus' || key === 'buses') return 'Bus';
+  if (
+    key === 'pickup truck' ||
+    key === 'pick up truck' ||
+    key === 'pickup-truck' ||
+    key === 'pickup' ||
+    key === 'pick up' ||
+    key === 'pick-up' ||
+    key === 'pickup track' ||
+    key === 'pickuptrack'
+  ) {
+    return 'Pickup Truck';
+  }
+
+  return cleaned;
+}
+
+/**
  * Splits a single CSV line respecting quoted commas.
  */
 function parseCsvLine(line: string): string[] {
@@ -355,6 +391,7 @@ export function parseCsvLeads(csvText: string, existingLeads: Lead[]): CsvPrevie
   const firstCols = parseCsvLine(lines[0]).map((c) => c.toLowerCase());
   const hasHeader =
     firstCols[0]?.includes('name') ||
+    firstCols[0]?.includes('vehicle') ||
     firstCols[1]?.includes('phone') ||
     firstCols[2]?.includes('facebook');
 
@@ -365,7 +402,7 @@ export function parseCsvLeads(csvText: string, existingLeads: Lead[]): CsvPrevie
   return dataLines.map((line, idx) => {
     const rowNumber = hasHeader ? idx + 2 : idx + 1;
     const cols = parseCsvLine(line);
-    const customerName = (cols[0] ?? '').trim();
+    const customerName = normalizeVehicleType(cols[0] ?? '');
     const rawPhone = (cols[1] ?? '').trim();
     const facebookLink = (cols[2] ?? '').trim();
     const normalizedPhone = normalizeBdPhone(rawPhone);
@@ -379,7 +416,7 @@ export function parseCsvLeads(csvText: string, existingLeads: Lead[]): CsvPrevie
         normalizedPhone,
         facebookLink,
         status: 'invalid',
-        reason: 'Missing customer name',
+        reason: 'Missing vehicle type / customer name',
       };
     }
 

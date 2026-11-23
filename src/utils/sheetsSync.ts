@@ -18,6 +18,7 @@ import {
   normalizeBdPhone,
   normalizeFacebookUrl,
   normalizePostUrl,
+  normalizeVehicleType,
   parseDateToYmd,
   toYmdString,
 } from './leadLogic';
@@ -96,6 +97,63 @@ export function getCollectorTabName(collectorName: string): string {
 
 export function getAgentTabName(agentName: string): string {
   return `Agent_${sanitizeSheetTabSuffix(agentName)}`;
+}
+
+export function getPaidAgentTabName(agentName: string): string {
+  return `Paid_${sanitizeSheetTabSuffix(agentName)}`;
+}
+
+export interface SyncPaidCustomerPayload extends PaidCustomer {
+  facebookLink?: string;
+  collectorName?: string;
+  amountOrPackage?: string;
+}
+
+export function enrichPaidCustomersForSheetSync(
+  customers: PaidCustomer[],
+  leads: Lead[]
+): SyncPaidCustomerPayload[] {
+  if (!customers.length) return [];
+
+  const leadById = new Map<string, Lead>();
+  const leadByPhone = new Map<string, Lead>();
+  for (const lead of leads) {
+    if (lead.id) {
+      leadById.set(lead.id, lead);
+    }
+    const core = extractPhoneCoreKey(lead.phone || lead.rawPhone);
+    if (core && !leadByPhone.has(core)) {
+      leadByPhone.set(core, lead);
+    }
+  }
+
+  return customers.map((customer) => {
+    const existingExtra = customer as SyncPaidCustomerPayload;
+    const derivedLeadId =
+      customer.leadId?.trim() ||
+      (customer.id.startsWith('PC-') ? customer.id.slice(3) : '');
+    const corePhone = extractPhoneCoreKey(customer.phone);
+    const matchedLead =
+      (derivedLeadId ? leadById.get(derivedLeadId) : undefined) ??
+      (corePhone ? leadByPhone.get(corePhone) : undefined);
+
+    const facebookLink =
+      existingExtra.facebookLink?.trim() || matchedLead?.facebookLink || '';
+    const collectorName =
+      existingExtra.collectorName?.trim() || matchedLead?.collectorName || 'Unknown';
+    const amountOrPackage =
+      existingExtra.amountOrPackage?.trim() ||
+      (customer.renewalDate
+        ? `1-Month Package (Renewal: ${customer.renewalDate})`
+        : '1-Month Package');
+
+    return {
+      ...customer,
+      facebookLink,
+      collectorName,
+      amountOrPackage,
+    };
+  });
 }
 
 const VALID_CALL_STATUSES: ReadonlySet<CallStatus> = new Set(CALL_STATUSES);
@@ -566,7 +624,7 @@ export function mergeRemoteLeads(
     const rawPhone = safePhoneString(r.rawPhone ?? r.phone);
     const phone = normalizeBdPhone(rawPhone) || rawPhone;
     const facebookLink = typeof r.facebookLink === 'string' ? r.facebookLink.trim() : '';
-    const customerName = r.customerName?.trim() || '';
+    const customerName = normalizeVehicleType(r.customerName);
 
     // Skip completely empty sheet rows
     const explicitId = typeof r.id === 'string' ? r.id.trim() : '';

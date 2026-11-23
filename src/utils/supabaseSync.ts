@@ -23,6 +23,7 @@ import {
   normalizeBdPhone,
   normalizeFacebookUrl,
   normalizePostUrl,
+  normalizeVehicleType,
   parseDateToYmd,
 } from './leadLogic';
 import { FALLBACK_GOOGLE_SHEETS_WEBHOOK_URL } from './sheetsSync';
@@ -205,7 +206,7 @@ export function rowToLead(row: SupabaseLeadRow): Lead {
   const assignedAgentName = row.assigned_agent_name?.trim() || null;
   return {
     id: row.id,
-    customerName: row.customer_name,
+    customerName: normalizeVehicleType(row.customer_name) || row.customer_name,
     phone: row.phone,
     rawPhone: row.raw_phone || row.phone,
     facebookLink: row.facebook_link ?? '',
@@ -241,7 +242,7 @@ export function leadToSupabaseRow(lead: Lead): SupabaseLeadRow {
 
   return {
     id: lead.id,
-    customer_name: lead.customerName,
+    customer_name: normalizeVehicleType(lead.customerName) || lead.customerName,
     phone: normalizedPhone,
     raw_phone: lead.rawPhone || normalizedPhone,
     phone_normalized: normalizedPhone,

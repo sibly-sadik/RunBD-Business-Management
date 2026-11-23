@@ -13,7 +13,7 @@ import {
   Upload,
   X,
 } from 'lucide-react';
-import { CsvPreviewRow, DuplicateAttempt, Lead, User } from '../types';
+import { CsvPreviewRow, DuplicateAttempt, Lead, User, VEHICLE_TYPES } from '../types';
 import {
   detectDeviceClockAhead,
   filterCollectorTodayLeads,
@@ -66,7 +66,7 @@ export function DataCollectionView({
   onRecordDuplicateAttempt,
 }: DataCollectionViewProps) {
   const [activeMode, setActiveMode] = useState<'single' | 'bulk'>('single');
-  const [customerName, setCustomerName] = useState('');
+  const [customerName, setCustomerName] = useState<string>('Car');
   const [rawPhone, setRawPhone] = useState('');
   const [facebookLink, setFacebookLink] = useState('');
   const [notes, setNotes] = useState('');
@@ -278,7 +278,7 @@ export function DataCollectionView({
     setFormError('');
 
     if (!customerName.trim()) {
-      setFormError('Customer Name is required.');
+      setFormError('Vehicle Type is required.');
       return;
     }
 
@@ -340,7 +340,7 @@ export function DataCollectionView({
       recordedDupPhoneRef.current = '';
       setPhoneCheck({ status: 'idle', phone: '' });
       setSheetDuplicate(null);
-      setCustomerName('');
+      setCustomerName('Car');
       setRawPhone('');
       setFacebookLink('');
       setNotes('');
@@ -364,9 +364,10 @@ export function DataCollectionView({
 
   const handleDownloadSampleCsv = () => {
     const sample = [
-      'Name,Phone,Facebook_Link',
-      'Customer Name 1,+8801700000001,https://facebook.com/example.profile1',
-      'Customer Name 2,01800000002,https://facebook.com/example.profile2',
+      'Vehicle_Type,Phone,Facebook_Link',
+      'Car,+8801700000001,https://facebook.com/example.profile1',
+      'Bike,01800000002,https://facebook.com/example.profile2',
+      'Truck,01900000003,https://facebook.com/example.profile3',
     ].join('\n');
     const blob = new Blob([sample], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
@@ -544,16 +545,25 @@ export function DataCollectionView({
                 htmlFor="lead-name"
                 className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5"
               >
-                Customer Name *
+                Vehicle Type *
               </label>
-              <input
+              <select
                 id="lead-name"
-                type="text"
-                placeholder="e.g. ShiMul"
+                data-testid="vehicle-type-select"
+                required
                 value={customerName}
-                onChange={(e) => setCustomerName(e.target.value)}
-                className="w-full px-3.5 py-2.5 text-sm rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500"
-              />
+                onChange={(e) => {
+                  setCustomerName(e.target.value);
+                  setFormError('');
+                }}
+                className="w-full px-3.5 py-2.5 text-sm rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500 cursor-pointer"
+              >
+                {VEHICLE_TYPES.map((vehicle) => (
+                  <option key={vehicle} value={vehicle}>
+                    {vehicle}
+                  </option>
+                ))}
+              </select>
             </div>
 
             <div>
@@ -745,7 +755,7 @@ export function DataCollectionView({
               </h2>
               <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
                 Upload a <code className="font-mono">.csv</code> file with columns:{' '}
-                <code className="font-mono">Name, Phone, Facebook_Link</code>
+                <code className="font-mono">Vehicle_Type, Phone, Facebook_Link</code>
               </p>
             </div>
             <button
@@ -817,7 +827,7 @@ export function DataCollectionView({
                   <thead>
                     <tr className="bg-slate-100/80 dark:bg-slate-900/90 text-slate-600 dark:text-slate-400 border-b border-slate-200 dark:border-slate-800">
                       <th className="py-2.5 px-3 font-semibold">Row</th>
-                      <th className="py-2.5 px-3 font-semibold">Customer Name</th>
+                      <th className="py-2.5 px-3 font-semibold">Vehicle Type</th>
                       <th className="py-2.5 px-3 font-semibold">Normalized Phone</th>
                       <th className="py-2.5 px-3 font-semibold">Validation</th>
                     </tr>
@@ -885,7 +895,7 @@ export function DataCollectionView({
               <table className="w-full text-left border-collapse text-sm">
                 <thead>
                   <tr className="bg-slate-50 dark:bg-slate-900/60 text-xs text-slate-500 dark:text-slate-400 border-b border-slate-200 dark:border-slate-800">
-                    <th className="py-3 px-4 font-semibold">Customer</th>
+                    <th className="py-3 px-4 font-semibold">Vehicle / Customer</th>
                     <th className="py-3 px-4 font-semibold">Phone</th>
                     <th className="py-3 px-4 font-semibold">Assigned Agent</th>
                     <th className="py-3 px-4 font-semibold">Status</th>

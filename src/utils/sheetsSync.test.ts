@@ -1,16 +1,19 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import vm from 'node:vm';
 import { GOOGLE_APPS_SCRIPT_CODE } from '../data/seedData';
 import { CallLog, ContentPost, DuplicateAttempt, Lead, PaidCustomer } from '../types';
 import { extractPhoneCoreKey, filterTodayLeads, normalizeBdPhone } from './leadLogic';
 import {
   detectLeadDuplicatesInList,
   detectPostDuplicatesInList,
+  enrichPaidCustomersForSheetSync,
   FALLBACK_GOOGLE_SHEETS_WEBHOOK_URL,
   filterPullPayloadByDate,
   getAgentTabName,
   getCollectorTabName,
   getDefaultWebhookUrl,
+  getPaidAgentTabName,
   HISTORICAL_FALLBACK_ISO,
   isFirestoreDocIdSafe,
   isLegacyWebhookUrl,
@@ -859,6 +862,279 @@ describe('Per-Collector and Per-Agent Google Sheets tab naming & Apps Script tem
     assert.ok(GOOGLE_APPS_SCRIPT_CODE.includes("Utilities.formatDate(new Date(), 'Asia/Dhaka', 'yyyy-MM-dd')"));
     assert.ok(GOOGLE_APPS_SCRIPT_CODE.includes("Utilities.formatDate(d, 'Asia/Dhaka', 'yyyy-MM-dd')"));
     assert.equal(GOOGLE_APPS_SCRIPT_CODE.includes('Session.getScriptTimeZone()'), false);
+  });
+
+  it('sanitizes Paid_<AgentName> tab names and enriches paidCustomers with Facebook link and collector info', () => {
+    assert.equal(getPaidAgentTabName('Tanjin'), 'Paid_Tanjin');
+    assert.equal(getPaidAgentTabName('Rakib Hasan'), 'Paid_Rakib_Hasan');
+    assert.equal(getPaidAgentTabName('Sajib [BD]/2:Lead*'), 'Paid_Sajib_BD_2_Lead');
+
+    const leads: Lead[] = [
+      {
+        id: 'RBD-101',
+        customerName: 'Car',
+        phone: '01711000999',
+        rawPhone: '+880 1711-000999',
+        facebookLink: 'https://facebook.com/cust.101',
+        normalizedFacebookLink: 'facebook.com/cust.101',
+        notes: 'Confirmed by phone',
+        collectorId: 'collector-shuvo',
+        collectorName: 'Shuvo',
+        assignedAgentId: 'agent-tanjin',
+        assignedAgentName: 'Tanjin',
+        status: 'Order Confirmed',
+        followUpAt: null,
+        lastCallNotes: 'Wants Friday delivery',
+        createdAt: '2026-11-23T06:00:00.000Z',
+        updatedAt: '2026-11-23T07:00:00.000Z',
+      },
+    ];
+    const paidCustomers: PaidCustomer[] = [
+      {
+        id: 'PC-RBD-101',
+        leadId: 'RBD-101',
+        customerName: 'Car',
+        phone: '01711000999',
+        assignedAgentId: 'agent-tanjin',
+        assignedAgentName: 'Tanjin',
+        confirmedDate: '2026-11-23',
+        renewalDate: '2026-12-23',
+        renewalStatus: 'Active',
+        lastRenewedAt: null,
+        notes: 'Wants Friday delivery',
+        createdAt: '2026-11-23T07:00:00.000Z',
+        updatedAt: '2026-11-23T07:00:00.000Z',
+      },
+    ];
+
+    const enriched = enrichPaidCustomersForSheetSync(paidCustomers, leads);
+    assert.equal(enriched.length, 1);
+    assert.equal(enriched[0].facebookLink, 'https://facebook.com/cust.101');
+    assert.equal(enriched[0].collectorName, 'Shuvo');
+    assert.equal(enriched[0].amountOrPackage, '1-Month Package (Renewal: 2026-12-23)');
+  });
+
+  it('executes GOOGLE_APPS_SCRIPT_CODE doPost cleanly to provision Paid_<Agent> & Collector_<Name> tabs, backfill rows, and prevent phone duplicates', () => {
+    assert.ok(GOOGLE_APPS_SCRIPT_CODE.includes('var PAID_AGENT_TAB_HEADERS = ['));
+    assert.ok(GOOGLE_APPS_SCRIPT_CODE.includes('function getPaidAgentTabName_(agentName)'));
+    assert.ok(GOOGLE_APPS_SCRIPT_CODE.includes('function syncPaidCustomerAcrossPaidTabs_('));
+
+    const makeMockSheet = (name: string) => {
+      const rows: unknown[][] = [];
+      return {
+        getName: () => name,
+        appendRow: (row: unknown[]) => {
+          rows.push([...row]);
+        },
+        getLastRow: () => rows.length,
+        getLastColumn: () => (rows[0] ? rows[0].length : 0),
+        getDataRange: () => ({
+          getValues: () => rows.map((r) => [...r]),
+        }),
+        getRange: (row: number, col: number, numRows: number, numCols: number) => ({
+          setFontWeight: () => {},
+          getValues: () => {
+            const out: unknown[][] = [];
+            for (let r = row - 1; r < row - 1 + numRows; r++) {
+              const src = rows[r] ?? [];
+              const slice: unknown[] = [];
+              for (let c = col - 1; c < col - 1 + numCols; c++) {
+                slice.push(src[c] ?? '');
+              }
+              out.push(slice);
+            }
+            return out;
+          },
+          setValues: (newVals: unknown[][]) => {
+            for (let r = 0; r < numRows; r++) {
+              const targetIdx = row - 1 + r;
+              while (rows.length <= targetIdx) rows.push([]);
+              for (let c = 0; c < numCols; c++) {
+                rows[targetIdx][col - 1 + c] = newVals[r][c];
+              }
+            }
+          },
+        }),
+        deleteRow: (rowNum: number) => {
+          rows.splice(rowNum - 1, 1);
+        },
+        setFrozenRows: () => {},
+        _rows: rows,
+      };
+    };
+
+    const sheetsMap = new Map<string, ReturnType<typeof makeMockSheet>>();
+    const mockSpreadsheet = {
+      getSheetByName: (name: string) => sheetsMap.get(name) ?? null,
+      insertSheet: (name: string) => {
+        const s = makeMockSheet(name);
+        sheetsMap.set(name, s);
+        return s;
+      },
+      getSheets: () => Array.from(sheetsMap.values()),
+    };
+
+    // Pre-populate historical Master_Data & Paid_Customers rows to verify backfill
+    const preMaster = mockSpreadsheet.insertSheet('Master_Data');
+    preMaster.appendRow([
+      'Lead ID', 'Customer Name', 'Phone', 'Facebook Link', 'Collector',
+      'Assigned Agent', 'Latest Status', 'Follow-up At', 'Notes', 'Updated At', 'Created At',
+    ]);
+    preMaster.appendRow([
+      'RBD-OLD-1', 'Truck', "'01811223344", 'https://facebook.com/old.truck', 'Kawser',
+      'Kathy', 'Order Confirmed', '', 'Historical confirmed', '2026-11-20T10:00:00.000Z', '2026-11-20T09:00:00.000Z',
+    ]);
+    const prePaid = mockSpreadsheet.insertSheet('Paid_Customers');
+    prePaid.appendRow([
+      'Customer ID', 'Lead ID', 'Customer Name', 'Phone', 'Assigned Agent',
+      'Confirmed Date', 'Renewal Date', 'Days Remaining', 'Renewal Status', 'Updated At',
+    ]);
+    prePaid.appendRow([
+      'PC-RBD-OLD-1', 'RBD-OLD-1', 'Truck', "'01811223344", 'Kathy',
+      "'2026-11-20", "'2026-12-20", 27, 'Active', '2026-11-20T10:00:00.000Z',
+    ]);
+
+    const sandbox: Record<string, unknown> = {
+      SpreadsheetApp: { getActiveSpreadsheet: () => mockSpreadsheet },
+      Utilities: {
+        formatDate: (d: Date) => {
+          const ms = d.getTime() + 6 * 3600 * 1000;
+          return new Date(ms).toISOString().slice(0, 10);
+        },
+      },
+      ContentService: {
+        MimeType: { JSON: 'JSON' },
+        createTextOutput: (txt: string) => ({
+          setMimeType: () => txt,
+        }),
+      },
+    };
+    vm.createContext(sandbox);
+    vm.runInContext(GOOGLE_APPS_SCRIPT_CODE, sandbox);
+
+    const doPost = sandbox.doPost as (e: { postData: { contents: string } }) => string;
+
+    // 1. TEST_SYNC provisions dynamic collector & agent Paid_ tabs and backfills
+    const res1 = JSON.parse(
+      doPost({
+        postData: {
+          contents: JSON.stringify({
+            event: 'TEST_SYNC',
+            agentNames: ['Tanjin', 'Kathy', 'Nusrat'],
+            collectorNames: ['Farhan', 'Naim', 'Shuvo', 'Kawser'],
+            leads: [
+              {
+                id: 'RBD-LIVE-1',
+                customerName: 'Car',
+                phone: '01711000999',
+                facebookLink: 'https://facebook.com/live.car',
+                collectorName: 'Shuvo',
+                assignedAgentName: 'Nusrat',
+                status: 'Order Confirmed',
+                notes: 'Test note',
+                createdAt: '2026-11-23T06:00:00.000Z',
+                updatedAt: '2026-11-23T07:00:00.000Z',
+              },
+            ],
+            paidCustomers: [
+              {
+                id: 'PC-RBD-LIVE-1',
+                leadId: 'RBD-LIVE-1',
+                customerName: 'Car',
+                phone: '01711000999',
+                facebookLink: 'https://facebook.com/live.car',
+                collectorName: 'Shuvo',
+                assignedAgentName: 'Nusrat',
+                confirmedDate: '2026-11-23',
+                renewalDate: '2026-12-23',
+                renewalStatus: 'Active',
+                amountOrPackage: '1-Month Package (Renewal: 2026-12-23)',
+                notes: 'Test note',
+                updatedAt: '2026-11-23T07:00:00.000Z',
+              },
+            ],
+          }),
+        },
+      })
+    );
+    assert.equal(res1.ok, true);
+
+    assert.ok(sheetsMap.has('Collector_Shuvo'));
+    assert.ok(sheetsMap.has('Collector_Kawser'));
+    assert.ok(sheetsMap.has('Paid_Tanjin'));
+    assert.ok(sheetsMap.has('Paid_Kathy'));
+    assert.ok(sheetsMap.has('Paid_Nusrat'));
+
+    const paidNusratRows = sheetsMap.get('Paid_Nusrat')!._rows;
+    assert.equal(paidNusratRows.length, 2); // header + 1 row
+    assert.equal(paidNusratRows[1][0], 'PC-RBD-LIVE-1');
+    assert.equal(paidNusratRows[1][2], 'Car');
+    assert.equal(paidNusratRows[1][3], "'01711000999");
+    assert.equal(paidNusratRows[1][4], 'https://facebook.com/live.car');
+    assert.equal(paidNusratRows[1][5], 'Shuvo');
+    assert.equal(paidNusratRows[1][6], 'Nusrat');
+
+    // Backfilled historical Collector_Kawser & Paid_Kathy
+    assert.equal(sheetsMap.get('Collector_Kawser')!._rows.length, 2);
+    const paidKathyRows = sheetsMap.get('Paid_Kathy')!._rows;
+    assert.equal(paidKathyRows.length, 2);
+    assert.equal(paidKathyRows[1][4], 'https://facebook.com/old.truck');
+    assert.equal(paidKathyRows[1][5], 'Kawser');
+
+    // 2. Duplicate protection by normalized BD phone (+880 1711-000999 vs 01711000999)
+    doPost({
+      postData: {
+        contents: JSON.stringify({
+          event: 'PAID_CUSTOMER_UPSERT',
+          paidCustomer: {
+            id: 'PC-ALT-ID',
+            leadId: 'RBD-LIVE-1',
+            customerName: 'Car',
+            phone: '+880 1711-000999',
+            assignedAgentName: 'Nusrat',
+            confirmedDate: '2026-11-23',
+            notes: 'Updated notes without dup',
+            updatedAt: '2026-11-23T08:00:00.000Z',
+          },
+        }),
+      },
+    });
+    assert.equal(sheetsMap.get('Paid_Nusrat')!._rows.length, 2);
+    assert.equal(sheetsMap.get('Paid_Nusrat')!._rows[1][8], 'Updated notes without dup');
+
+    // 3. Reassignment moves row from Paid_Nusrat to Paid_Tanjin
+    doPost({
+      postData: {
+        contents: JSON.stringify({
+          event: 'LEAD_UPSERT',
+          lead: {
+            id: 'RBD-LIVE-1',
+            customerName: 'Car',
+            phone: '01711000999',
+            facebookLink: 'https://facebook.com/live.car',
+            collectorName: 'Shuvo',
+            assignedAgentName: 'Tanjin',
+            status: 'Order Confirmed',
+            updatedAt: '2026-11-23T09:00:00.000Z',
+          },
+          paidCustomer: {
+            id: 'PC-RBD-LIVE-1',
+            leadId: 'RBD-LIVE-1',
+            customerName: 'Car',
+            phone: '01711000999',
+            facebookLink: 'https://facebook.com/live.car',
+            collectorName: 'Shuvo',
+            assignedAgentName: 'Tanjin',
+            confirmedDate: '2026-11-23',
+            notes: 'Moved to Tanjin',
+            updatedAt: '2026-11-23T09:00:00.000Z',
+          },
+        }),
+      },
+    });
+    assert.equal(sheetsMap.get('Paid_Nusrat')!._rows.length, 1); // header only
+    assert.equal(sheetsMap.get('Paid_Tanjin')!._rows.length, 2);
+    assert.equal(sheetsMap.get('Paid_Tanjin')!._rows[1][6], 'Tanjin');
   });
 });
 
