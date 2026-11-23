@@ -1,7 +1,7 @@
 import type { CallStatus, RenewalStatus } from '../types/index.ts';
 
 export const DEFAULT_WEBHOOK_URL =
-  'https://script.google.com/macros/s/AKfycbyCPGFliknk1322hJoPwgCWkBIlobMRWd3AnJcAKr8R7oCs1Q5rNT--ydFr8jaWkF3r/exec';
+  'https://script.google.com/macros/s/AKfycbxRNhBGGML3PspDMwunGObPsdI45y6UU1uU1QTxtzg98yRQeFrtqrcAeXbywE1ZWJ4P/exec';
 
 export const DEFAULT_CALL_SCRIPT = `1. Greeting: Assalamu Alaikum! Am I speaking with [Customer Name]? Calling from RunBD.
 2. Context: Thank you for reaching out regarding our products/services.
