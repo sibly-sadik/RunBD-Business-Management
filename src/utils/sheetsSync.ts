@@ -156,6 +156,124 @@ export function enrichPaidCustomersForSheetSync(
   });
 }
 
+export const DEFAULT_SHEETS_BATCH_SIZE = 50;
+
+export type SheetsBatchEvent = 'TEST_SYNC' | 'FULL_SYNC' | 'LEADS_BATCH_UPSERT';
+
+export interface SheetsBatchPlanItem {
+  chunkIndex: number;
+  totalChunks: number;
+  event: SheetsBatchEvent;
+  leads: Lead[];
+  callLogs: CallLog[];
+  contentPosts: ContentPost[];
+  paidCustomers: SyncPaidCustomerPayload[];
+  includeSummaries: boolean;
+  skipBackfill: boolean;
+  totalRecordsInChunk: number;
+}
+
+/**
+ * Splits large sync payloads (e.g., 195+ leads, call logs, posts, paid customers)
+ * into sequential batches capped at `batchSize` (default 50) total records per request
+ * so each Google Apps Script execution finishes well below timeout limits.
+ */
+export function buildSheetsSyncChunks(input: {
+  event: SheetsBatchEvent;
+  leads?: Lead[];
+  callLogs?: CallLog[];
+  contentPosts?: ContentPost[];
+  paidCustomers?: SyncPaidCustomerPayload[];
+  batchSize?: number;
+}): SheetsBatchPlanItem[] {
+  const batchSize = Math.max(1, Math.floor(input.batchSize ?? DEFAULT_SHEETS_BATCH_SIZE));
+  const leads = input.leads ?? [];
+  const callLogs = input.callLogs ?? [];
+  const contentPosts = input.contentPosts ?? [];
+  const paidCustomers = input.paidCustomers ?? [];
+
+  const rawChunks: Array<{
+    leads: Lead[];
+    callLogs: CallLog[];
+    contentPosts: ContentPost[];
+    paidCustomers: SyncPaidCustomerPayload[];
+  }> = [];
+
+  let current = {
+    leads: [] as Lead[],
+    callLogs: [] as CallLog[],
+    contentPosts: [] as ContentPost[],
+    paidCustomers: [] as SyncPaidCustomerPayload[],
+  };
+  let currentCount = 0;
+
+  const flushCurrent = () => {
+    if (currentCount > 0) {
+      rawChunks.push(current);
+      current = {
+        leads: [],
+        callLogs: [],
+        contentPosts: [],
+        paidCustomers: [],
+      };
+      currentCount = 0;
+    }
+  };
+
+  const pushSlice = <T>(items: T[], targetKey: keyof typeof current) => {
+    let offset = 0;
+    while (offset < items.length) {
+      const remainingCapacity = batchSize - currentCount;
+      const take = Math.min(remainingCapacity, items.length - offset);
+      const slice = items.slice(offset, offset + take);
+      (current[targetKey] as unknown[]).push(...slice);
+      currentCount += slice.length;
+      offset += take;
+      if (currentCount >= batchSize) {
+        flushCurrent();
+      }
+    }
+  };
+
+  pushSlice(leads, 'leads');
+  pushSlice(callLogs, 'callLogs');
+  pushSlice(contentPosts, 'contentPosts');
+  pushSlice(paidCustomers, 'paidCustomers');
+  flushCurrent();
+
+  if (rawChunks.length === 0) {
+    rawChunks.push({
+      leads: [],
+      callLogs: [],
+      contentPosts: [],
+      paidCustomers: [],
+    });
+  }
+
+  const totalChunks = rawChunks.length;
+  return rawChunks.map((chunk, idx) => {
+    const isLast = idx === totalChunks - 1;
+    const totalRecordsInChunk =
+      chunk.leads.length +
+      chunk.callLogs.length +
+      chunk.contentPosts.length +
+      chunk.paidCustomers.length;
+
+    return {
+      chunkIndex: idx + 1,
+      totalChunks,
+      event: isLast ? input.event : 'LEADS_BATCH_UPSERT',
+      leads: chunk.leads,
+      callLogs: chunk.callLogs,
+      contentPosts: chunk.contentPosts,
+      paidCustomers: chunk.paidCustomers,
+      includeSummaries: isLast,
+      skipBackfill: !isLast || input.event === 'LEADS_BATCH_UPSERT',
+      totalRecordsInChunk,
+    };
+  });
+}
+
 const VALID_CALL_STATUSES: ReadonlySet<CallStatus> = new Set(CALL_STATUSES);
 
 function normalizeStatus(status: unknown): CallStatus {

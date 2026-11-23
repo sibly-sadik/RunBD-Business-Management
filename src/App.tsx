@@ -91,6 +91,7 @@ import {
   upsertPaidCustomerInSupabase,
 } from './utils/supabaseSync';
 import {
+  DEFAULT_SHEETS_BATCH_SIZE,
   detectLeadDuplicatesInList,
   detectPostDuplicatesInList,
   enrichPaidCustomersForSheetSync,
@@ -102,10 +103,12 @@ import {
   mergeRemotePaidCustomers,
   resolveWebhookUrl,
   SheetDuplicateReport,
+  SheetsBatchEvent,
 } from './utils/sheetsSync';
 import {
   checkLeadDuplicateInSheets,
   checkPostDuplicateInSheets,
+  ChunkedPushSheetsResult,
   DEFAULT_GOOGLE_SHEETS_WEBHOOK_URL,
   DEFAULT_SHEETS_SYNC_TIMEOUT_MS,
   describeWebhookFetchError,
@@ -113,6 +116,7 @@ import {
   isAbortOrTimeoutError,
   isSupersededSyncError,
   pullFromGoogleSheetsWebhook,
+  pushChunkedSheetsSync,
   pushToGoogleSheetsWebhook,
   SheetsSyncPayload,
   storage,
@@ -155,6 +159,7 @@ export default function App() {
   const [syncStatus, setSyncStatus] = useState<SyncStatus>(() =>
     storage.getSettings().googleSheetsWebhookUrl ? 'synced' : 'offline'
   );
+  const [sheetsSyncProgress, setSheetsSyncProgress] = useState<string | null>(null);
   const [sheetDuplicateReport, setSheetDuplicateReport] = useState<SheetDuplicateReport | null>(
     null
   );
@@ -547,6 +552,125 @@ export default function App() {
           timedOut: isAbortOrTimeoutError(err),
           error: describeWebhookFetchError(err, effectiveTimeoutMs),
         };
+      }
+    },
+    [buildDailySummary, contentPosts]
+  );
+
+  const triggerChunkedRealtimeSync = useCallback(
+    async (
+      webhookUrl: string,
+      input: {
+        event: SheetsBatchEvent;
+        leads?: Lead[];
+        callLogs?: CallLog[];
+        contentPosts?: ContentPost[];
+        paidCustomers?: PaidCustomer[];
+      },
+      nextLeads: Lead[],
+      nextCallLogs: CallLog[],
+      nextContentPosts: ContentPost[] = contentPosts,
+      syncOptions?: {
+        isManual?: boolean;
+        signal?: AbortSignal;
+        timeoutMs?: number;
+        finalTimeoutMs?: number;
+        onProgressLabel?: (label: string | null) => void;
+      }
+    ): Promise<ChunkedPushSheetsResult> => {
+      if (!webhookUrl.trim()) {
+        setSyncStatus('offline');
+        return { ok: false, completedChunks: 0, totalChunks: 0, error: 'No webhook URL configured' };
+      }
+
+      const isManual = Boolean(syncOptions?.isManual);
+      const reqId = ++syncRequestIdRef.current;
+      const shouldManageStatus = isManual || activeManualSyncCountRef.current === 0;
+      if (shouldManageStatus) {
+        setSyncStatus('syncing');
+      }
+
+      const effectiveTimeoutMs = syncOptions?.timeoutMs ?? DEFAULT_SHEETS_SYNC_TIMEOUT_MS;
+
+      try {
+        const dynamicAgents = getCallCenterAgents(teamMembersRef.current);
+        const dynamicCollectors = getDataCollectors(teamMembersRef.current);
+        const enrichmentLeads =
+          leadsRef.current.length >= nextLeads.length ? leadsRef.current : nextLeads;
+        const enrichedPaidCustomers = input.paidCustomers
+          ? enrichPaidCustomersForSheetSync(input.paidCustomers, enrichmentLeads)
+          : undefined;
+
+        const res = await pushChunkedSheetsSync(
+          webhookUrl,
+          {
+            event: input.event,
+            leads: input.leads,
+            callLogs: input.callLogs,
+            contentPosts: input.contentPosts,
+            paidCustomers: enrichedPaidCustomers,
+            agentNames: dynamicAgents.map((a) => a.name),
+            collectorNames: dynamicCollectors.map((c) => c.name),
+            dailySummary: buildDailySummary(nextLeads, nextCallLogs),
+            finalDailySummary: computeFinalDailySummary(
+              dynamicAgents,
+              dynamicCollectors,
+              nextLeads,
+              nextCallLogs,
+              nextContentPosts
+            ),
+          },
+          {
+            batchSize: DEFAULT_SHEETS_BATCH_SIZE,
+            timeoutMs: effectiveTimeoutMs,
+            finalTimeoutMs: syncOptions?.finalTimeoutMs ?? FULL_SYNC_TIMEOUT_MS,
+            signal: syncOptions?.signal,
+            onProgress: ({ chunkIndex, totalChunks }) => {
+              if (!syncOptions?.onProgressLabel) return;
+              if (totalChunks > 1) {
+                syncOptions.onProgressLabel(`Syncing batch ${chunkIndex}/${totalChunks}...`);
+              } else {
+                syncOptions.onProgressLabel('Syncing...');
+              }
+            },
+          }
+        );
+
+        if (res.superseded) {
+          return res;
+        }
+
+        if (reqId === syncRequestIdRef.current && (isManual || activeManualSyncCountRef.current === 0)) {
+          if (res.ok) {
+            setSyncStatus('synced');
+            setSettings((prev) => ({ ...prev, lastSyncedAt: new Date().toISOString() }));
+          } else {
+            setSyncStatus('error');
+          }
+        }
+        return res;
+      } catch (err) {
+        if (isSupersededSyncError(err)) {
+          return {
+            ok: false,
+            superseded: true,
+            completedChunks: 0,
+            totalChunks: 0,
+            error: describeWebhookFetchError(err, effectiveTimeoutMs),
+          };
+        }
+        if (reqId === syncRequestIdRef.current && (isManual || activeManualSyncCountRef.current === 0)) {
+          setSyncStatus('error');
+        }
+        return {
+          ok: false,
+          completedChunks: 0,
+          totalChunks: 0,
+          timedOut: isAbortOrTimeoutError(err),
+          error: describeWebhookFetchError(err, effectiveTimeoutMs),
+        };
+      } finally {
+        syncOptions?.onProgressLabel?.(null);
       }
     },
     [buildDailySummary, contentPosts]
@@ -1465,7 +1589,7 @@ export default function App() {
         : 'Added to the unassigned queue.'
     );
 
-    void triggerRealtimeSync(
+    void triggerChunkedRealtimeSync(
       settings.googleSheetsWebhookUrl,
       {
         event: 'LEADS_BATCH_UPSERT',
@@ -2266,7 +2390,7 @@ export default function App() {
     const todayCallLogs = filterTodayCallLogs(callLogs);
     const todayPosts = filterTodayPosts(contentPosts);
     try {
-      const res = await triggerRealtimeSync(
+      const res = await triggerChunkedRealtimeSync(
         url,
         {
           event: 'TEST_SYNC',
@@ -2281,22 +2405,26 @@ export default function App() {
         {
           isManual: true,
           signal: manualController.signal,
-          timeoutMs: FULL_SYNC_TIMEOUT_MS,
+          timeoutMs: DEFAULT_SHEETS_SYNC_TIMEOUT_MS,
+          finalTimeoutMs: FULL_SYNC_TIMEOUT_MS,
+          onProgressLabel: setSheetsSyncProgress,
         }
       );
       if (res.superseded) return;
       if (res.ok) {
+        const batchSuffix =
+          res.totalChunks > 1 ? ` across ${res.totalChunks} batches` : '';
         if (currentUser) {
           appendAudit(
             currentUser,
             'SHEETS_SYNCED',
-            `Synced ${syncLeads.length} leads, ${todayCallLogs.length} today call logs, ${todayPosts.length} posts, and ${paidCustomers.length} paid customers to Google Sheets (Master, Collector_*, Agent_*, Paid_*)`
+            `Synced ${syncLeads.length} leads, ${todayCallLogs.length} today call logs, ${todayPosts.length} posts, and ${paidCustomers.length} paid customers to Google Sheets${batchSuffix} (Master, Collector_*, Agent_*, Paid_*)`
           );
         }
         addToast(
           'success',
           'Google Sheets Synced',
-          'Master_Data, Collector_<Name>, Agent_<Name>, Paid_<Agent>, Daily_Summary, and Paid_Customers synced.'
+          `Synced ${syncLeads.length} lead(s)${batchSuffix} across Master_Data, Collector_<Name>, Agent_<Name>, Paid_<Agent>, Daily_Summary, and Paid_Customers.`
         );
       } else {
         addToast(
@@ -2306,6 +2434,7 @@ export default function App() {
         );
       }
     } finally {
+      setSheetsSyncProgress(null);
       endManualSyncController(manualController);
     }
   };
@@ -2533,6 +2662,7 @@ export default function App() {
             defaultWebhookUrl={DEFAULT_GOOGLE_SHEETS_WEBHOOK_URL}
             lastSyncedAt={settings.lastSyncedAt}
             syncStatus={syncStatus}
+            syncProgressText={sheetsSyncProgress}
             sheetDuplicateReport={
               sheetDuplicateReport ?? {
                 checkedAt: settings.lastSyncedAt ?? new Date().toISOString(),

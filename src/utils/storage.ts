@@ -10,6 +10,8 @@ import {
 } from '../types';
 import { FinalDailySummary, getLocalDateString, normalizeBdPhone } from './leadLogic';
 import {
+  buildSheetsSyncChunks,
+  DEFAULT_SHEETS_BATCH_SIZE,
   filterPullPayloadByDate,
   getDefaultWebhookUrl,
   LeadDuplicateCheckResult,
@@ -19,6 +21,8 @@ import {
   parsePullPayload,
   PostDuplicateCheckResult,
   resolveWebhookUrl,
+  SheetsBatchEvent,
+  SyncPaidCustomerPayload,
 } from './sheetsSync';
 import {
   createSeedAuditLogs,
@@ -248,7 +252,12 @@ export interface SheetsSyncPayload {
   >;
   collectorNames?: string[];
   agentNames?: string[];
-  dailySummary: {
+  skipBackfill?: boolean;
+  batchInfo?: {
+    chunkIndex: number;
+    totalChunks: number;
+  };
+  dailySummary?: {
     date: string;
     totalLeads: number;
     callsMadeToday: number;
@@ -427,6 +436,144 @@ export async function pushToGoogleSheetsWebhook(
   } finally {
     cleanup();
   }
+}
+
+export interface ChunkedSyncProgress {
+  chunkIndex: number;
+  totalChunks: number;
+  syncedRecordsSoFar: number;
+  totalRecords: number;
+}
+
+export interface ChunkedPushSheetsResult extends PushSheetsResult {
+  completedChunks: number;
+  totalChunks: number;
+}
+
+/**
+ * Splits large sync payloads into sequential batches (default 50 records per request)
+ * so Google Apps Script processes each batch fast and reliably without hitting 60s timeouts.
+ */
+export async function pushChunkedSheetsSync(
+  webhookUrl: string,
+  input: {
+    event: SheetsBatchEvent;
+    leads?: Lead[];
+    callLogs?: CallLog[];
+    contentPosts?: ContentPost[];
+    paidCustomers?: SyncPaidCustomerPayload[];
+    collectorNames?: string[];
+    agentNames?: string[];
+    dailySummary?: SheetsSyncPayload['dailySummary'];
+    finalDailySummary?: FinalDailySummary;
+  },
+  options?: {
+    batchSize?: number;
+    timeoutMs?: number;
+    finalTimeoutMs?: number;
+    signal?: AbortSignal;
+    onProgress?: (progress: ChunkedSyncProgress) => void;
+  }
+): Promise<ChunkedPushSheetsResult> {
+  const chunks = buildSheetsSyncChunks({
+    event: input.event,
+    leads: input.leads,
+    callLogs: input.callLogs,
+    contentPosts: input.contentPosts,
+    paidCustomers: input.paidCustomers,
+    batchSize: options?.batchSize ?? DEFAULT_SHEETS_BATCH_SIZE,
+  });
+
+  const totalChunks = chunks.length;
+  const totalRecords = chunks.reduce((sum, chunk) => sum + chunk.totalRecordsInChunk, 0);
+  let syncedRecordsSoFar = 0;
+
+  for (const chunk of chunks) {
+    if (options?.signal?.aborted) {
+      const reason = options.signal.reason;
+      if (isSupersededSyncError(reason)) {
+        return {
+          ok: false,
+          superseded: true,
+          completedChunks: chunk.chunkIndex - 1,
+          totalChunks,
+          error: describeWebhookFetchError(reason, options.timeoutMs ?? DEFAULT_SHEETS_SYNC_TIMEOUT_MS),
+        };
+      }
+    }
+
+    options?.onProgress?.({
+      chunkIndex: chunk.chunkIndex,
+      totalChunks,
+      syncedRecordsSoFar,
+      totalRecords,
+    });
+
+    const isLast = chunk.chunkIndex === totalChunks;
+    const chunkTimeoutMs = isLast
+      ? options?.finalTimeoutMs ??
+        (chunk.event === 'FULL_SYNC' || chunk.event === 'TEST_SYNC'
+          ? FULL_SYNC_TIMEOUT_MS
+          : options?.timeoutMs ?? DEFAULT_SHEETS_SYNC_TIMEOUT_MS)
+      : options?.timeoutMs ?? DEFAULT_SHEETS_SYNC_TIMEOUT_MS;
+
+    const payload: SheetsSyncPayload = {
+      event: chunk.event,
+      ...(chunk.leads.length > 0 ? { leads: chunk.leads } : {}),
+      ...(chunk.callLogs.length > 0 ? { callLogs: chunk.callLogs } : {}),
+      ...(chunk.contentPosts.length > 0 ? { contentPosts: chunk.contentPosts } : {}),
+      ...(chunk.paidCustomers.length > 0 ? { paidCustomers: chunk.paidCustomers } : {}),
+      ...(chunk.chunkIndex === 1 || isLast
+        ? {
+            agentNames: input.agentNames,
+            collectorNames: input.collectorNames,
+          }
+        : {}),
+      skipBackfill: chunk.skipBackfill,
+      batchInfo: {
+        chunkIndex: chunk.chunkIndex,
+        totalChunks,
+      },
+      ...(chunk.includeSummaries && input.dailySummary
+        ? { dailySummary: input.dailySummary }
+        : {}),
+      ...(chunk.includeSummaries && input.finalDailySummary
+        ? { finalDailySummary: input.finalDailySummary }
+        : {}),
+    };
+
+    const res = await pushToGoogleSheetsWebhook(webhookUrl, payload, {
+      timeoutMs: chunkTimeoutMs,
+      signal: options?.signal,
+    });
+
+    if (!res.ok) {
+      return {
+        ...res,
+        completedChunks: chunk.chunkIndex - 1,
+        totalChunks,
+        error:
+          !res.superseded && totalChunks > 1 && res.error
+            ? `Batch ${chunk.chunkIndex}/${totalChunks}: ${res.error}`
+            : res.error,
+      };
+    }
+
+    syncedRecordsSoFar += chunk.totalRecordsInChunk;
+  }
+
+  options?.onProgress?.({
+    chunkIndex: totalChunks,
+    totalChunks,
+    syncedRecordsSoFar: totalRecords,
+    totalRecords,
+  });
+
+  return {
+    ok: true,
+    completedChunks: totalChunks,
+    totalChunks,
+  };
 }
 
 export interface PullSheetsResult {

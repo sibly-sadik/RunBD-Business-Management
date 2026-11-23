@@ -5,6 +5,8 @@ import { GOOGLE_APPS_SCRIPT_CODE } from '../data/seedData';
 import { CallLog, ContentPost, DuplicateAttempt, Lead, PaidCustomer } from '../types';
 import { extractPhoneCoreKey, filterTodayLeads, normalizeBdPhone } from './leadLogic';
 import {
+  buildSheetsSyncChunks,
+  DEFAULT_SHEETS_BATCH_SIZE,
   detectLeadDuplicatesInList,
   detectPostDuplicatesInList,
   enrichPaidCustomersForSheetSync,
@@ -34,6 +36,7 @@ import {
   describeWebhookFetchError,
   FULL_SYNC_TIMEOUT_MS,
   pullFromGoogleSheetsWebhook,
+  pushChunkedSheetsSync,
   pushToGoogleSheetsWebhook,
   SUPERSEDED_SYNC_ERROR_NAME,
 } from './storage';
@@ -1235,6 +1238,388 @@ describe('Google Sheets sync timeout, abort reason & concurrency safety', () => 
     }
   });
 });
+
+describe('Chunked Google Sheets sync & Code.gs O(tabs) batch performance on 195+ leads', () => {
+  const makeTestLead = (i: number): Lead => ({
+    id: `RBD-BULK-${i}`,
+    customerName: i % 2 === 0 ? 'Car' : 'Bike',
+    phone: `01710${String(100000 + i)}`,
+    rawPhone: `01710${String(100000 + i)}`,
+    facebookLink: `https://facebook.com/bulk.user.${i}`,
+    normalizedFacebookLink: `facebook.com/bulk.user.${i}`,
+    notes: `Note ${i}`,
+    collectorId: i % 2 === 0 ? 'collector-farhan' : 'collector-naim',
+    collectorName: i % 2 === 0 ? 'Farhan' : 'Naim',
+    assignedAgentId: i % 3 === 0 ? 'agent-tanjin' : i % 3 === 1 ? 'agent-kathy' : 'agent-sakib',
+    assignedAgentName: i % 3 === 0 ? 'Tanjin' : i % 3 === 1 ? 'Kathy' : 'Sakib',
+    status: i % 10 === 0 ? 'Order Confirmed' : 'Interested',
+    followUpAt: null,
+    lastCallNotes: `Call note ${i}`,
+    createdAt: '2026-11-23T06:00:00.000Z',
+    updatedAt: '2026-11-23T07:00:00.000Z',
+  });
+
+  it('splits 195+ leads, call logs, posts, and paid customers into <=50-record sequential chunks', () => {
+    assert.equal(DEFAULT_SHEETS_BATCH_SIZE, 50);
+    const leads = Array.from({ length: 195 }, (_, idx) => makeTestLead(idx + 1));
+    const callLogs: CallLog[] = Array.from({ length: 40 }, (_, idx) => ({
+      id: `CL-BULK-${idx + 1}`,
+      leadId: `RBD-BULK-${idx + 1}`,
+      customerName: 'Car',
+      phone: `01710${String(100001 + idx)}`,
+      agentId: 'agent-tanjin',
+      agentName: 'Tanjin',
+      previousStatus: 'Pending',
+      newStatus: 'Interested',
+      notes: 'Called',
+      followUpAt: null,
+      timestamp: '2026-11-23T08:00:00.000Z',
+    }));
+    const contentPosts: ContentPost[] = Array.from({ length: 10 }, (_, idx) => ({
+      id: `PST-BULK-${idx + 1}`,
+      facebookLink: `https://facebook.com/post/${idx + 1}`,
+      normalizedFacebookLink: `facebook.com/post/${idx + 1}`,
+      websiteLink: '',
+      normalizedWebsiteLink: '',
+      note: 'Promo',
+      posterId: 'poster-kawsar',
+      posterName: 'Kawsar',
+      createdAt: '2026-11-23T08:00:00.000Z',
+    }));
+    const paidCustomers: PaidCustomer[] = Array.from({ length: 25 }, (_, idx) => ({
+      id: `PC-RBD-BULK-${idx + 1}`,
+      leadId: `RBD-BULK-${idx + 1}`,
+      customerName: 'Car',
+      phone: `01710${String(100001 + idx)}`,
+      assignedAgentId: 'agent-tanjin',
+      assignedAgentName: 'Tanjin',
+      confirmedDate: '2026-11-23',
+      renewalDate: '2026-12-23',
+      renewalStatus: 'Active',
+      lastRenewedAt: null,
+      notes: 'Paid',
+      createdAt: '2026-11-23T08:00:00.000Z',
+      updatedAt: '2026-11-23T08:00:00.000Z',
+    }));
+
+    const chunks = buildSheetsSyncChunks({
+      event: 'TEST_SYNC',
+      leads,
+      callLogs,
+      contentPosts,
+      paidCustomers,
+    });
+
+    assert.equal(chunks.length, 6); // 270 records / 50 = 6 chunks
+    for (let i = 0; i < chunks.length; i++) {
+      assert.ok(chunks[i].totalRecordsInChunk <= 50);
+      assert.equal(chunks[i].chunkIndex, i + 1);
+      assert.equal(chunks[i].totalChunks, 6);
+      if (i < chunks.length - 1) {
+        assert.equal(chunks[i].event, 'LEADS_BATCH_UPSERT');
+        assert.equal(chunks[i].skipBackfill, true);
+        assert.equal(chunks[i].includeSummaries, false);
+      } else {
+        assert.equal(chunks[i].event, 'TEST_SYNC');
+        assert.equal(chunks[i].skipBackfill, false);
+        assert.equal(chunks[i].includeSummaries, true);
+      }
+    }
+
+    const totalLeadsPacked = chunks.reduce((s, c) => s + c.leads.length, 0);
+    const totalLogsPacked = chunks.reduce((s, c) => s + c.callLogs.length, 0);
+    const totalPostsPacked = chunks.reduce((s, c) => s + c.contentPosts.length, 0);
+    const totalPaidPacked = chunks.reduce((s, c) => s + c.paidCustomers.length, 0);
+    assert.equal(totalLeadsPacked, 195);
+    assert.equal(totalLogsPacked, 40);
+    assert.equal(totalPostsPacked, 10);
+    assert.equal(totalPaidPacked, 25);
+
+    // Empty sync still sends 1 TEST_SYNC chunk to provision tabs & update summaries
+    const emptyChunks = buildSheetsSyncChunks({ event: 'TEST_SYNC', leads: [] });
+    assert.equal(emptyChunks.length, 1);
+    assert.equal(emptyChunks[0].event, 'TEST_SYNC');
+    assert.equal(emptyChunks[0].skipBackfill, false);
+    assert.equal(emptyChunks[0].includeSummaries, true);
+  });
+
+  it('dispatches chunked requests sequentially with progress, handles mid-batch timeouts, and stops on supersede', async () => {
+    const origFetch = globalThis.fetch;
+    const leads = Array.from({ length: 120 }, (_, idx) => makeTestLead(idx + 1));
+    const sentBodies: Array<Record<string, unknown>> = [];
+    const progressEvents: Array<{ chunkIndex: number; totalChunks: number }> = [];
+
+    globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
+      const parsed = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+      sentBodies.push(parsed);
+      return new Response('', { status: 200 });
+    }) as typeof fetch;
+
+    try {
+      const res = await pushChunkedSheetsSync(
+        'https://script.google.com/macros/s/test/exec',
+        {
+          event: 'TEST_SYNC',
+          leads,
+          agentNames: ['Tanjin', 'Kathy', 'Sakib'],
+          collectorNames: ['Farhan', 'Naim'],
+          dailySummary: {
+            date: '2026-11-23',
+            totalLeads: 120,
+            callsMadeToday: 0,
+            orderConfirmedCount: 12,
+            interestedCount: 108,
+            conversionRate: 10,
+          },
+        },
+        {
+          batchSize: 50,
+          onProgress: (p) => progressEvents.push({ chunkIndex: p.chunkIndex, totalChunks: p.totalChunks }),
+        }
+      );
+
+      assert.equal(res.ok, true);
+      assert.equal(res.completedChunks, 3);
+      assert.equal(res.totalChunks, 3);
+      assert.equal(sentBodies.length, 3);
+      assert.equal(sentBodies[0].event, 'LEADS_BATCH_UPSERT');
+      assert.equal(sentBodies[0].skipBackfill, true);
+      assert.equal(sentBodies[0].dailySummary, undefined);
+      assert.equal((sentBodies[0].leads as Lead[]).length, 50);
+      assert.equal(sentBodies[1].event, 'LEADS_BATCH_UPSERT');
+      assert.equal((sentBodies[1].leads as Lead[]).length, 50);
+      assert.equal(sentBodies[2].event, 'TEST_SYNC');
+      assert.equal(sentBodies[2].skipBackfill, false);
+      assert.ok(sentBodies[2].dailySummary);
+      assert.equal((sentBodies[2].leads as Lead[]).length, 20);
+      assert.ok(progressEvents.length >= 3);
+
+      // Superseding mid-flight stops subsequent batches cleanly
+      const controller = new AbortController();
+      let callCount = 0;
+      globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
+        callCount += 1;
+        if (callCount === 2) {
+          controller.abort(new DOMException('Superseded', SUPERSEDED_SYNC_ERROR_NAME));
+          throw init?.signal?.reason;
+        }
+        return new Response('', { status: 200 });
+      }) as typeof fetch;
+
+      const supRes = await pushChunkedSheetsSync(
+        'https://script.google.com/macros/s/test/exec',
+        { event: 'TEST_SYNC', leads },
+        { batchSize: 50, signal: controller.signal }
+      );
+      assert.equal(supRes.ok, false);
+      assert.equal(supRes.superseded, true);
+      assert.equal(callCount, 2);
+
+      // Mid-batch timeout surfaces batch index clearly
+      let failCall = 0;
+      globalThis.fetch = ((_input: unknown, init?: RequestInit) => {
+        failCall += 1;
+        if (failCall === 1) {
+          return Promise.resolve(new Response('', { status: 200 }));
+        }
+        return new Promise((_resolve, reject) => {
+          const sig = init?.signal;
+          sig?.addEventListener('abort', () => reject(sig.reason), { once: true });
+        });
+      }) as typeof fetch;
+
+      const timeoutRes = await pushChunkedSheetsSync(
+        'https://script.google.com/macros/s/test/exec',
+        { event: 'TEST_SYNC', leads },
+        { batchSize: 50, timeoutMs: 20 }
+      );
+      assert.equal(timeoutRes.ok, false);
+      assert.equal(timeoutRes.timedOut, true);
+      assert.equal(timeoutRes.completedChunks, 1);
+      assert.ok((timeoutRes.error ?? '').includes('Batch 2/3:'));
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('executes optimized Code.gs doPost across 210 chunked leads in O(tabs) batched RPC calls without per-row scans', () => {
+    const rpcCounts = {
+      getValues: 0,
+      setValues: 0,
+      appendRow: 0,
+      deleteRow: 0,
+      deleteRows: 0,
+      getSheets: 0,
+    };
+
+    const makeInstrumentedSheet = (name: string) => {
+      const rows: unknown[][] = [];
+      return {
+        getName: () => name,
+        appendRow: (row: unknown[]) => {
+          rpcCounts.appendRow += 1;
+          rows.push([...row]);
+        },
+        getLastRow: () => rows.length,
+        getLastColumn: () => (rows[0] ? rows[0].length : 0),
+        getDataRange: () => ({
+          getValues: () => {
+            rpcCounts.getValues += 1;
+            return rows.map((r) => [...r]);
+          },
+        }),
+        getRange: (row: number, col: number, numRows: number, numCols: number) => ({
+          setFontWeight: () => {},
+          getValues: () => {
+            rpcCounts.getValues += 1;
+            const out: unknown[][] = [];
+            for (let r = row - 1; r < row - 1 + numRows; r++) {
+              const src = rows[r] ?? [];
+              const slice: unknown[] = [];
+              for (let c = col - 1; c < col - 1 + numCols; c++) {
+                slice.push(src[c] ?? '');
+              }
+              out.push(slice);
+            }
+            return out;
+          },
+          setValues: (newVals: unknown[][]) => {
+            rpcCounts.setValues += 1;
+            for (let r = 0; r < numRows; r++) {
+              const targetIdx = row - 1 + r;
+              while (rows.length <= targetIdx) rows.push([]);
+              for (let c = 0; c < numCols; c++) {
+                rows[targetIdx][col - 1 + c] = newVals[r][c];
+              }
+            }
+          },
+        }),
+        deleteRows: (rowNum: number, howMany: number) => {
+          rpcCounts.deleteRows += 1;
+          rows.splice(rowNum - 1, howMany);
+        },
+        deleteRow: (rowNum: number) => {
+          rpcCounts.deleteRow += 1;
+          rows.splice(rowNum - 1, 1);
+        },
+        setFrozenRows: () => {},
+        _rows: rows,
+      };
+    };
+
+    const sheetsMap = new Map<string, ReturnType<typeof makeInstrumentedSheet>>();
+    const mockSpreadsheet = {
+      getSheetByName: (name: string) => sheetsMap.get(name) ?? null,
+      insertSheet: (name: string) => {
+        const s = makeInstrumentedSheet(name);
+        sheetsMap.set(name, s);
+        return s;
+      },
+      getSheets: () => {
+        rpcCounts.getSheets += 1;
+        return Array.from(sheetsMap.values());
+      },
+    };
+
+    const sandbox: Record<string, unknown> = {
+      SpreadsheetApp: { getActiveSpreadsheet: () => mockSpreadsheet },
+      Utilities: {
+        formatDate: (d: Date) => {
+          const ms = d.getTime() + 6 * 3600 * 1000;
+          return new Date(ms).toISOString().slice(0, 10);
+        },
+      },
+      ContentService: {
+        MimeType: { JSON: 'JSON' },
+        createTextOutput: (txt: string) => ({
+          setMimeType: () => txt,
+        }),
+      },
+    };
+    vm.createContext(sandbox);
+    vm.runInContext(GOOGLE_APPS_SCRIPT_CODE, sandbox);
+    const doPost = sandbox.doPost as (e: { postData: { contents: string } }) => string;
+
+    const bulkLeads = Array.from({ length: 210 }, (_, idx) => makeTestLead(idx + 1));
+    const bulkPaid: PaidCustomer[] = bulkLeads
+      .filter((l) => l.status === 'Order Confirmed')
+      .map((l) => ({
+        id: `PC-${l.id}`,
+        leadId: l.id,
+        customerName: l.customerName,
+        phone: l.phone,
+        assignedAgentId: l.assignedAgentId,
+        assignedAgentName: l.assignedAgentName,
+        confirmedDate: '2026-11-23',
+        renewalDate: '2026-12-23',
+        renewalStatus: 'Active',
+        lastRenewedAt: null,
+        notes: l.notes,
+        createdAt: l.createdAt,
+        updatedAt: l.updatedAt,
+      }));
+
+    const chunks = buildSheetsSyncChunks({
+      event: 'TEST_SYNC',
+      leads: bulkLeads,
+      paidCustomers: bulkPaid,
+    });
+
+    for (const chunk of chunks) {
+      const payload = {
+        event: chunk.event,
+        leads: chunk.leads,
+        paidCustomers: chunk.paidCustomers,
+        agentNames: ['Tanjin', 'Kathy', 'Tania', 'Shanaz', 'Sizon', 'Sakib'],
+        collectorNames: ['Farhan', 'Naim'],
+        skipBackfill: chunk.skipBackfill,
+        ...(chunk.includeSummaries
+          ? {
+              dailySummary: {
+                date: '2026-11-23',
+                totalLeads: 210,
+                callsMadeToday: 0,
+                orderConfirmedCount: bulkPaid.length,
+                interestedCount: 210 - bulkPaid.length,
+                conversionRate: 10,
+              },
+            }
+          : {}),
+      };
+      const out = JSON.parse(doPost({ postData: { contents: JSON.stringify(payload) } }));
+      assert.equal(out.ok, true);
+    }
+
+    // All 210 leads written cleanly to Master_Data + split accurately across Collector_Farhan & Collector_Naim
+    assert.equal(sheetsMap.get('Master_Data')!._rows.length, 211); // 1 header + 210
+    assert.equal(sheetsMap.get('Collector_Farhan')!._rows.length, 106); // 1 header + 105
+    assert.equal(sheetsMap.get('Collector_Naim')!._rows.length, 106); // 1 header + 105
+    assert.equal(sheetsMap.get('Agent_Tanjin')!._rows.length, 71); // 1 header + 70
+    assert.equal(sheetsMap.get('Agent_Kathy')!._rows.length, 71); // 1 header + 70
+    assert.equal(sheetsMap.get('Agent_Sakib')!._rows.length, 71); // 1 header + 70
+    assert.equal(sheetsMap.get('Paid_Customers')!._rows.length, 1 + bulkPaid.length);
+
+    // Crucial performance invariant: batch writes instead of 210+ single-row setValues/appendRow RPCs
+    // Only sheet creation header appendRows (20 initial tabs) call appendRow; all 210+ data rows use batch setValues (~1 per modified tab per chunk)
+    assert.ok(
+      rpcCounts.appendRow <= 25,
+      `Expected appendRow only for initial tab headers (<=25), got ${rpcCounts.appendRow}`
+    );
+    assert.ok(
+      rpcCounts.setValues <= 60,
+      `Expected <= 60 batch setValues RPCs across 5 chunks (~1 per modified tab per chunk), got ${rpcCounts.setValues}`
+    );
+    assert.ok(
+      rpcCounts.getValues <= 90,
+      `Expected <= 90 single-tab getValues RPCs across 5 chunks, got ${rpcCounts.getValues}`
+    );
+    assert.ok(
+      rpcCounts.getSheets <= chunks.length,
+      `Expected <= ${chunks.length} getSheets RPCs, got ${rpcCounts.getSheets}`
+    );
+  });
+});
+
 
 
 

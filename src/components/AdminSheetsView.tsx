@@ -32,6 +32,7 @@ interface AdminSheetsViewProps {
   defaultWebhookUrl: string;
   lastSyncedAt: string | null;
   syncStatus: SyncStatus;
+  syncProgressText?: string | null;
   sheetDuplicateReport: SheetDuplicateReport;
   onSaveWebhookUrl: (url: string) => void;
   onTestAndSync: (url: string) => Promise<void>;
@@ -49,6 +50,7 @@ export function AdminSheetsView({
   defaultWebhookUrl,
   lastSyncedAt,
   syncStatus,
+  syncProgressText,
   sheetDuplicateReport,
   onSaveWebhookUrl,
   onTestAndSync,
@@ -198,7 +200,9 @@ export function AdminSheetsView({
                 Apps Script Webhook Endpoint
               </h2>
               <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                {lastSyncedAt
+                {syncStatus === 'syncing' && syncProgressText
+                  ? syncProgressText
+                  : lastSyncedAt
                   ? `Last synced: ${formatDateTime(lastSyncedAt)}`
                   : syncStatus === 'synced' || syncStatus === 'syncing'
                   ? 'Connected automatically using the default RunBD Google Sheets webhook.'
@@ -219,7 +223,7 @@ export function AdminSheetsView({
             {syncStatus === 'synced'
               ? 'Synced'
               : syncStatus === 'syncing'
-              ? 'Syncing...'
+              ? syncProgressText || 'Syncing...'
               : syncStatus === 'error'
               ? 'Sync Error'
               : 'Offline Local Mode'}
@@ -269,7 +273,7 @@ export function AdminSheetsView({
               className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-semibold transition-colors cursor-pointer"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${testing ? 'animate-spin' : ''}`} />
-              <span>{testing ? 'Syncing...' : 'Test & Push Sync'}</span>
+              <span>{testing ? syncProgressText || 'Syncing...' : 'Test & Push Sync'}</span>
             </button>
 
             <button
