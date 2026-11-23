@@ -6,6 +6,7 @@ import {
   DuplicateAttempt,
   Lead,
   PaidCustomer,
+  User,
 } from '../types';
 import { FinalDailySummary, getLocalDateString, normalizeBdPhone } from './leadLogic';
 import {
@@ -27,7 +28,9 @@ import {
   createSeedLeads,
   createSeedPaidCustomers,
   DEFAULT_SETTINGS,
+  DEMO_USERS,
 } from '../data/seedData';
+import { stripUserPassword } from './teamLogic';
 
 const ENV_GOOGLE_SHEET_WEBHOOK_URL =
   (import.meta as unknown as { env?: Record<string, string | undefined> }).env
@@ -47,6 +50,7 @@ const STORAGE_KEYS = {
   SETTINGS: 'runbd_settings_v2',
   WEBHOOK_VERSION: 'runbd_webhook_version_v1',
   SESSION_USER_ID: 'runbd_session_user_v2',
+  TEAM_MEMBERS: 'runbd_team_members_v1',
   THEME: 'runbd_theme_v1',
 };
 
@@ -102,6 +106,16 @@ export const storage = {
     safeRead<PaidCustomer[]>(STORAGE_KEYS.PAID_CUSTOMERS, createSeedPaidCustomers),
   savePaidCustomers: (customers: PaidCustomer[]) =>
     safeWrite(STORAGE_KEYS.PAID_CUSTOMERS, customers),
+
+  getTeamMembers: (): User[] =>
+    safeRead<User[]>(STORAGE_KEYS.TEAM_MEMBERS, () => DEMO_USERS.map(stripUserPassword)).map(
+      stripUserPassword
+    ),
+  saveTeamMembers: (members: User[]) =>
+    safeWrite(
+      STORAGE_KEYS.TEAM_MEMBERS,
+      members.map(stripUserPassword)
+    ),
 
   getSettings: (): AppSettings => {
     const settings = safeRead<AppSettings>(STORAGE_KEYS.SETTINGS, () => ({

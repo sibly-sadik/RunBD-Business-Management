@@ -131,6 +131,18 @@ describe('mergeRemoteLeads', () => {
     assert.equal(merged[0].phone, '01855123456');
     assert.equal(merged[0].collectorId, 'collector-farhan');
     assert.equal(merged[0].assignedAgentId, 'agent-kathy');
+
+    const kawsarMerged = mergeRemoteLeads([], [
+      {
+        id: 'LD-KAWSAR-1',
+        customerName: 'Kawsar Lead',
+        phone: '01911223344',
+        collectorName: 'Kawsar',
+        status: 'Pending',
+      },
+    ]);
+    assert.equal(kawsarMerged[0].collectorId, 'collector-kawsar');
+    assert.equal(kawsarMerged[0].collectorName, 'Kawsar');
   });
 
   it('keeps local unsynced leads, deduplicates by unique ID, and updates only when remote is newer', () => {

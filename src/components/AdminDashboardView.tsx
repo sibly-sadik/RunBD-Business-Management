@@ -6,7 +6,6 @@ import {
   PhoneCall,
   TrendingUp,
 } from 'lucide-react';
-import { CALL_CENTER_AGENTS, DATA_COLLECTORS } from '../data/seedData';
 import {
   CallLog,
   CallStatus,
@@ -15,6 +14,7 @@ import {
   DateRangePreset,
   DuplicateAttempt,
   Lead,
+  User,
 } from '../types';
 import {
   computeAgentPerformance,
@@ -29,6 +29,8 @@ import { KawsarPostsView } from './KawsarPostsView';
 import { RenewalAlertBanner } from './RenewalAlertBanner';
 
 interface AdminDashboardViewProps {
+  agents: User[];
+  collectors: User[];
   leads: Lead[];
   callLogs: CallLog[];
   duplicateAttempts: DuplicateAttempt[];
@@ -51,6 +53,8 @@ const DONUT_COLORS: Record<CallStatus, string> = {
 };
 
 export function AdminDashboardView({
+  agents,
+  collectors,
   leads,
   callLogs,
   duplicateAttempts,
@@ -68,8 +72,8 @@ export function AdminDashboardView({
   });
 
   const activeAgent = useMemo(
-    () => CALL_CENTER_AGENTS.find((a) => a.id === selectedAgentTab) ?? null,
-    [selectedAgentTab]
+    () => agents.find((a) => a.id === selectedAgentTab) ?? null,
+    [agents, selectedAgentTab]
   );
 
   const handleDownloadDailyReport = () => {
@@ -79,7 +83,7 @@ export function AdminDashboardView({
       '0'
     )}-${String(today.getDate()).padStart(2, '0')}`;
     const filename = `runbd_daily_report_${dateStamp}.csv`;
-    const csv = generateDailyReportCsv(CALL_CENTER_AGENTS, leads, callLogs, today);
+    const csv = generateDailyReportCsv(agents, leads, callLogs, today);
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -96,13 +100,13 @@ export function AdminDashboardView({
   );
 
   const agentPerf = useMemo(
-    () => computeAgentPerformance(CALL_CENTER_AGENTS, leads, callLogs, dateFilter),
-    [leads, callLogs, dateFilter]
+    () => computeAgentPerformance(agents, leads, callLogs, dateFilter),
+    [agents, leads, callLogs, dateFilter]
   );
 
   const collectorStats = useMemo(
-    () => computeCollectorStats(DATA_COLLECTORS, leads, duplicateAttempts),
-    [leads, duplicateAttempts]
+    () => computeCollectorStats(collectors, leads, duplicateAttempts),
+    [collectors, leads, duplicateAttempts]
   );
 
   const statusBreakdown = useMemo(() => {
@@ -159,7 +163,7 @@ export function AdminDashboardView({
           <p className="text-sm text-slate-500 dark:text-slate-400 mt-0.5">
             {activeAgent
               ? `Dedicated view of ${activeAgent.name}'s assigned leads, follow-ups, metrics, and call log history.`
-              : 'Real-time call center KPIs, 6-agent leaderboard, data collection, and Kawsar link posts.'}
+              : `Real-time call center KPIs, ${agents.length}-agent leaderboard, data collection, and Kawsar link posts.`}
           </p>
         </div>
 
@@ -240,7 +244,7 @@ export function AdminDashboardView({
           Overview
         </button>
 
-        {CALL_CENTER_AGENTS.map((agent) => {
+        {agents.map((agent) => {
           const count = leads.filter((l) => l.assignedAgentId === agent.id).length;
           const isSelected = selectedAgentTab === agent.id;
           return (
@@ -348,7 +352,7 @@ export function AdminDashboardView({
                 Agent Calls vs. Conversions
               </h2>
               <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                Comparing Tanjin, Kathy, Tania, Shanaz, Sizon, and Sakib
+                Comparing {agents.length > 0 ? agents.map((a) => a.name).join(', ') : 'active agents'}
               </p>
             </div>
             <div className="flex items-center gap-4 text-xs text-slate-600 dark:text-slate-400">

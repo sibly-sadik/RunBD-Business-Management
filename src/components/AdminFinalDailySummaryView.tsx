@@ -13,8 +13,7 @@ import {
   Share2,
   X,
 } from 'lucide-react';
-import { CALL_CENTER_AGENTS, DATA_COLLECTORS } from '../data/seedData';
-import { CallLog, ContentPost, Lead } from '../types';
+import { CallLog, ContentPost, Lead, User } from '../types';
 import {
   attemptNativePrint,
   downloadFinalDailySummaryPdf,
@@ -31,6 +30,8 @@ import {
 import { StatusBadge } from './StatusBadge';
 
 interface AdminFinalDailySummaryViewProps {
+  agents: User[];
+  collectors: User[];
   leads: Lead[];
   callLogs: CallLog[];
   contentPosts: ContentPost[];
@@ -38,6 +39,8 @@ interface AdminFinalDailySummaryViewProps {
 }
 
 export function AdminFinalDailySummaryView({
+  agents,
+  collectors,
   leads,
   callLogs,
   contentPosts,
@@ -61,14 +64,14 @@ export function AdminFinalDailySummaryView({
   const summary = useMemo(
     () =>
       computeFinalDailySummary(
-        CALL_CENTER_AGENTS,
-        DATA_COLLECTORS,
+        agents,
+        collectors,
         leads,
         callLogs,
         contentPosts,
         selectedDate
       ),
-    [leads, callLogs, contentPosts, selectedDate]
+    [agents, collectors, leads, callLogs, contentPosts, selectedDate]
   );
 
   const dateCalls = useMemo(
@@ -154,7 +157,8 @@ export function AdminFinalDailySummaryView({
           </h1>
           <p className="text-sm text-slate-500 dark:text-slate-400 mt-0.5">
             Strictly {isTodaySelected ? "today's" : `${summary.date}'s`} performance and completed
-            work across all 6 Call Center Agents, Data Collectors (Farhan &amp; Naim), and Kawsar.
+            work across all {agents.length} Call Center Agents, Data Collectors (
+            {collectors.length > 0 ? collectors.map((c) => c.name).join(', ') : 'Team'}), and Content Posters.
           </p>
         </div>
 
@@ -242,7 +246,7 @@ export function AdminFinalDailySummaryView({
         <div className="glass-panel rounded-2xl p-5 print:p-3 print:rounded-lg print:border print:border-slate-300">
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium text-slate-500 dark:text-slate-400">
-              Leads Collected (Farhan + Naim)
+              Leads Collected ({collectors.length > 0 ? collectors.map((c) => c.name).join(' + ') : 'Collectors'})
             </span>
             <Database className="w-4 h-4 text-amber-500 print:hidden" />
           </div>
@@ -401,7 +405,7 @@ export function AdminFinalDailySummaryView({
             <Database className="w-4 h-4 text-amber-500 shrink-0 print:hidden" />
             <div>
               <h2 className="text-base font-semibold text-slate-900 dark:text-white">
-                Data Collectors (Farhan &amp; Naim)
+                Data Collectors ({collectors.length > 0 ? collectors.map((c) => c.name).join(', ') : 'Team'})
               </h2>
               <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
                 Valid leads collected and entered on {summary.date}

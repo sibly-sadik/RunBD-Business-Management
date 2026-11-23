@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   ArrowRight,
   Database,
@@ -18,22 +18,45 @@ import { loginWithServer } from '../utils/apiSync';
 import { AppFooter } from './AppFooter';
 
 interface LoginScreenProps {
+  teamMembers?: User[];
   onLogin: (user: User) => void;
   theme: 'dark' | 'light';
   onToggleTheme: () => void;
 }
 
-export function LoginScreen({ onLogin, theme, onToggleTheme }: LoginScreenProps) {
+export function LoginScreen({
+  teamMembers,
+  onLogin,
+  theme,
+  onToggleTheme,
+}: LoginScreenProps) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
-  const adminUsers = DEMO_USERS.filter((u) => u.role === 'admin');
-  const agentUsers = DEMO_USERS.filter((u) => u.role === 'agent');
-  const collectorUsers = DEMO_USERS.filter((u) => u.role === 'collector');
-  const posterUsers = DEMO_USERS.filter((u) => u.role === 'poster');
+  const activeDirectory = useMemo(() => {
+    const source = teamMembers && teamMembers.length > 0 ? teamMembers : DEMO_USERS;
+    return source.filter((u) => u.isActive !== false);
+  }, [teamMembers]);
+
+  const adminUsers = useMemo(
+    () => activeDirectory.filter((u) => u.role === 'admin'),
+    [activeDirectory]
+  );
+  const agentUsers = useMemo(
+    () => activeDirectory.filter((u) => u.role === 'agent'),
+    [activeDirectory]
+  );
+  const collectorUsers = useMemo(
+    () => activeDirectory.filter((u) => u.role === 'collector'),
+    [activeDirectory]
+  );
+  const posterUsers = useMemo(
+    () => activeDirectory.filter((u) => u.role === 'poster'),
+    [activeDirectory]
+  );
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

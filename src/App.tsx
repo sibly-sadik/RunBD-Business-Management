@@ -4,6 +4,7 @@ import { AdminDashboardView } from './components/AdminDashboardView';
 import { AdminFinalDailySummaryView } from './components/AdminFinalDailySummaryView';
 import { AdminLeadsView } from './components/AdminLeadsView';
 import { AdminSheetsView } from './components/AdminSheetsView';
+import { AdminTeamManagementView } from './components/AdminTeamManagementView';
 import { AgentTodayCallsView } from './components/AgentTodayCallsView';
 import { AgentWorkspaceView } from './components/AgentWorkspaceView';
 import { DataCollectionView } from './components/DataCollectionView';
@@ -12,7 +13,7 @@ import { Layout, NavTab } from './components/Layout';
 import { LoginScreen } from './components/LoginScreen';
 import { PaidCustomersView } from './components/PaidCustomersView';
 import { ToastContainer } from './components/ToastContainer';
-import { CALL_CENTER_AGENTS, DATA_COLLECTORS, DEMO_USERS } from './data/seedData';
+import { DEMO_USERS } from './data/seedData';
 import {
   AppSettings,
   AuditAction,
@@ -55,9 +56,19 @@ import {
   upsertTodayCallLogInList,
 } from './utils/leadLogic';
 import {
+  createTeamMemberViaApi,
+  deleteTeamMemberViaApi,
+  fetchAdminTeamMembers,
+  fetchTeamDirectory,
   logoutFromServer,
   restoreServerSession,
+  updateTeamMemberViaApi,
 } from './utils/apiSync';
+import {
+  getCallCenterAgents,
+  getDataCollectors,
+  mergeTeamMembersWithFallback,
+} from './utils/teamLogic';
 import {
   checkLeadDuplicateInSupabase,
   checkPostDuplicateInSupabase,
@@ -136,11 +147,15 @@ export default function App() {
     null
   );
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
+  const [teamMembers, setTeamMembers] = useState<User[]>(() => storage.getTeamMembers());
+  const [teamLoading, setTeamLoading] = useState(false);
+  const [teamSchemaMissing, setTeamSchemaMissing] = useState(false);
 
   const leadsRef = useRef(leads);
   const callLogsRef = useRef(callLogs);
   const contentPostsRef = useRef(contentPosts);
   const paidCustomersRef = useRef(paidCustomers);
+  const teamMembersRef = useRef(teamMembers);
 
   useEffect(() => {
     leadsRef.current = leads;
@@ -157,6 +172,20 @@ export default function App() {
   useEffect(() => {
     paidCustomersRef.current = paidCustomers;
   }, [paidCustomers]);
+
+  useEffect(() => {
+    teamMembersRef.current = teamMembers;
+    storage.saveTeamMembers(teamMembers);
+  }, [teamMembers]);
+
+  const callCenterAgents = useMemo(
+    () => getCallCenterAgents(teamMembers),
+    [teamMembers]
+  );
+  const dataCollectors = useMemo(
+    () => getDataCollectors(teamMembers),
+    [teamMembers]
+  );
 
   // Sync theme class onto <html>
   useEffect(() => {
@@ -213,6 +242,42 @@ export default function App() {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
+  const refreshTeamMembers = useCallback(async (role?: User['role']) => {
+    setTeamLoading(true);
+    try {
+      if (role === 'admin') {
+        const adminRes = await fetchAdminTeamMembers();
+        if (adminRes.ok && adminRes.members) {
+          const merged = mergeTeamMembersWithFallback(adminRes.members, DEMO_USERS);
+          teamMembersRef.current = merged;
+          setTeamMembers(merged);
+          setTeamSchemaMissing(Boolean(adminRes.schemaMissing));
+          return;
+        }
+        if (adminRes.schemaMissing) {
+          setTeamSchemaMissing(true);
+        }
+      }
+
+      const dirRes = await fetchTeamDirectory();
+      if (dirRes.ok && dirRes.members.length > 0) {
+        const merged = mergeTeamMembersWithFallback(dirRes.members, DEMO_USERS);
+        teamMembersRef.current = merged;
+        setTeamMembers(merged);
+      }
+      if (typeof dirRes.schemaMissing === 'boolean') {
+        setTeamSchemaMissing(dirRes.schemaMissing);
+      }
+    } finally {
+      setTeamLoading(false);
+    }
+  }, []);
+
+  // Load active team directory on mount (powers dynamic Login Screen)
+  useEffect(() => {
+    void refreshTeamMembers();
+  }, [refreshTeamMembers]);
+
   // Restore verified session on reload (supports both Express API and static Shared App URL)
   useEffect(() => {
     const savedUserId = storage.getSessionUserId();
@@ -237,6 +302,8 @@ export default function App() {
     if (!currentUser) return;
     let active = true;
     const todayYmd = getLocalDateString();
+
+    void refreshTeamMembers(currentUser.role);
 
     void fetchBootstrapFromSupabase(currentUser.role, todayYmd).then((res) => {
       if (!active) return;
@@ -313,7 +380,7 @@ export default function App() {
     return () => {
       active = false;
     };
-  }, [addToast, currentUser]);
+  }, [addToast, currentUser, refreshTeamMembers]);
 
   const appendAudit = useCallback(
     (actor: User, action: AuditAction, details: string) => {
@@ -373,8 +440,8 @@ export default function App() {
           ...payload,
           dailySummary: buildDailySummary(nextLeads, nextCallLogs),
           finalDailySummary: computeFinalDailySummary(
-            CALL_CENTER_AGENTS,
-            DATA_COLLECTORS,
+            getCallCenterAgents(teamMembersRef.current),
+            getDataCollectors(teamMembersRef.current),
             nextLeads,
             nextCallLogs,
             nextContentPosts
@@ -671,7 +738,7 @@ export default function App() {
     if (currentUser) {
       appendAudit(currentUser, 'LOGOUT', 'Signed out of session');
     }
-    void logoutFromServer();
+    void logoutFromServer().then(() => refreshTeamMembers());
     setCurrentUser(null);
     storage.saveSessionUserId(null);
     addToast('info', 'Signed out', 'Your session has been closed.');
@@ -708,6 +775,15 @@ export default function App() {
   ): Lead => {
     const existingPhone =
       normalizeBdPhone(summary.phone) || summary.phone || fallbackPhone;
+    const matchedCollector = teamMembersRef.current.find(
+      (u) => u.name.toLowerCase() === summary.collectorName.trim().toLowerCase()
+    );
+    const matchedAgent = summary.assignedAgentName
+      ? teamMembersRef.current.find(
+          (u) =>
+            u.name.toLowerCase() === summary.assignedAgentName!.trim().toLowerCase()
+        )
+      : undefined;
     return {
       id: summary.id,
       customerName: summary.customerName,
@@ -716,10 +792,11 @@ export default function App() {
       facebookLink: summary.facebookLink,
       normalizedFacebookLink: normalizeFacebookUrl(summary.facebookLink),
       notes: '',
-      collectorId: `collector-${summary.collectorName.toLowerCase()}`,
+      collectorId:
+        matchedCollector?.id ?? `collector-${summary.collectorName.toLowerCase()}`,
       collectorName: summary.collectorName,
       assignedAgentId: summary.assignedAgentName
-        ? `agent-${summary.assignedAgentName.toLowerCase()}`
+        ? matchedAgent?.id ?? `agent-${summary.assignedAgentName.toLowerCase()}`
         : null,
       assignedAgentName: summary.assignedAgentName,
       status: summary.status,
@@ -963,9 +1040,10 @@ export default function App() {
       ? remoteSettingsRes.settings.roundRobinIndex
       : settings.roundRobinIndex;
 
+    const activeAgentsList = getCallCenterAgents(teamMembersRef.current);
     const { assignedLeads, nextIndex } = assignLeadsRoundRobin(
       [baseLead],
-      CALL_CENTER_AGENTS,
+      activeAgentsList,
       effectiveRoundRobinIndex,
       effectiveAutoAssign,
       effectiveDisabledIds
@@ -1204,11 +1282,12 @@ export default function App() {
     const effectiveRoundRobinIndex = remoteSettingsRes
       ? remoteSettingsRes.settings.roundRobinIndex
       : settings.roundRobinIndex;
-    const activeAgentsList = getActiveAgents(CALL_CENTER_AGENTS, effectiveDisabledIds);
+    const dynamicAgents = getCallCenterAgents(teamMembersRef.current);
+    const activeAgentsList = getActiveAgents(dynamicAgents, effectiveDisabledIds);
 
     const { assignedLeads, nextIndex } = assignLeadsRoundRobin(
       baseLeads,
-      CALL_CENTER_AGENTS,
+      dynamicAgents,
       effectiveRoundRobinIndex,
       effectiveAutoAssign,
       effectiveDisabledIds
@@ -1720,8 +1799,9 @@ export default function App() {
 
   // Admin handlers
   const handleToggleAutoAssign = (enabled: boolean) => {
+    const dynamicAgents = getCallCenterAgents(teamMembersRef.current);
     const activeAgentsList = getActiveAgents(
-      CALL_CENTER_AGENTS,
+      dynamicAgents,
       settings.disabledAgentIds
     );
     if (enabled && activeAgentsList.length === 0) {
@@ -1754,14 +1834,15 @@ export default function App() {
   };
 
   const handleToggleAgentAvailability = (agentId: string) => {
-    const agent = CALL_CENTER_AGENTS.find((a) => a.id === agentId);
+    const dynamicAgents = getCallCenterAgents(teamMembersRef.current);
+    const agent = dynamicAgents.find((a) => a.id === agentId);
     if (!agent) return;
 
     const currentDisabled = settings.disabledAgentIds ?? [];
     const isCurrentlyDisabled = currentDisabled.includes(agentId);
 
     if (!isCurrentlyDisabled) {
-      const remainingActiveCount = CALL_CENTER_AGENTS.filter(
+      const remainingActiveCount = dynamicAgents.filter(
         (a) => a.id !== agentId && !currentDisabled.includes(a.id)
       ).length;
       if (settings.autoAssignEnabled && remainingActiveCount === 0) {
@@ -1809,7 +1890,10 @@ export default function App() {
     const target = leadsRef.current.find((l) => l.id === leadId);
     if (!target) return;
 
-    const agent = CALL_CENTER_AGENTS.find((a) => a.id === newAgentId) ?? null;
+    const dynamicAgents = getCallCenterAgents(teamMembersRef.current, {
+      includeInactive: true,
+    });
+    const agent = dynamicAgents.find((a) => a.id === newAgentId) ?? null;
     const updated: Lead = {
       ...target,
       assignedAgentId: agent ? agent.id : null,
@@ -1842,6 +1926,155 @@ export default function App() {
       nextLeads,
       callLogsRef.current
     );
+  };
+
+  // Team Management handlers (Supabase persisted + Audit Logs)
+  const handleCreateTeamMember = async (input: {
+    name: string;
+    email: string;
+    role: User['role'];
+    password: string;
+    title?: string;
+  }): Promise<{ ok: boolean; error?: string }> => {
+    if (!currentUser || currentUser.role !== 'admin') {
+      return { ok: false, error: 'Only Admin / Supervisor can add team members.' };
+    }
+    const res = await createTeamMemberViaApi(input);
+    if (res.schemaMissing) {
+      setTeamSchemaMissing(true);
+    }
+    if (!res.ok || !res.member) {
+      return { ok: false, error: res.error ?? 'Failed to add team member.' };
+    }
+
+    setTeamSchemaMissing(false);
+    setTeamMembers((prev) => {
+      const next = [...prev.filter((m) => m.id !== res.member!.id), res.member!];
+      teamMembersRef.current = next;
+      return next;
+    });
+
+    appendAudit(
+      currentUser,
+      'TEAM_MEMBER_ADDED',
+      `Added ${res.member.role} account ${res.member.name} (${res.member.email})`
+    );
+    addToast(
+      'success',
+      'Team Member Added',
+      `${res.member.name} (${res.member.email}) can now sign in and join the workspace.`
+    );
+    return { ok: true };
+  };
+
+  const handleUpdateTeamMember = async (
+    memberId: string,
+    patch: {
+      name?: string;
+      role?: User['role'];
+      title?: string;
+      isActive?: boolean;
+      password?: string;
+    }
+  ): Promise<{ ok: boolean; error?: string }> => {
+    if (!currentUser || currentUser.role !== 'admin') {
+      return { ok: false, error: 'Only Admin / Supervisor can update team members.' };
+    }
+    const res = await updateTeamMemberViaApi(memberId, patch);
+    if (res.schemaMissing) {
+      setTeamSchemaMissing(true);
+    }
+    if (!res.ok || !res.member) {
+      addToast('error', 'Update Failed', res.error ?? 'Could not update team member.');
+      return { ok: false, error: res.error ?? 'Could not update team member.' };
+    }
+
+    setTeamSchemaMissing(false);
+    setTeamMembers((prev) => {
+      const next = prev.map((m) => (m.id === memberId ? res.member! : m));
+      teamMembersRef.current = next;
+      return next;
+    });
+    if (memberId === currentUser.id) {
+      setCurrentUser(res.member);
+    }
+
+    if (patch.password) {
+      appendAudit(
+        currentUser,
+        'TEAM_MEMBER_PASSWORD_RESET',
+        `Reset password for ${res.member.name} (${res.member.email})`
+      );
+      addToast(
+        'success',
+        'Password Reset',
+        `Updated credentials for ${res.member.name}.`
+      );
+    } else if (typeof patch.isActive === 'boolean') {
+      appendAudit(
+        currentUser,
+        'TEAM_MEMBER_STATUS_CHANGED',
+        `${patch.isActive ? 'Activated' : 'Deactivated'} ${res.member.role} ${res.member.name} (${res.member.email})`
+      );
+      addToast(
+        patch.isActive ? 'success' : 'info',
+        patch.isActive ? 'Member Activated' : 'Member Deactivated',
+        patch.isActive
+          ? `${res.member.name} is active across Login and team workflows.`
+          : `${res.member.name} has been deactivated and removed from active login and auto-assign.`
+      );
+    } else {
+      appendAudit(
+        currentUser,
+        'TEAM_MEMBER_UPDATED',
+        `Updated team member ${res.member.name} (${res.member.email} · ${res.member.role})`
+      );
+      addToast('success', 'Member Updated', `Saved changes for ${res.member.name}.`);
+    }
+
+    return { ok: true };
+  };
+
+  const handleDeleteTeamMember = async (
+    memberId: string
+  ): Promise<{ ok: boolean; error?: string }> => {
+    if (!currentUser || currentUser.role !== 'admin') {
+      return { ok: false, error: 'Only Admin / Supervisor can remove team members.' };
+    }
+    const target = teamMembersRef.current.find((m) => m.id === memberId);
+    const res = await deleteTeamMemberViaApi(memberId);
+    if (res.schemaMissing) {
+      setTeamSchemaMissing(true);
+    }
+    if (!res.ok) {
+      return { ok: false, error: res.error ?? 'Could not remove team member.' };
+    }
+
+    setTeamSchemaMissing(false);
+    setTeamMembers((prev) => {
+      const next = prev.filter((m) => m.id !== memberId);
+      teamMembersRef.current = next;
+      return next;
+    });
+
+    if (settings.disabledAgentIds.includes(memberId)) {
+      const nextSettings: AppSettings = {
+        ...settings,
+        disabledAgentIds: settings.disabledAgentIds.filter((id) => id !== memberId),
+      };
+      setSettings(nextSettings);
+      void saveSettingsInSupabase(nextSettings).catch(() => {});
+    }
+
+    const labelName = res.removedMember?.name ?? target?.name ?? memberId;
+    const labelEmail = res.removedMember?.email ?? target?.email ?? '';
+    appendAudit(
+      currentUser,
+      'TEAM_MEMBER_REMOVED',
+      `Removed team member ${labelName}${labelEmail ? ` (${labelEmail})` : ''}`
+    );
+    addToast('info', 'Team Member Removed', `${labelName} has been removed.`);
+    return { ok: true };
   };
 
   const handleSaveWebhookUrl = (url: string) => {
@@ -1948,6 +2181,7 @@ export default function App() {
     return (
       <>
         <LoginScreen
+          teamMembers={teamMembers}
           onLogin={handleLogin}
           theme={theme}
           onToggleTheme={handleToggleTheme}
@@ -1975,6 +2209,8 @@ export default function App() {
       >
         {currentUser.role === 'admin' && activeTab === 'admin-overview' && (
           <AdminDashboardView
+            agents={callCenterAgents}
+            collectors={dataCollectors}
             leads={leads}
             callLogs={callLogs}
             duplicateAttempts={duplicateAttempts}
@@ -1994,6 +2230,8 @@ export default function App() {
 
         {currentUser.role === 'admin' && activeTab === 'admin-final-summary' && (
           <AdminFinalDailySummaryView
+            agents={callCenterAgents}
+            collectors={dataCollectors}
             leads={leads}
             callLogs={callLogs}
             contentPosts={contentPosts}
@@ -2009,6 +2247,7 @@ export default function App() {
 
         {currentUser.role === 'admin' && activeTab === 'admin-leads' && (
           <AdminLeadsView
+            agents={callCenterAgents}
             leads={leads}
             autoAssignEnabled={settings.autoAssignEnabled}
             roundRobinIndex={settings.roundRobinIndex}
@@ -2027,6 +2266,7 @@ export default function App() {
           activeTab === 'paid-customers' && (
             <PaidCustomersView
               currentUser={currentUser}
+              agents={callCenterAgents}
               paidCustomers={paidCustomers}
               onMarkRenewed={handleMarkPaidCustomerRenewed}
               onUpdateRenewalStatus={
@@ -2087,6 +2327,20 @@ export default function App() {
 
         {currentUser.role === 'admin' && activeTab === 'admin-audit' && (
           <AdminAuditView auditLogs={auditLogs} />
+        )}
+
+        {currentUser.role === 'admin' && activeTab === 'admin-team' && (
+          <AdminTeamManagementView
+            currentUser={currentUser}
+            teamMembers={teamMembers}
+            loading={teamLoading}
+            schemaMissing={teamSchemaMissing}
+            onRefresh={() => refreshTeamMembers('admin')}
+            onOpenSheetsSettings={() => setActiveTab('admin-sheets')}
+            onCreateMember={handleCreateTeamMember}
+            onUpdateMember={handleUpdateTeamMember}
+            onDeleteMember={handleDeleteTeamMember}
+          />
         )}
 
         {currentUser.role === 'admin' && activeTab === 'admin-sheets' && (

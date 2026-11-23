@@ -492,8 +492,8 @@ export function AdminSheetsView({
             Consolidated Team Daily Report
           </p>
           <p className="mt-1 text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
-            Upserts one daily executive row combining all 6 agents&apos; calls &amp; orders, Farhan
-            &amp; Naim lead counts, and Kawsar&apos;s Facebook &amp; Website links.
+            Upserts one daily executive row combining all 6 agents&apos; calls &amp; orders, Data
+            Collectors (Farhan, Naim &amp; Kawsar) lead counts, and content post link totals.
           </p>
         </div>
 

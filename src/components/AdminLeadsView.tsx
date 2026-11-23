@@ -7,8 +7,7 @@ import {
   Repeat,
   Search,
 } from 'lucide-react';
-import { CALL_CENTER_AGENTS } from '../data/seedData';
-import { CALL_STATUSES, CallStatus, Lead } from '../types';
+import { CALL_STATUSES, CallStatus, Lead, User } from '../types';
 import {
   buildTelUrl,
   filterTodayLeads,
@@ -23,6 +22,7 @@ import {
 import { StatusBadge } from './StatusBadge';
 
 interface AdminLeadsViewProps {
+  agents: User[];
   leads: Lead[];
   autoAssignEnabled: boolean;
   roundRobinIndex: number;
@@ -35,6 +35,7 @@ interface AdminLeadsViewProps {
 }
 
 export function AdminLeadsView({
+  agents,
   leads,
   autoAssignEnabled,
   roundRobinIndex,
@@ -56,11 +57,11 @@ export function AdminLeadsView({
 
   const disabledSet = useMemo(() => new Set(disabledAgentIds), [disabledAgentIds]);
   const activeAgents = useMemo(
-    () => getActiveAgents(CALL_CENTER_AGENTS, disabledAgentIds),
-    [disabledAgentIds]
+    () => getActiveAgents(agents, disabledAgentIds),
+    [agents, disabledAgentIds]
   );
   const nextAgent =
-    getNextRoundRobinAgent(CALL_CENTER_AGENTS, roundRobinIndex, disabledAgentIds)?.name ??
+    getNextRoundRobinAgent(agents, roundRobinIndex, disabledAgentIds)?.name ??
     'None';
 
   const filteredLeads = useMemo(() => {
@@ -156,7 +157,7 @@ export function AdminLeadsView({
             data-testid="agent-availability-toggles"
             className="flex flex-wrap items-center gap-1.5"
           >
-            {CALL_CENTER_AGENTS.map((agent) => {
+            {agents.map((agent) => {
               const isActive = !disabledSet.has(agent.id);
               return (
                 <button
@@ -238,7 +239,7 @@ export function AdminLeadsView({
             >
               <option value="ALL">All Agents</option>
               <option value="UNASSIGNED">Unassigned</option>
-              {CALL_CENTER_AGENTS.map((a) => (
+              {agents.map((a) => (
                 <option key={a.id} value={a.id}>
                   {a.name}
                 </option>
@@ -268,7 +269,9 @@ export function AdminLeadsView({
         {filteredLeads.length === 0 ? (
           <div className="p-10 text-center text-sm text-slate-500 dark:text-slate-400">
             {todayLeads.length === 0
-              ? `No leads collected today (${todayStr}) yet. Add leads from Data Collection to distribute across the 6 agents.`
+              ? `No leads collected today (${todayStr}) yet. Add leads from Data Collection to distribute across ${
+                  activeAgents.length > 0 ? `${activeAgents.length} active agent${activeAgents.length === 1 ? '' : 's'}` : 'your Call Center Agents'
+                }.`
               : 'No leads match your current search or filter.'}
           </div>
         ) : (
@@ -343,7 +346,7 @@ export function AdminLeadsView({
                       className="px-2.5 py-1.5 text-xs font-medium rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
                     >
                       <option value="">Unassigned</option>
-                      {CALL_CENTER_AGENTS.map((agent) => (
+                      {agents.map((agent) => (
                         <option key={agent.id} value={agent.id}>
                           {agent.name}
                           {disabledSet.has(agent.id) ? ' (OFF)' : ''}

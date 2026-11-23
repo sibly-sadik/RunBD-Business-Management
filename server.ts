@@ -26,7 +26,13 @@ import {
 } from './src/middleware/auth.ts';
 import { createSessionToken } from './src/server/auth.ts';
 import { getTodayYmdServer } from './src/server/helpers.ts';
-import { authenticateServerTeamUser } from './src/server/teamUsers.ts';
+import {
+  authenticateServerTeamUser,
+  createTeamMemberInSupabase,
+  deleteTeamMemberInSupabase,
+  listTeamMembersFromServer,
+  updateTeamMemberInSupabase,
+} from './src/server/teamUsers.ts';
 import type {
   AppSettings,
   AuditLog,
@@ -35,6 +41,7 @@ import type {
   DuplicateAttempt,
   Lead,
   PaidCustomer,
+  UserRole,
 } from './src/types/index.ts';
 
 dotenv.config();
@@ -75,6 +82,157 @@ app.get('/api/health', (_req, res) => {
   res.json({ ok: true });
 });
 
+// Public active directory for Login screen (strictly public fields — zero password hashes/salts)
+app.get('/api/team-members/directory', async (_req, res) => {
+  try {
+    const result = await listTeamMembersFromServer({ includeInactive: false });
+    res.json({
+      ok: true,
+      members: result.members,
+      schemaMissing: Boolean(result.schemaMissing),
+    });
+  } catch (error) {
+    console.error('Failed to load team directory:', error);
+    res.status(500).json({ ok: false, error: 'Failed to load authorized team directory.' });
+  }
+});
+
+// Admin-only full team management list (active + deactivated members; zero password hashes/salts)
+app.get('/api/team-members', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    if (req.authUser?.role !== 'admin') {
+      res.status(403).json({ error: 'Only Admin / Supervisor can manage team members.' });
+      return;
+    }
+    const result = await listTeamMembersFromServer({ includeInactive: true });
+    res.json({
+      ok: true,
+      members: result.members,
+      schemaMissing: Boolean(result.schemaMissing),
+    });
+  } catch (error) {
+    console.error('Failed to fetch team members:', error);
+    res.status(500).json({ error: 'Failed to fetch team members.' });
+  }
+});
+
+// Admin-only create team member (hashes password with random salt + scrypt on server)
+app.post('/api/team-members', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    if (req.authUser?.role !== 'admin') {
+      res.status(403).json({ error: 'Only Admin / Supervisor can add team members.' });
+      return;
+    }
+    const body = req.body as {
+      name?: unknown;
+      email?: unknown;
+      role?: unknown;
+      password?: unknown;
+      title?: unknown;
+    } | undefined;
+
+    const result = await createTeamMemberInSupabase({
+      name: typeof body?.name === 'string' ? body.name : '',
+      email: typeof body?.email === 'string' ? body.email : '',
+      role: typeof body?.role === 'string' ? body.role : '',
+      password: typeof body?.password === 'string' ? body.password : '',
+      title: typeof body?.title === 'string' ? body.title : undefined,
+    });
+
+    if (!result.ok || !result.member) {
+      res.status(result.status).json({
+        ok: false,
+        schemaMissing: Boolean(result.schemaMissing),
+        error: result.error ?? 'Failed to add team member.',
+      });
+      return;
+    }
+
+    res.status(201).json({ ok: true, member: result.member });
+  } catch (error) {
+    console.error('Failed to create team member:', error);
+    res.status(500).json({ error: 'Failed to add team member.' });
+  }
+});
+
+// Admin-only update member profile, reset password, or toggle active/deactivated status
+app.patch('/api/team-members/:id', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    if (req.authUser?.role !== 'admin') {
+      res.status(403).json({ error: 'Only Admin / Supervisor can update team members.' });
+      return;
+    }
+    const memberId = String(req.params.id || '').trim();
+    if (!memberId) {
+      res.status(400).json({ error: 'Team member ID is required.' });
+      return;
+    }
+    const body = req.body as {
+      name?: unknown;
+      role?: unknown;
+      title?: unknown;
+      isActive?: unknown;
+      password?: unknown;
+    } | undefined;
+
+    const result = await updateTeamMemberInSupabase(memberId, req.authUser.id, {
+      name: typeof body?.name === 'string' ? body.name : undefined,
+      role: typeof body?.role === 'string' ? (body.role as UserRole) : undefined,
+      title: typeof body?.title === 'string' ? body.title : undefined,
+      isActive: typeof body?.isActive === 'boolean' ? body.isActive : undefined,
+      password: typeof body?.password === 'string' ? body.password : undefined,
+    });
+
+    if (!result.ok || !result.member) {
+      res.status(result.status).json({
+        ok: false,
+        schemaMissing: Boolean(result.schemaMissing),
+        error: result.error ?? 'Failed to update team member.',
+      });
+      return;
+    }
+
+    res.json({
+      ok: true,
+      member: result.member,
+      previousMember: result.previousMember,
+    });
+  } catch (error) {
+    console.error('Failed to update team member:', error);
+    res.status(500).json({ error: 'Failed to update team member.' });
+  }
+});
+
+// Admin-only delete team member
+app.delete('/api/team-members/:id', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    if (req.authUser?.role !== 'admin') {
+      res.status(403).json({ error: 'Only Admin / Supervisor can remove team members.' });
+      return;
+    }
+    const memberId = String(req.params.id || '').trim();
+    if (!memberId) {
+      res.status(400).json({ error: 'Team member ID is required.' });
+      return;
+    }
+
+    const result = await deleteTeamMemberInSupabase(memberId, req.authUser.id);
+    if (!result.ok) {
+      res.status(result.status).json({
+        ok: false,
+        schemaMissing: Boolean(result.schemaMissing),
+        error: result.error ?? 'Failed to remove team member.',
+      });
+      return;
+    }
+
+    res.json({ ok: true, removedMember: result.removedMember });
+  } catch (error) {
+    console.error('Failed to delete team member:', error);
+    res.status(500).json({ error: 'Failed to remove team member.' });
+  }
+});
+
 // Authentication routes
 app.post('/api/auth/login', async (req, res) => {
   try {
@@ -87,14 +245,21 @@ app.post('/api/auth/login', async (req, res) => {
       return;
     }
 
-    const user = authenticateServerTeamUser(username, password);
-    if (!user) {
+    const authResult = await authenticateServerTeamUser(username, password);
+    if (authResult.ok === false) {
+      if (authResult.reason === 'inactive') {
+        res.status(403).json({
+          error: 'This account has been deactivated by an Admin. Please contact your Supervisor.',
+        });
+        return;
+      }
       res.status(401).json({
         error: 'Invalid username or password. Please verify your assigned RunBD credentials.',
       });
       return;
     }
 
+    const user = authResult.user;
     const token = createSessionToken(user);
     res.setHeader('Set-Cookie', buildSessionCookieHeader(req, token, 60 * 60 * 24 * 7));
     res.json({ user, token });

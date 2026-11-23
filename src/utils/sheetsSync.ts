@@ -480,6 +480,7 @@ function resolveCollectorIdFromName(name: string, explicitId?: unknown): string 
   const lower = name.trim().toLowerCase();
   if (lower === 'naim') return 'collector-naim';
   if (lower === 'farhan') return 'collector-farhan';
+  if (lower === 'kawsar') return 'collector-kawsar';
   if (lower.includes('jahid') || lower === 'admin') return 'admin-1';
   if (!lower) return 'collector-farhan';
   return `collector-${lower.replace(/[^a-z0-9]+/g, '-')}`;

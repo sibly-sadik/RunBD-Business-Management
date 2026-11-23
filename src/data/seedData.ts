@@ -516,7 +516,7 @@ function doPost(e) {
         for (var li = 0; li < payload.leads.length; li++) {
           var leadItem = payload.leads[li];
           upsertRowById(masterSheet, leadItem.id, formatMasterRow(leadItem));
-          syncLeadAcrossAgentTabs(agentSheets, leadItem);
+          syncLeadAcrossAgentTabs(ss, agentSheets, leadItem);
         }
       }
       if (Array.isArray(payload.callLogs)) {
@@ -541,14 +541,14 @@ function doPost(e) {
       }
     } else if (payload.event === 'LEAD_UPSERT' && payload.lead) {
       upsertRowById(masterSheet, payload.lead.id, formatMasterRow(payload.lead));
-      syncLeadAcrossAgentTabs(agentSheets, payload.lead);
+      syncLeadAcrossAgentTabs(ss, agentSheets, payload.lead);
       if (payload.paidCustomer) {
         upsertRowById(paidSheet, payload.paidCustomer.id, formatPaidCustomerRow(payload.paidCustomer));
       }
     } else if (payload.event === 'CALL_LOGGED' && payload.callLog) {
       if (payload.lead) {
         upsertRowById(masterSheet, payload.lead.id, formatMasterRow(payload.lead));
-        syncLeadAcrossAgentTabs(agentSheets, payload.lead);
+        syncLeadAcrossAgentTabs(ss, agentSheets, payload.lead);
       }
       upsertCallLogRow(logsSheet, payload.callLog);
       if (payload.paidCustomer) {
@@ -649,11 +649,18 @@ function formatPaidCustomerRow(pc) {
   ];
 }
 
-function syncLeadAcrossAgentTabs(agentSheets, lead) {
-  for (var i = 0; i < AGENT_NAMES.length; i++) {
-    var name = AGENT_NAMES[i];
-    var sheet = agentSheets[name];
-    if (lead.assignedAgentName === name) {
+function syncLeadAcrossAgentTabs(ss, agentSheets, lead) {
+  var targetName = lead.assignedAgentName ? String(lead.assignedAgentName).trim() : '';
+  if (targetName && !agentSheets[targetName]) {
+    agentSheets[targetName] = getOrCreateSheet(ss, 'Agent_' + targetName, AGENT_TAB_HEADERS);
+  }
+  var allSheets = ss.getSheets();
+  for (var i = 0; i < allSheets.length; i++) {
+    var sheet = allSheets[i];
+    var sheetName = sheet.getName();
+    if (sheetName.indexOf('Agent_') !== 0 || sheetName === 'Agent_Logs') continue;
+    var tabAgentName = sheetName.slice('Agent_'.length);
+    if (targetName && tabAgentName === targetName) {
       upsertRowById(sheet, lead.id, formatAgentRow(lead));
     } else {
       deleteRowById(sheet, lead.id);

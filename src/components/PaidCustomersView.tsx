@@ -10,7 +10,6 @@ import {
   RefreshCw,
   Search,
 } from 'lucide-react';
-import { CALL_CENTER_AGENTS } from '../data/seedData';
 import { PaidCustomer, RENEWAL_STATUSES, RenewalStatus, User } from '../types';
 import {
   buildTelUrl,
@@ -23,6 +22,7 @@ import {
 
 interface PaidCustomersViewProps {
   currentUser: User;
+  agents: User[];
   paidCustomers: PaidCustomer[];
   onMarkRenewed: (customerId: string) => void;
   onUpdateRenewalStatus?: (customerId: string, status: RenewalStatus) => void;
@@ -60,6 +60,7 @@ function formatDaysRemainingLabel(daysRemaining: number): string {
 
 export function PaidCustomersView({
   currentUser,
+  agents,
   paidCustomers,
   onMarkRenewed,
   onUpdateRenewalStatus,
@@ -263,7 +264,7 @@ export function PaidCustomersView({
               >
                 <option value="ALL">All Agents</option>
                 <option value="UNASSIGNED">Unassigned</option>
-                {CALL_CENTER_AGENTS.map((a) => (
+                {agents.map((a) => (
                   <option key={a.id} value={a.id}>
                     {a.name}
                   </option>

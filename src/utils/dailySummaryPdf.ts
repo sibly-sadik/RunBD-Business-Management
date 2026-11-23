@@ -55,7 +55,7 @@ export function buildFinalDailySummaryPdfDoc(
     head: [[
       `Total Calls (${summary.date})`,
       'Orders Confirmed',
-      'Leads Collected (Farhan + Naim)',
+      `Leads Collected (${summary.collectors.map((c) => c.collectorName).join(' + ')})`,
       'Kawsar Links Posted',
     ]],
     body: [[
@@ -122,7 +122,11 @@ export function buildFinalDailySummaryPdfDoc(
   y = getCursorY(doc, y + 40);
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(10.5);
-  doc.text(`Data Collectors — Farhan & Naim (${summary.date})`, margin, y);
+  doc.text(
+    `Data Collectors — ${summary.collectors.map((c) => c.collectorName).join(', ')} (${summary.date})`,
+    margin,
+    y
+  );
 
   autoTable(doc, {
     startY: y + 2.5,

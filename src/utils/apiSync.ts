@@ -8,8 +8,12 @@ import {
   Lead,
   PaidCustomer,
   User,
+  UserRole,
 } from '../types';
+import { supabase } from '../lib/supabase';
 import { authenticateUser } from './leadLogic';
+import { stripUserPassword } from './teamLogic';
+import { storage } from './storage';
 
 let inMemoryAuthToken: string | null = null;
 
@@ -38,15 +42,7 @@ async function apiFetch(input: string, init: RequestInit = {}): Promise<Response
 }
 
 function toClientUser(raw: Omit<User, 'password'> & { password?: string }): User {
-  return {
-    id: raw.id,
-    name: raw.name,
-    email: raw.email,
-    password: '',
-    role: raw.role,
-    title: raw.title,
-    avatarInitials: raw.avatarInitials,
-  };
+  return stripUserPassword(raw);
 }
 
 export async function loginWithServer(
@@ -113,8 +109,244 @@ export async function restoreServerSession(
   }
 
   if (!savedUserId) return null;
+  const cachedMatched = storage
+    .getTeamMembers()
+    .find((u) => u.id === savedUserId && u.isActive !== false);
+  if (cachedMatched) return toClientUser(cachedMatched);
+
   const matched = DEMO_USERS.find((u) => u.id === savedUserId);
   return matched ? toClientUser(matched) : null;
+}
+
+export async function fetchTeamDirectory(): Promise<{
+  ok: boolean;
+  members: User[];
+  schemaMissing?: boolean;
+}> {
+  try {
+    const res = await apiFetch('/api/team-members/directory', { method: 'GET' });
+    const contentType = res.headers.get('content-type') || '';
+    if (res.ok && contentType.includes('application/json')) {
+      const data = (await res.json()) as {
+        ok?: boolean;
+        members?: Array<Omit<User, 'password'>>;
+        schemaMissing?: boolean;
+      };
+      if (data.ok && Array.isArray(data.members) && data.members.length > 0) {
+        return {
+          ok: true,
+          members: data.members.map(toClientUser),
+          schemaMissing: Boolean(data.schemaMissing),
+        };
+      }
+    }
+  } catch {
+    // Fall through to direct Supabase public directory query
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from('team_members')
+      .select('id, name, email, role, title, avatar_initials, is_active, created_at')
+      .eq('is_active', true);
+
+    if (!error && Array.isArray(data) && data.length > 0) {
+      return {
+        ok: true,
+        members: data.map((row) =>
+          toClientUser({
+            id: String(row.id),
+            name: String(row.name),
+            email: String(row.email),
+            role: row.role as UserRole,
+            title: String(row.title || ''),
+            avatarInitials: String(row.avatar_initials || ''),
+            isActive: row.is_active !== false,
+            createdAt: typeof row.created_at === 'string' ? row.created_at : undefined,
+          })
+        ),
+      };
+    }
+  } catch {
+    // Fall through to cached / default team members
+  }
+
+  return {
+    ok: false,
+    members: DEMO_USERS.map(toClientUser),
+  };
+}
+
+export async function fetchAdminTeamMembers(): Promise<{
+  ok: boolean;
+  members?: User[];
+  schemaMissing?: boolean;
+  error?: string;
+}> {
+  try {
+    const res = await apiFetch('/api/team-members', { method: 'GET' });
+    const contentType = res.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      return { ok: false, error: 'Team Management API unavailable in current preview mode.' };
+    }
+    const data = (await res.json()) as {
+      ok?: boolean;
+      members?: Array<Omit<User, 'password'>>;
+      schemaMissing?: boolean;
+      error?: string;
+    };
+    if (!res.ok || !data.ok) {
+      return {
+        ok: false,
+        schemaMissing: Boolean(data.schemaMissing),
+        error: data.error ?? `HTTP ${res.status}`,
+      };
+    }
+    return {
+      ok: true,
+      members: (data.members ?? []).map(toClientUser),
+      schemaMissing: Boolean(data.schemaMissing),
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : 'Failed to load team members.',
+    };
+  }
+}
+
+export async function createTeamMemberViaApi(input: {
+  name: string;
+  email: string;
+  role: UserRole;
+  password: string;
+  title?: string;
+}): Promise<{
+  ok: boolean;
+  member?: User;
+  schemaMissing?: boolean;
+  error?: string;
+}> {
+  try {
+    const res = await apiFetch('/api/team-members', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+    const contentType = res.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      return { ok: false, error: 'Team Management server endpoint is unavailable.' };
+    }
+    const data = (await res.json()) as {
+      ok?: boolean;
+      member?: Omit<User, 'password'>;
+      schemaMissing?: boolean;
+      error?: string;
+    };
+    if (!res.ok || !data.ok || !data.member) {
+      return {
+        ok: false,
+        schemaMissing: Boolean(data.schemaMissing),
+        error: data.error ?? `HTTP ${res.status}`,
+      };
+    }
+    return { ok: true, member: toClientUser(data.member) };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : 'Failed to create team member.',
+    };
+  }
+}
+
+export async function updateTeamMemberViaApi(
+  memberId: string,
+  patch: {
+    name?: string;
+    role?: UserRole;
+    title?: string;
+    isActive?: boolean;
+    password?: string;
+  }
+): Promise<{
+  ok: boolean;
+  member?: User;
+  previousMember?: User;
+  schemaMissing?: boolean;
+  error?: string;
+}> {
+  try {
+    const res = await apiFetch(`/api/team-members/${encodeURIComponent(memberId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    });
+    const contentType = res.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      return { ok: false, error: 'Team Management server endpoint is unavailable.' };
+    }
+    const data = (await res.json()) as {
+      ok?: boolean;
+      member?: Omit<User, 'password'>;
+      previousMember?: Omit<User, 'password'>;
+      schemaMissing?: boolean;
+      error?: string;
+    };
+    if (!res.ok || !data.ok || !data.member) {
+      return {
+        ok: false,
+        schemaMissing: Boolean(data.schemaMissing),
+        error: data.error ?? `HTTP ${res.status}`,
+      };
+    }
+    return {
+      ok: true,
+      member: toClientUser(data.member),
+      previousMember: data.previousMember ? toClientUser(data.previousMember) : undefined,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : 'Failed to update team member.',
+    };
+  }
+}
+
+export async function deleteTeamMemberViaApi(memberId: string): Promise<{
+  ok: boolean;
+  removedMember?: User;
+  schemaMissing?: boolean;
+  error?: string;
+}> {
+  try {
+    const res = await apiFetch(`/api/team-members/${encodeURIComponent(memberId)}`, {
+      method: 'DELETE',
+    });
+    const contentType = res.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      return { ok: false, error: 'Team Management server endpoint is unavailable.' };
+    }
+    const data = (await res.json()) as {
+      ok?: boolean;
+      removedMember?: Omit<User, 'password'>;
+      schemaMissing?: boolean;
+      error?: string;
+    };
+    if (!res.ok || !data.ok) {
+      return {
+        ok: false,
+        schemaMissing: Boolean(data.schemaMissing),
+        error: data.error ?? `HTTP ${res.status}`,
+      };
+    }
+    return {
+      ok: true,
+      removedMember: data.removedMember ? toClientUser(data.removedMember) : undefined,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : 'Failed to remove team member.',
+    };
+  }
 }
 
 export async function logoutFromServer(): Promise<void> {

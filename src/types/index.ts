@@ -29,6 +29,8 @@ export interface User {
   role: UserRole;
   title: string;
   avatarInitials: string;
+  isActive?: boolean;
+  createdAt?: string;
 }
 
 export interface Lead {
@@ -77,7 +79,12 @@ export type AuditAction =
   | 'SHEETS_SYNCED'
   | 'POST_LINK_LOGGED'
   | 'PAID_CUSTOMER_ADDED'
-  | 'PAID_CUSTOMER_RENEWED';
+  | 'PAID_CUSTOMER_RENEWED'
+  | 'TEAM_MEMBER_ADDED'
+  | 'TEAM_MEMBER_UPDATED'
+  | 'TEAM_MEMBER_PASSWORD_RESET'
+  | 'TEAM_MEMBER_STATUS_CHANGED'
+  | 'TEAM_MEMBER_REMOVED';
 
 export interface AuditLog {
   id: string;

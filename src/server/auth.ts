@@ -28,6 +28,8 @@ export function sanitizeUser(user: User): PublicUser {
     role: user.role,
     title: user.title,
     avatarInitials: user.avatarInitials,
+    isActive: user.isActive !== false,
+    createdAt: user.createdAt,
   };
 }
 

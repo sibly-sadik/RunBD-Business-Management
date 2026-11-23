@@ -19,6 +19,11 @@ const ACTION_LABELS: Record<AuditAction, string> = {
   POST_LINK_LOGGED: 'Post Link Logged',
   PAID_CUSTOMER_ADDED: 'Paid Customer Added',
   PAID_CUSTOMER_RENEWED: 'Customer Renewed (+1 Mo)',
+  TEAM_MEMBER_ADDED: 'Team Member Added',
+  TEAM_MEMBER_UPDATED: 'Team Member Updated',
+  TEAM_MEMBER_PASSWORD_RESET: 'Password Reset',
+  TEAM_MEMBER_STATUS_CHANGED: 'Member Status Changed',
+  TEAM_MEMBER_REMOVED: 'Team Member Removed',
 };
 
 export function AdminAuditView({ auditLogs }: AdminAuditViewProps) {

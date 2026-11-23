@@ -130,6 +130,24 @@ CREATE TABLE IF NOT EXISTS public.app_settings (
 ALTER TABLE public.app_settings
   ADD COLUMN IF NOT EXISTS disabled_agents JSONB NOT NULL DEFAULT '[]'::jsonb;
 
+-- 8. Team Members table (Dynamic Admin-managed Agents, Collectors, Posters & Admins)
+CREATE TABLE IF NOT EXISTS public.team_members (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  email TEXT NOT NULL UNIQUE,
+  role TEXT NOT NULL CHECK (role IN ('admin', 'agent', 'collector', 'poster')),
+  title TEXT NOT NULL DEFAULT '',
+  avatar_initials TEXT NOT NULL DEFAULT '',
+  password_hash TEXT NOT NULL,
+  password_salt TEXT NOT NULL,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_team_members_email_lower ON public.team_members (LOWER(email));
+CREATE INDEX IF NOT EXISTS idx_team_members_role_active ON public.team_members (role, is_active);
+
 -- Disable Row Level Security (RLS) so team workspaces read/write immediately with the configured Supabase client
 ALTER TABLE public.leads DISABLE ROW LEVEL SECURITY;
 ALTER TABLE public.call_logs DISABLE ROW LEVEL SECURITY;
@@ -138,3 +156,4 @@ ALTER TABLE public.kawsar_posts DISABLE ROW LEVEL SECURITY;
 ALTER TABLE public.duplicate_attempts DISABLE ROW LEVEL SECURITY;
 ALTER TABLE public.audit_logs DISABLE ROW LEVEL SECURITY;
 ALTER TABLE public.app_settings DISABLE ROW LEVEL SECURITY;
+ALTER TABLE public.team_members DISABLE ROW LEVEL SECURITY;

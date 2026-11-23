@@ -44,7 +44,8 @@ import {
   renewPaidCustomer,
   upsertTodayCallLogInList,
 } from './leadLogic';
-import { DEMO_USERS } from '../data/seedData';
+import { DATA_COLLECTORS, DEMO_USERS } from '../data/seedData';
+import { authenticateServerTeamUser } from '../server/teamUsers';
 import { CALL_STATUSES, CallLog, ContentPost, DuplicateAttempt, Lead, PaidCustomer, User } from '../types';
 
 const mockAgents: User[] = [
@@ -309,29 +310,45 @@ test('openWhatsAppChat reuses single named tab runbd_whatsapp_tab and falls back
   assert.equal(removed, true);
 });
 
-test('authenticateUser verifies exact credentials for Admin, 6 Call Center Agents, and 2 Data Collectors (Farhan & Naim)', () => {
-  const validPairs: Array<[string, string, string, string]> = [
-    ['admin@runbd', 'admin@/#312', 'admin', 'Jahid Islam'],
-    ['tazin@runbd', 'tazin@/#312', 'agent', 'Tanjin'],
-    ['kathy@runbd', 'kathy@/#312', 'agent', 'Kathy'],
-    ['tania@runbd', 'tania@/#312', 'agent', 'Tania'],
-    ['shanaz@runbd', 'shanaz@/#312', 'agent', 'Shanaz'],
-    ['sizon@runbd', 'sizon@/#312', 'agent', 'Sizon'],
-    ['sakib@runbd', 'sakib@/#312', 'agent', 'Sakib'],
-    ['farhan@runbd', 'farhan@/#312', 'collector', 'Farhan'],
-    ['naim@runbd', 'naim@/#312', 'collector', 'Naim'],
-    ['kawsar@runbd', 'kawsar@/#312', 'poster', 'Kawsar'],
+test('authenticateUser and authenticateServerTeamUser verify credentials for Admin, 6 Call Center Agents, and 3 Data Collectors (Farhan, Naim & Kawsar)', () => {
+  const validPairs: Array<[string, string, string, string, string]> = [
+    ['admin@runbd', 'admin@/#312', 'admin', 'Jahid Islam', 'admin-1'],
+    ['tazin@runbd', 'tazin@/#312', 'agent', 'Tanjin', 'agent-tanjin'],
+    ['kathy@runbd', 'kathy@/#312', 'agent', 'Kathy', 'agent-kathy'],
+    ['tania@runbd', 'tania@/#312', 'agent', 'Tania', 'agent-tania'],
+    ['shanaz@runbd', 'shanaz@/#312', 'agent', 'Shanaz', 'agent-shanaz'],
+    ['sizon@runbd', 'sizon@/#312', 'agent', 'Sizon', 'agent-sizon'],
+    ['sakib@runbd', 'sakib@/#312', 'agent', 'Sakib', 'agent-sakib'],
+    ['farhan@runbd', 'farhan@/#312', 'collector', 'Farhan', 'collector-farhan'],
+    ['naim@runbd', 'naim@/#312', 'collector', 'Naim', 'collector-naim'],
+    ['kawsar@runbd', 'kawsar@/#312', 'collector', 'Kawsar', 'collector-kawsar'],
   ];
 
-  for (const [username, password, expectedRole, expectedName] of validPairs) {
+  for (const [username, password, expectedRole, expectedName, expectedId] of validPairs) {
     const user = authenticateUser(DEMO_USERS, username, password);
-    assert.ok(user, `Expected valid login for ${username}`);
+    assert.ok(user, `Expected valid client login for ${username}`);
     assert.equal(user.role, expectedRole);
     assert.equal(user.name, expectedName);
+    assert.equal(user.id, expectedId);
+
+    const serverUser = authenticateServerTeamUser(username, password);
+    assert.ok(serverUser, `Expected valid server login for ${username}`);
+    assert.equal(serverUser.role, expectedRole);
+    assert.equal(serverUser.name, expectedName);
+    assert.equal(serverUser.id, expectedId);
   }
+
+  assert.equal(DATA_COLLECTORS.length, 3);
+  assert.deepEqual(
+    DATA_COLLECTORS.map((c) => c.name),
+    ['Farhan', 'Naim', 'Kawsar']
+  );
 
   // Case-insensitive username, case-sensitive exact password
   assert.equal(authenticateUser(DEMO_USERS, 'TAZIN@RUNBD', 'tazin@/#312')?.name, 'Tanjin');
+  assert.equal(authenticateUser(DEMO_USERS, 'KAWSAR@RUNBD', 'kawsar@/#312')?.id, 'collector-kawsar');
+  assert.equal(authenticateUser(DEMO_USERS, 'kawsar@runbd', 'Kawsar@/#312'), null);
+  assert.equal(authenticateServerTeamUser('kawsar@runbd', 'wrong'), null);
   assert.equal(authenticateUser(DEMO_USERS, 'tazin@runbd', 'Tazin@/#312'), null);
   // Cross-agent password rejected
   assert.equal(authenticateUser(DEMO_USERS, 'tazin@runbd', 'kathy@/#312'), null);

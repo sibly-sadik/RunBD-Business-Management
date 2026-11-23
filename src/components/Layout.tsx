@@ -18,6 +18,7 @@ import {
   PhoneCall,
   RefreshCw,
   Sun,
+  UserCog,
   Users,
   X,
 } from 'lucide-react';
@@ -33,6 +34,7 @@ export type NavTab =
   | 'data-collection'
   | 'kawsar-posts'
   | 'admin-audit'
+  | 'admin-team'
   | 'admin-sheets'
   | 'agent-workspace'
   | 'agent-today-calls';
@@ -115,6 +117,7 @@ export function Layout({
           { id: 'data-collection', label: 'Data Collection', icon: Database },
           { id: 'kawsar-posts', label: 'Kawsar Posts Log', icon: Link2 },
           { id: 'admin-audit', label: 'Audit Logs', icon: History },
+          { id: 'admin-team', label: 'Team Management', icon: UserCog },
           { id: 'admin-sheets', label: 'Google Sheets Sync', icon: FileSpreadsheet },
         ]
       : user.role === 'agent'
