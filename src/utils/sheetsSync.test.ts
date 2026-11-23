@@ -28,6 +28,15 @@ import {
   resolveWebhookUrl,
   sanitizeSheetTabSuffix,
 } from './sheetsSync';
+import {
+  createTimeoutAbortReason,
+  DEFAULT_SHEETS_SYNC_TIMEOUT_MS,
+  describeWebhookFetchError,
+  FULL_SYNC_TIMEOUT_MS,
+  pullFromGoogleSheetsWebhook,
+  pushToGoogleSheetsWebhook,
+  SUPERSEDED_SYNC_ERROR_NAME,
+} from './storage';
 
 describe('Google Sheets default webhook URL resolution', () => {
   it('uses the updated RunBD Apps Script deployment URL as the hardcoded fallback', () => {
@@ -1135,6 +1144,95 @@ describe('Per-Collector and Per-Agent Google Sheets tab naming & Apps Script tem
     assert.equal(sheetsMap.get('Paid_Nusrat')!._rows.length, 1); // header only
     assert.equal(sheetsMap.get('Paid_Tanjin')!._rows.length, 2);
     assert.equal(sheetsMap.get('Paid_Tanjin')!._rows[1][6], 'Tanjin');
+  });
+});
+
+describe('Google Sheets sync timeout, abort reason & concurrency safety', () => {
+  it('configures >= 45s default timeouts and descriptive AbortError DOMException reasons', () => {
+    assert.ok(DEFAULT_SHEETS_SYNC_TIMEOUT_MS >= 45000);
+    assert.ok(FULL_SYNC_TIMEOUT_MS >= 45000);
+
+    const reason = createTimeoutAbortReason(45000);
+    assert.equal(reason.name, 'AbortError');
+    assert.equal(reason.message, 'Google Sheets sync timed out after 45s');
+
+    const rawAbortMsg = describeWebhookFetchError(
+      new DOMException('signal is aborted without reason', 'AbortError'),
+      45000
+    );
+    assert.equal(rawAbortMsg.includes('signal is aborted without reason'), false);
+    assert.ok(rawAbortMsg.includes('timed out after 45s'));
+
+    const rawStringMsg = describeWebhookFetchError('signal is aborted without reason', 45000);
+    assert.equal(rawStringMsg.includes('signal is aborted without reason'), false);
+    assert.ok(rawStringMsg.includes('timed out after 45s'));
+  });
+
+  it('aborts hanging push/pull calls cleanly with explicit timeout reason and handles superseded requests without erroring', async () => {
+    const origFetch = globalThis.fetch;
+    let capturedSignalReason: unknown = null;
+
+    globalThis.fetch = ((_input: unknown, init?: RequestInit) =>
+      new Promise((_resolve, reject) => {
+        const sig = init?.signal;
+        if (!sig) return;
+        const onAbort = () => {
+          capturedSignalReason = sig.reason;
+          reject(sig.reason ?? new DOMException('signal is aborted without reason', 'AbortError'));
+        };
+        if (sig.aborted) {
+          onAbort();
+        } else {
+          sig.addEventListener('abort', onAbort, { once: true });
+        }
+      })) as typeof fetch;
+
+    try {
+      const pushTimeoutRes = await pushToGoogleSheetsWebhook(
+        'https://script.google.com/macros/s/test/exec',
+        {
+          event: 'TEST_SYNC',
+          dailySummary: {
+            date: '2026-11-23',
+            totalLeads: 1,
+            callsMadeToday: 0,
+            orderConfirmedCount: 0,
+            interestedCount: 0,
+            conversionRate: 0,
+          },
+        },
+        { timeoutMs: 25 }
+      );
+      assert.equal(pushTimeoutRes.ok, false);
+      assert.equal(pushTimeoutRes.timedOut, true);
+      assert.equal(pushTimeoutRes.superseded, undefined);
+      assert.ok(capturedSignalReason instanceof DOMException);
+      assert.equal((capturedSignalReason as DOMException).name, 'AbortError');
+      assert.ok((pushTimeoutRes.error ?? '').includes('Google Apps Script'));
+
+      const pullTimeoutRes = await pullFromGoogleSheetsWebhook(
+        'https://script.google.com/macros/s/test/exec',
+        { timeoutMs: 25 }
+      );
+      assert.equal(pullTimeoutRes.ok, false);
+      assert.equal(pullTimeoutRes.timedOut, true);
+      assert.ok((pullTimeoutRes.error ?? '').includes('Google Apps Script'));
+
+      const externalController = new AbortController();
+      const pendingPull = pullFromGoogleSheetsWebhook(
+        'https://script.google.com/macros/s/test/exec',
+        { timeoutMs: 45000, signal: externalController.signal }
+      );
+      externalController.abort(
+        new DOMException('Superseded by newer sync', SUPERSEDED_SYNC_ERROR_NAME)
+      );
+      const supersededRes = await pendingPull;
+      assert.equal(supersededRes.ok, false);
+      assert.equal(supersededRes.superseded, true);
+      assert.equal(supersededRes.timedOut, undefined);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
   });
 });
 

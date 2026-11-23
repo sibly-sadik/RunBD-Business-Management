@@ -259,6 +259,113 @@ export interface SheetsSyncPayload {
   finalDailySummary?: FinalDailySummary;
 }
 
+export const DEFAULT_SHEETS_SYNC_TIMEOUT_MS = 45000;
+export const FULL_SYNC_TIMEOUT_MS = 60000;
+export const SUPERSEDED_SYNC_ERROR_NAME = 'SupersededSyncError';
+
+export function createTimeoutAbortReason(timeoutMs: number): DOMException {
+  const secs = Math.max(1, Math.round(timeoutMs / 1000));
+  return new DOMException(`Google Sheets sync timed out after ${secs}s`, 'AbortError');
+}
+
+export function isSupersededSyncError(err: unknown): boolean {
+  if (!err) return false;
+  if (err instanceof Error || (typeof err === 'object' && 'name' in err)) {
+    return String((err as { name?: unknown }).name ?? '') === SUPERSEDED_SYNC_ERROR_NAME;
+  }
+  return false;
+}
+
+export function isAbortOrTimeoutError(err: unknown): boolean {
+  if (!err || isSupersededSyncError(err)) return false;
+  if (typeof err === 'string') {
+    const lower = err.toLowerCase();
+    return lower.includes('abort') || lower.includes('timed out') || lower.includes('timeout');
+  }
+  if (err instanceof Error || (typeof err === 'object' && 'name' in err)) {
+    const e = err as { name?: unknown; message?: unknown };
+    const name = String(e.name ?? '');
+    const msg = String(e.message ?? '').toLowerCase();
+    return (
+      name === 'AbortError' ||
+      name === 'TimeoutError' ||
+      msg.includes('signal is aborted') ||
+      msg.includes('aborted') ||
+      msg.includes('timed out')
+    );
+  }
+  return false;
+}
+
+function createLinkedTimeoutController(
+  timeoutMs: number,
+  externalSignal?: AbortSignal
+): {
+  signal: AbortSignal;
+  getAbortReason: () => unknown;
+  cleanup: () => void;
+} {
+  const controller = new AbortController();
+  const timeoutReason = createTimeoutAbortReason(timeoutMs);
+  const timer = setTimeout(() => {
+    if (!controller.signal.aborted) {
+      controller.abort(timeoutReason);
+    }
+  }, timeoutMs);
+
+  const handleExternalAbort = () => {
+    if (!controller.signal.aborted) {
+      const reason =
+        externalSignal?.reason ??
+        new DOMException('Superseded by newer Google Sheets sync request', SUPERSEDED_SYNC_ERROR_NAME);
+      controller.abort(reason);
+    }
+  };
+
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      handleExternalAbort();
+    } else {
+      externalSignal.addEventListener('abort', handleExternalAbort, { once: true });
+    }
+  }
+
+  return {
+    signal: controller.signal,
+    getAbortReason: () => controller.signal.reason,
+    cleanup: () => {
+      clearTimeout(timer);
+      if (externalSignal) {
+        externalSignal.removeEventListener('abort', handleExternalAbort);
+      }
+    },
+  };
+}
+
+export function describeWebhookFetchError(err: unknown, timeoutMs: number): string {
+  if (isSupersededSyncError(err)) {
+    return 'Replaced by a newer Google Sheets sync request.';
+  }
+  if (isAbortOrTimeoutError(err)) {
+    const secs = Math.max(1, Math.round(timeoutMs / 1000));
+    return `Google Sheets sync timed out after ${secs}s while Google Apps Script was still processing your spreadsheet tabs. Wait a few seconds and try again.`;
+  }
+  if (err instanceof Error) {
+    if (err instanceof TypeError) {
+      return 'Network or CORS error reaching Google Sheets webhook. Verify internet connection and Apps Script Web App "Anyone" access.';
+    }
+    return err.message;
+  }
+  return 'Unable to reach Google Sheets webhook';
+}
+
+export interface PushSheetsResult {
+  ok: boolean;
+  error?: string;
+  timedOut?: boolean;
+  superseded?: boolean;
+}
+
 /**
  * Triggers a real-time sync POST request to the configured Google Apps Script Web App URL.
  * Uses `text/plain` content-type to avoid CORS preflight failures with Google Apps Script.
@@ -266,8 +373,8 @@ export interface SheetsSyncPayload {
 export async function pushToGoogleSheetsWebhook(
   webhookUrl: string,
   payload: SheetsSyncPayload,
-  options?: { timeoutMs?: number }
-): Promise<{ ok: boolean; error?: string }> {
+  options?: { timeoutMs?: number; signal?: AbortSignal }
+): Promise<PushSheetsResult> {
   const trimmed = webhookUrl.trim();
   if (!trimmed) {
     return { ok: false, error: 'No webhook URL configured' };
@@ -279,11 +386,15 @@ export async function pushToGoogleSheetsWebhook(
     return { ok: false, error: 'Invalid webhook URL format' };
   }
 
-  const controller = new AbortController();
   const timeoutMs =
     options?.timeoutMs ??
-    (payload.event === 'FULL_SYNC' || payload.event === 'TEST_SYNC' ? 30000 : 10000);
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+    (payload.event === 'FULL_SYNC' || payload.event === 'TEST_SYNC'
+      ? FULL_SYNC_TIMEOUT_MS
+      : DEFAULT_SHEETS_SYNC_TIMEOUT_MS);
+  const { signal, getAbortReason, cleanup } = createLinkedTimeoutController(
+    timeoutMs,
+    options?.signal
+  );
 
   try {
     await fetch(trimmed, {
@@ -293,16 +404,28 @@ export async function pushToGoogleSheetsWebhook(
         'Content-Type': 'text/plain;charset=utf-8',
       },
       body: JSON.stringify(payload),
-      signal: controller.signal,
+      signal,
     });
     return { ok: true };
   } catch (err) {
+    const reason = getAbortReason();
+    const effectiveErr =
+      isSupersededSyncError(reason) || isAbortOrTimeoutError(reason) ? reason : err;
+    if (isSupersededSyncError(effectiveErr)) {
+      return {
+        ok: false,
+        superseded: true,
+        error: describeWebhookFetchError(effectiveErr, timeoutMs),
+      };
+    }
+    const timedOut = isAbortOrTimeoutError(effectiveErr);
     return {
       ok: false,
-      error: err instanceof Error ? err.message : 'Network error syncing to Google Sheets',
+      timedOut,
+      error: describeWebhookFetchError(effectiveErr, timeoutMs),
     };
   } finally {
-    clearTimeout(timer);
+    cleanup();
   }
 }
 
@@ -311,6 +434,8 @@ export interface PullSheetsResult {
   pulledData: boolean;
   data?: ParsedPullPayload;
   error?: string;
+  timedOut?: boolean;
+  superseded?: boolean;
 }
 
 /**
@@ -319,7 +444,12 @@ export interface PullSheetsResult {
  */
 export async function pullFromGoogleSheetsWebhook(
   webhookUrl: string,
-  options?: { timeoutMs?: number; scope?: 'today' | 'all'; date?: string }
+  options?: {
+    timeoutMs?: number;
+    scope?: 'today' | 'all';
+    date?: string;
+    signal?: AbortSignal;
+  }
 ): Promise<PullSheetsResult> {
   const trimmed = webhookUrl.trim();
   if (!trimmed) {
@@ -344,15 +474,17 @@ export async function pullFromGoogleSheetsWebhook(
     return { ok: false, pulledData: false, error: 'Invalid webhook URL format' };
   }
 
-  const controller = new AbortController();
-  const timeoutMs = options?.timeoutMs ?? 15000;
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const timeoutMs = options?.timeoutMs ?? DEFAULT_SHEETS_SYNC_TIMEOUT_MS;
+  const { signal, getAbortReason, cleanup } = createLinkedTimeoutController(
+    timeoutMs,
+    options?.signal
+  );
 
   try {
     const res = await fetch(targetUrl, {
       method: 'GET',
       redirect: 'follow',
-      signal: controller.signal,
+      signal,
     });
     if (!res.ok) {
       return { ok: false, pulledData: false, error: `HTTP ${res.status}` };
@@ -372,27 +504,27 @@ export async function pullFromGoogleSheetsWebhook(
       scope === 'today' ? filterPullPayloadByDate(parsedData, targetDate) : parsedData;
     return { ok: true, pulledData: true, data };
   } catch (err) {
+    const reason = getAbortReason();
+    const effectiveErr =
+      isSupersededSyncError(reason) || isAbortOrTimeoutError(reason) ? reason : err;
+    if (isSupersededSyncError(effectiveErr)) {
+      return {
+        ok: false,
+        pulledData: false,
+        superseded: true,
+        error: describeWebhookFetchError(effectiveErr, timeoutMs),
+      };
+    }
+    const timedOut = isAbortOrTimeoutError(effectiveErr);
     return {
       ok: false,
       pulledData: false,
-      error: err instanceof Error ? err.message : 'Unable to fetch remote data',
+      timedOut,
+      error: describeWebhookFetchError(effectiveErr, timeoutMs),
     };
   } finally {
-    clearTimeout(timer);
+    cleanup();
   }
-}
-
-function describeWebhookFetchError(err: unknown, timeoutMs: number): string {
-  if (err instanceof Error) {
-    if (err.name === 'AbortError') {
-      return `Google Sheets webhook timed out after ${Math.round(timeoutMs / 1000)}s.`;
-    }
-    if (err instanceof TypeError) {
-      return 'Network or CORS error reaching Google Sheets webhook. Verify internet connection and Apps Script Web App "Anyone" access.';
-    }
-    return err.message;
-  }
-  return 'Unable to reach Google Sheets webhook';
 }
 
 function isHtmlAuthOrErrorPage(text: string): boolean {
@@ -437,15 +569,14 @@ export async function checkLeadDuplicateInSheets(
     return { ok: false, isDuplicate: false, error: 'Invalid webhook URL format' };
   }
 
-  const controller = new AbortController();
-  const timeoutMs = options?.timeoutMs ?? 15000;
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const timeoutMs = options?.timeoutMs ?? 20000;
+  const { signal, getAbortReason, cleanup } = createLinkedTimeoutController(timeoutMs);
 
   try {
     const res = await fetch(targetUrl, {
       method: 'GET',
       redirect: 'follow',
-      signal: controller.signal,
+      signal,
     });
     if (!res.ok) {
       const error = `Google Sheets webhook returned HTTP ${res.status}. Verify Web App deployment ("Execute as: Me", "Who has access: Anyone").`;
@@ -477,7 +608,9 @@ export async function checkLeadDuplicateInSheets(
     }
     return parsedResult;
   } catch (err) {
-    const error = describeWebhookFetchError(err, timeoutMs);
+    const reason = getAbortReason();
+    const effectiveErr = isAbortOrTimeoutError(reason) ? reason : err;
+    const error = describeWebhookFetchError(effectiveErr, timeoutMs);
     console.error('[RunBD Sheets Lead Check Network Error]', error, err);
     return {
       ok: false,
@@ -485,7 +618,7 @@ export async function checkLeadDuplicateInSheets(
       error,
     };
   } finally {
-    clearTimeout(timer);
+    cleanup();
   }
 }
 
@@ -521,15 +654,14 @@ export async function checkPostDuplicateInSheets(
     return { ok: false, isDuplicate: false, error: 'Invalid webhook URL format' };
   }
 
-  const controller = new AbortController();
-  const timeoutMs = options?.timeoutMs ?? 15000;
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const timeoutMs = options?.timeoutMs ?? 20000;
+  const { signal, getAbortReason, cleanup } = createLinkedTimeoutController(timeoutMs);
 
   try {
     const res = await fetch(targetUrl, {
       method: 'GET',
       redirect: 'follow',
-      signal: controller.signal,
+      signal,
     });
     if (!res.ok) {
       const error = `Google Sheets webhook returned HTTP ${res.status}. Verify Web App deployment ("Execute as: Me", "Who has access: Anyone").`;
@@ -561,7 +693,9 @@ export async function checkPostDuplicateInSheets(
     }
     return parsedResult;
   } catch (err) {
-    const error = describeWebhookFetchError(err, timeoutMs);
+    const reason = getAbortReason();
+    const effectiveErr = isAbortOrTimeoutError(reason) ? reason : err;
+    const error = describeWebhookFetchError(effectiveErr, timeoutMs);
     console.error('[RunBD Sheets Post Check Network Error]', error, err);
     return {
       ok: false,
@@ -569,7 +703,7 @@ export async function checkPostDuplicateInSheets(
       error,
     };
   } finally {
-    clearTimeout(timer);
+    cleanup();
   }
 }
 

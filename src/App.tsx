@@ -107,10 +107,16 @@ import {
   checkLeadDuplicateInSheets,
   checkPostDuplicateInSheets,
   DEFAULT_GOOGLE_SHEETS_WEBHOOK_URL,
+  DEFAULT_SHEETS_SYNC_TIMEOUT_MS,
+  describeWebhookFetchError,
+  FULL_SYNC_TIMEOUT_MS,
+  isAbortOrTimeoutError,
+  isSupersededSyncError,
   pullFromGoogleSheetsWebhook,
   pushToGoogleSheetsWebhook,
   SheetsSyncPayload,
   storage,
+  SUPERSEDED_SYNC_ERROR_NAME,
 } from './utils/storage';
 
 function defaultTabForRole(role: User['role']): NavTab {
@@ -430,6 +436,31 @@ export default function App() {
   );
 
   const syncRequestIdRef = useRef(0);
+  const manualSyncControllerRef = useRef<AbortController | null>(null);
+  const activeManualSyncCountRef = useRef(0);
+
+  const beginManualSyncController = useCallback((): AbortController => {
+    if (manualSyncControllerRef.current && !manualSyncControllerRef.current.signal.aborted) {
+      manualSyncControllerRef.current.abort(
+        new DOMException(
+          'Superseded by newer manual Google Sheets sync request',
+          SUPERSEDED_SYNC_ERROR_NAME
+        )
+      );
+    }
+    const nextController = new AbortController();
+    manualSyncControllerRef.current = nextController;
+    activeManualSyncCountRef.current += 1;
+    return nextController;
+  }, []);
+
+  const endManualSyncController = useCallback((controller: AbortController | null) => {
+    if (!controller) return;
+    activeManualSyncCountRef.current = Math.max(0, activeManualSyncCountRef.current - 1);
+    if (manualSyncControllerRef.current === controller) {
+      manualSyncControllerRef.current = null;
+    }
+  }, []);
 
   const triggerRealtimeSync = useCallback(
     async (
@@ -437,15 +468,27 @@ export default function App() {
       payload: Omit<SheetsSyncPayload, 'dailySummary' | 'finalDailySummary'>,
       nextLeads: Lead[],
       nextCallLogs: CallLog[],
-      nextContentPosts: ContentPost[] = contentPosts
-    ) => {
+      nextContentPosts: ContentPost[] = contentPosts,
+      syncOptions?: { isManual?: boolean; signal?: AbortSignal; timeoutMs?: number }
+    ): Promise<{ ok: boolean; error?: string; timedOut?: boolean; superseded?: boolean }> => {
       if (!webhookUrl.trim()) {
         setSyncStatus('offline');
-        return { ok: false };
+        return { ok: false, error: 'No webhook URL configured' };
       }
 
+      const isManual = Boolean(syncOptions?.isManual);
       const reqId = ++syncRequestIdRef.current;
-      setSyncStatus('syncing');
+      const shouldManageStatus = isManual || activeManualSyncCountRef.current === 0;
+      if (shouldManageStatus) {
+        setSyncStatus('syncing');
+      }
+
+      const effectiveTimeoutMs =
+        syncOptions?.timeoutMs ??
+        (payload.event === 'FULL_SYNC' || payload.event === 'TEST_SYNC'
+          ? FULL_SYNC_TIMEOUT_MS
+          : DEFAULT_SHEETS_SYNC_TIMEOUT_MS);
+
       try {
         const dynamicAgents = getCallCenterAgents(teamMembersRef.current);
         const dynamicCollectors = getDataCollectors(teamMembersRef.current);
@@ -459,23 +502,31 @@ export default function App() {
           ? enrichPaidCustomersForSheetSync(payload.paidCustomers, enrichmentLeads)
           : undefined;
 
-        const res = await pushToGoogleSheetsWebhook(webhookUrl, {
-          ...payload,
-          ...(enrichedPaidCustomer ? { paidCustomer: enrichedPaidCustomer } : {}),
-          ...(enrichedPaidCustomers ? { paidCustomers: enrichedPaidCustomers } : {}),
-          agentNames: payload.agentNames ?? dynamicAgents.map((a) => a.name),
-          collectorNames: payload.collectorNames ?? dynamicCollectors.map((c) => c.name),
-          dailySummary: buildDailySummary(nextLeads, nextCallLogs),
-          finalDailySummary: computeFinalDailySummary(
-            dynamicAgents,
-            dynamicCollectors,
-            nextLeads,
-            nextCallLogs,
-            nextContentPosts
-          ),
-        });
+        const res = await pushToGoogleSheetsWebhook(
+          webhookUrl,
+          {
+            ...payload,
+            ...(enrichedPaidCustomer ? { paidCustomer: enrichedPaidCustomer } : {}),
+            ...(enrichedPaidCustomers ? { paidCustomers: enrichedPaidCustomers } : {}),
+            agentNames: payload.agentNames ?? dynamicAgents.map((a) => a.name),
+            collectorNames: payload.collectorNames ?? dynamicCollectors.map((c) => c.name),
+            dailySummary: buildDailySummary(nextLeads, nextCallLogs),
+            finalDailySummary: computeFinalDailySummary(
+              dynamicAgents,
+              dynamicCollectors,
+              nextLeads,
+              nextCallLogs,
+              nextContentPosts
+            ),
+          },
+          { timeoutMs: effectiveTimeoutMs, signal: syncOptions?.signal }
+        );
 
-        if (reqId === syncRequestIdRef.current) {
+        if (res.superseded) {
+          return res;
+        }
+
+        if (reqId === syncRequestIdRef.current && (isManual || activeManualSyncCountRef.current === 0)) {
           if (res.ok) {
             setSyncStatus('synced');
             setSettings((prev) => ({ ...prev, lastSyncedAt: new Date().toISOString() }));
@@ -485,12 +536,16 @@ export default function App() {
         }
         return res;
       } catch (err) {
-        if (reqId === syncRequestIdRef.current) {
+        if (isSupersededSyncError(err)) {
+          return { ok: false, superseded: true, error: describeWebhookFetchError(err, effectiveTimeoutMs) };
+        }
+        if (reqId === syncRequestIdRef.current && (isManual || activeManualSyncCountRef.current === 0)) {
           setSyncStatus('error');
         }
         return {
           ok: false,
-          error: err instanceof Error ? err.message : 'Network error syncing to Google Sheets',
+          timedOut: isAbortOrTimeoutError(err),
+          error: describeWebhookFetchError(err, effectiveTimeoutMs),
         };
       }
     },
@@ -591,7 +646,7 @@ export default function App() {
   const syncFromSheets = useCallback(
     async (
       webhookUrl: string,
-      options?: { notify?: boolean; scope?: 'today' | 'all' }
+      options?: { notify?: boolean; scope?: 'today' | 'all'; isManual?: boolean }
     ) => {
       const targetUrl = webhookUrl.trim();
       if (!targetUrl) {
@@ -599,12 +654,27 @@ export default function App() {
         return { ok: false, pulledData: false };
       }
 
+      const isManual = Boolean(options?.isManual);
+      // Avoid launching a background pull if a manual sync is already in flight
+      if (!isManual && activeManualSyncCountRef.current > 0) {
+        return { ok: false, pulledData: false };
+      }
+
+      const manualController = isManual ? beginManualSyncController() : null;
       const reqId = ++syncRequestIdRef.current;
       const scope = options?.scope ?? 'today';
       setSyncStatus('syncing');
 
       try {
-        const pullRes = await pullFromGoogleSheetsWebhook(targetUrl, { scope });
+        const pullRes = await pullFromGoogleSheetsWebhook(targetUrl, {
+          scope,
+          timeoutMs: DEFAULT_SHEETS_SYNC_TIMEOUT_MS,
+          signal: manualController?.signal,
+        });
+
+        if (pullRes.superseded) {
+          return { ok: false, pulledData: false, superseded: true };
+        }
 
         if (pullRes.ok && pullRes.pulledData && pullRes.data) {
           const {
@@ -642,18 +712,42 @@ export default function App() {
           return { ok: true, pulledData: true };
         }
 
+        // If GET timed out while processing, surface timeout guidance right away without firing a second ping
+        if (pullRes.timedOut) {
+          if (reqId === syncRequestIdRef.current) {
+            setSyncStatus('error');
+          }
+          if (options?.notify) {
+            addToast(
+              'error',
+              'Sync Timed Out',
+              pullRes.error ??
+                'Google Sheets took longer than 45s to respond. Please wait a moment and try again.'
+            );
+          }
+          return { ok: false, pulledData: false, error: pullRes.error };
+        }
+
         // Fallback to a non-destructive connectivity check when doGet is not deployed yet
-        const pingRes = await pushToGoogleSheetsWebhook(targetUrl, {
-          event: 'CONNECT_CHECK',
-          dailySummary: {
-            date: getLocalDateString(),
-            totalLeads: 0,
-            callsMadeToday: 0,
-            orderConfirmedCount: 0,
-            interestedCount: 0,
-            conversionRate: 0,
+        const pingRes = await pushToGoogleSheetsWebhook(
+          targetUrl,
+          {
+            event: 'CONNECT_CHECK',
+            dailySummary: {
+              date: getLocalDateString(),
+              totalLeads: 0,
+              callsMadeToday: 0,
+              orderConfirmedCount: 0,
+              interestedCount: 0,
+              conversionRate: 0,
+            },
           },
-        });
+          { timeoutMs: DEFAULT_SHEETS_SYNC_TIMEOUT_MS, signal: manualController?.signal }
+        );
+
+        if (pingRes.superseded) {
+          return { ok: false, pulledData: false, superseded: true };
+        }
 
         if (pingRes.ok) {
           if (reqId === syncRequestIdRef.current) {
@@ -680,22 +774,24 @@ export default function App() {
             pingRes.error ?? pullRes.error ?? 'Unable to reach Google Sheets webhook.'
           );
         }
-        return { ok: false, pulledData: false };
+        return { ok: false, pulledData: false, error: pingRes.error ?? pullRes.error };
       } catch (err) {
+        if (isSupersededSyncError(err)) {
+          return { ok: false, pulledData: false, superseded: true };
+        }
+        const message = describeWebhookFetchError(err, DEFAULT_SHEETS_SYNC_TIMEOUT_MS);
         if (reqId === syncRequestIdRef.current) {
           setSyncStatus('error');
         }
         if (options?.notify) {
-          addToast(
-            'error',
-            'Sync Failed',
-            err instanceof Error ? err.message : 'Unable to reach Google Sheets webhook.'
-          );
+          addToast('error', 'Sync Failed', message);
         }
-        return { ok: false, pulledData: false };
+        return { ok: false, pulledData: false, error: message };
+      } finally {
+        endManualSyncController(manualController);
       }
     },
-    [addToast, applyPulledSheetData]
+    [addToast, applyPulledSheetData, beginManualSyncController, endManualSyncController]
   );
 
   const handleClearLocalCacheAndSyncToday = useCallback(
@@ -715,7 +811,12 @@ export default function App() {
       });
 
       const targetUrl = webhookUrl.trim() || settings.googleSheetsWebhookUrl;
-      const res = await syncFromSheets(targetUrl, { notify: false, scope: 'today' });
+      const res = await syncFromSheets(targetUrl, {
+        notify: false,
+        scope: 'today',
+        isManual: true,
+      });
+      if (res.superseded) return;
       if (res.ok && res.pulledData) {
         addToast(
           'success',
@@ -732,7 +833,9 @@ export default function App() {
         addToast(
           'warning',
           'Local Cache Cleared',
-          'Stale cached leads removed, but live Google Sheets pull could not complete.'
+          res.error
+            ? `Stale cached leads removed. ${res.error}`
+            : 'Stale cached leads removed, but live Google Sheets pull could not complete.'
         );
       }
     },
@@ -2158,40 +2261,52 @@ export default function App() {
 
   const handleTestAndSyncSheets = async (url: string) => {
     setSettings((prev) => ({ ...prev, googleSheetsWebhookUrl: url }));
+    const manualController = beginManualSyncController();
     const syncLeads = leadsRef.current.length > 0 ? leadsRef.current : leads;
     const todayCallLogs = filterTodayCallLogs(callLogs);
     const todayPosts = filterTodayPosts(contentPosts);
-    const res = await triggerRealtimeSync(
-      url,
-      {
-        event: 'TEST_SYNC',
-        leads: syncLeads,
-        callLogs: todayCallLogs,
-        contentPosts: todayPosts,
-        paidCustomers,
-      },
-      syncLeads,
-      todayCallLogs
-    );
-    if (res.ok) {
-      if (currentUser) {
-        appendAudit(
-          currentUser,
-          'SHEETS_SYNCED',
-          `Synced ${syncLeads.length} leads, ${todayCallLogs.length} today call logs, ${todayPosts.length} posts, and ${paidCustomers.length} paid customers to Google Sheets (Master, Collector_*, Agent_*, Paid_*)`
+    try {
+      const res = await triggerRealtimeSync(
+        url,
+        {
+          event: 'TEST_SYNC',
+          leads: syncLeads,
+          callLogs: todayCallLogs,
+          contentPosts: todayPosts,
+          paidCustomers,
+        },
+        syncLeads,
+        todayCallLogs,
+        contentPosts,
+        {
+          isManual: true,
+          signal: manualController.signal,
+          timeoutMs: FULL_SYNC_TIMEOUT_MS,
+        }
+      );
+      if (res.superseded) return;
+      if (res.ok) {
+        if (currentUser) {
+          appendAudit(
+            currentUser,
+            'SHEETS_SYNCED',
+            `Synced ${syncLeads.length} leads, ${todayCallLogs.length} today call logs, ${todayPosts.length} posts, and ${paidCustomers.length} paid customers to Google Sheets (Master, Collector_*, Agent_*, Paid_*)`
+          );
+        }
+        addToast(
+          'success',
+          'Google Sheets Synced',
+          'Master_Data, Collector_<Name>, Agent_<Name>, Paid_<Agent>, Daily_Summary, and Paid_Customers synced.'
+        );
+      } else {
+        addToast(
+          'error',
+          res.timedOut ? 'Sync Timed Out' : 'Sync Failed',
+          res.error ?? 'Check your Google Apps Script Web App URL and deployment permissions.'
         );
       }
-      addToast(
-        'success',
-        'Google Sheets Synced',
-        'Master_Data, Collector_<Name>, Agent_<Name>, Paid_<Agent>, Daily_Summary, and Paid_Customers synced.'
-      );
-    } else {
-      addToast(
-        'error',
-        'Sync Failed',
-        res.error ?? 'Check your Google Apps Script Web App URL and deployment permissions.'
-      );
+    } finally {
+      endManualSyncController(manualController);
     }
   };
 
@@ -2428,7 +2543,7 @@ export default function App() {
             onSaveWebhookUrl={handleSaveWebhookUrl}
             onTestAndSync={handleTestAndSyncSheets}
             onPullLatest={async (url) => {
-              await syncFromSheets(url, { notify: true, scope: 'today' });
+              await syncFromSheets(url, { notify: true, scope: 'today', isManual: true });
             }}
             onClearCacheAndSyncToday={handleClearLocalCacheAndSyncToday}
           />
