@@ -1846,8 +1846,31 @@ export default function App() {
     notes: string;
   }) => {
     if (!currentUser) return;
-    const target = leadsRef.current.find((l) => l.id === input.leadId);
-    if (!target) return;
+    let target = leadsRef.current.find((l) => l.id === input.leadId);
+    if (!target) {
+      const foundLog = callLogsRef.current.find(
+        (c) => c.leadId === input.leadId || c.id === input.leadId
+      );
+      target = {
+        id: input.leadId,
+        customerName: foundLog ? foundLog.customerName : 'Customer',
+        phone: foundLog ? foundLog.phone : '',
+        rawPhone: foundLog ? foundLog.phone : '',
+        facebookLink: '',
+        normalizedFacebookLink: '',
+        notes: input.notes,
+        collectorId: 'collector-farhan',
+        collectorName: 'Farhan',
+        assignedAgentId: currentUser.id,
+        assignedAgentName: currentUser.name,
+        status: foundLog ? foundLog.newStatus : 'Done',
+        followUpAt: input.followUpAt,
+        lastCallNotes: input.notes,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      leadsRef.current = [target, ...leadsRef.current];
+    }
 
     const nowIso = new Date().toISOString();
     const todayYmd = getLocalDateString();
@@ -2629,10 +2652,12 @@ export default function App() {
           <AgentTodayCallsView
             agent={currentUser}
             callLogs={callLogs}
+            leads={leads}
             onBackToQueue={() => setActiveTab('agent-workspace')}
             onPhoneCopied={(cleanPhone) =>
               addToast('success', 'Phone number copied', cleanPhone)
             }
+            onLogCall={handleLogCall}
           />
         )}
 
