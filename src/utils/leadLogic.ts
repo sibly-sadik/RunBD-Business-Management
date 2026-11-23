@@ -83,6 +83,39 @@ export function formatBdPhoneDisplay(phone: string): string {
   return `+880 ${norm.slice(1, 5)}-${norm.slice(5)}`;
 }
 
+/**
+ * Returns the clean copyable phone string (01XXXXXXXXX for BD mobile numbers).
+ */
+export function getCopyablePhoneNumber(rawPhone: string): string {
+  const norm = normalizeBdPhone(rawPhone);
+  if (norm) return norm;
+  const trimmed = String(rawPhone ?? '').trim();
+  const digits = trimmed.replace(/\D/g, '');
+  if (digits.startsWith('8801') && digits.length === 13) {
+    return `0${digits.slice(2)}`;
+  }
+  return trimmed;
+}
+
+/**
+ * Normalizes and validates an external HTTP(S) URL (blocks javascript:/data: schemes).
+ */
+export function buildSafeExternalUrl(rawUrl: string | null | undefined): string | null {
+  const trimmed = String(rawUrl ?? '').trim();
+  if (!trimmed) return null;
+  if (/^(javascript|data|vbscript):/i.test(trimmed)) return null;
+  const withProto = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  try {
+    const parsed = new URL(withProto);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return null;
+    }
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
 export const WHATSAPP_WINDOW_NAME = 'runbd_whatsapp_tab';
 
 export interface WhatsAppWindowTarget {
@@ -481,16 +514,105 @@ export function assignLeadsRoundRobin(
   return { assignedLeads, nextIndex: pointer };
 }
 
-export function getLocalDateString(date: Date = new Date()): string {
+export const DHAKA_TIME_ZONE = 'Asia/Dhaka';
+
+const DHAKA_YMD_FORMATTER = new Intl.DateTimeFormat('en-CA', {
+  timeZone: DHAKA_TIME_ZONE,
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+});
+
+const DHAKA_HHMM_FORMATTER = new Intl.DateTimeFormat('en-GB', {
+  timeZone: DHAKA_TIME_ZONE,
+  hour: '2-digit',
+  minute: '2-digit',
+  hour12: false,
+});
+
+const SHORT_MONTH_NAMES = [
+  'Jan',
+  'Feb',
+  'Mar',
+  'Apr',
+  'May',
+  'Jun',
+  'Jul',
+  'Aug',
+  'Sep',
+  'Oct',
+  'Nov',
+  'Dec',
+] as const;
+
+let serverClockOffsetMs: number | null = null;
+
+/**
+ * Records an authoritative HTTP `Date` header offset (serverMs - clientMs)
+ * so the browser can detect a misconfigured device clock set ahead of Asia/Dhaka.
+ */
+export function recordServerClockHeader(dateHeader: string | null | undefined): void {
+  if (!dateHeader) return;
+  const parsedMs = Date.parse(dateHeader);
+  if (!Number.isFinite(parsedMs)) return;
+  serverClockOffsetMs = parsedMs - Date.now();
+}
+
+export function getEstimatedServerNow(clientNowMs: number = Date.now()): Date | null {
+  if (serverClockOffsetMs === null) return null;
+  return new Date(clientNowMs + serverClockOffsetMs);
+}
+
+/**
+ * Formats a Date into an explicit `Asia/Dhaka` (UTC+6) `YYYY-MM-DD` calendar string.
+ */
+export function getDhakaDateString(date: Date = new Date()): string {
+  const target = Number.isNaN(date.getTime()) ? new Date() : date;
+  const parts = DHAKA_YMD_FORMATTER.formatToParts(target);
+  const year = parts.find((p) => p.type === 'year')?.value;
+  const month = parts.find((p) => p.type === 'month')?.value;
+  const day = parts.find((p) => p.type === 'day')?.value;
+  if (year && month && day) {
+    return `${year}-${month}-${day}`;
+  }
+  const formatted = DHAKA_YMD_FORMATTER.format(target);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(formatted)) {
+    return formatted;
+  }
+  const shifted = new Date(target.getTime() + 6 * 3600 * 1000);
+  return `${shifted.getUTCFullYear()}-${String(shifted.getUTCMonth() + 1).padStart(
+    2,
+    '0'
+  )}-${String(shifted.getUTCDate()).padStart(2, '0')}`;
+}
+
+export function getAuthoritativeDhakaTodayYmd(): string {
+  const serverNow = getEstimatedServerNow();
+  return getDhakaDateString(serverNow ?? new Date());
+}
+
+/**
+ * Returns the device's own local calendar date (YYYY-MM-DD) for clock-skew detection.
+ */
+export function getDeviceLocalDateString(date: Date = new Date()): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(
     date.getDate()
   ).padStart(2, '0')}`;
 }
 
 /**
- * Parses a YYYY-MM-DD date string into local midnight Date, or null if invalid.
+ * Canonical RunBD date string helper (strictly Asia/Dhaka UTC+6).
  */
-export function parseYmdLocal(ymd: string): Date | null {
+export function getLocalDateString(date: Date = new Date()): string {
+  return getDhakaDateString(date);
+}
+
+/**
+ * Validates and extracts numeric calendar parts from a bare `YYYY-MM-DD` string.
+ */
+export function parseYmdParts(
+  ymd: string
+): { year: number; month: number; day: number } | null {
   const match = String(ymd || '')
     .trim()
     .match(/^(\d{4})-(\d{2})-(\d{2})$/);
@@ -498,43 +620,132 @@ export function parseYmdLocal(ymd: string): Date | null {
   const year = Number(match[1]);
   const month = Number(match[2]);
   const day = Number(match[3]);
-  const dt = new Date(year, month - 1, day, 0, 0, 0, 0);
+  const utc = new Date(Date.UTC(year, month - 1, day));
   if (
-    dt.getFullYear() !== year ||
-    dt.getMonth() !== month - 1 ||
-    dt.getDate() !== day
+    utc.getUTCFullYear() !== year ||
+    utc.getUTCMonth() !== month - 1 ||
+    utc.getUTCDate() !== day
   ) {
     return null;
   }
-  return dt;
+  return { year, month, day };
+}
+
+/**
+ * Parses a YYYY-MM-DD date string into a local-midnight Date, or null if invalid.
+ */
+export function parseYmdLocal(ymd: string): Date | null {
+  const parts = parseYmdParts(ymd);
+  if (!parts) return null;
+  return new Date(parts.year, parts.month - 1, parts.day, 0, 0, 0, 0);
 }
 
 /**
  * Normalizes a stored date/timestamp (bare YYYY-MM-DD, YYYY/MM/DD, ISO timestamp, or Date)
- * into a local YYYY-MM-DD calendar date string without UTC-midnight off-by-one shifts.
+ * into an Asia/Dhaka `YYYY-MM-DD` calendar date string without double-shifting bare YYYY-MM-DD values.
  * Returns null for empty or invalid values (never defaults to Today).
  */
 export function parseDateToYmd(value: unknown): string | null {
   if (value instanceof Date) {
-    return Number.isNaN(value.getTime()) ? null : getLocalDateString(value);
+    return Number.isNaN(value.getTime()) ? null : getDhakaDateString(value);
   }
   if (typeof value !== 'string') return null;
   const trimmed = value.replace(/^'+/, '').trim();
   if (!trimmed) return null;
 
   if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
-    return parseYmdLocal(trimmed) ? trimmed : null;
+    return parseYmdParts(trimmed) ? trimmed : null;
   }
 
   const slashIso = trimmed.match(/^(\d{4})\/(\d{1,2})\/(\d{1,2})$/);
   if (slashIso) {
     const ymd = `${slashIso[1]}-${slashIso[2].padStart(2, '0')}-${slashIso[3].padStart(2, '0')}`;
-    return parseYmdLocal(ymd) ? ymd : null;
+    return parseYmdParts(ymd) ? ymd : null;
   }
 
   const parsed = new Date(trimmed);
   if (Number.isNaN(parsed.getTime())) return null;
-  return getLocalDateString(parsed);
+  return getDhakaDateString(parsed);
+}
+
+/**
+ * Clamps any candidate date/timestamp so it never exceeds `authoritativeDhakaTodayYmd`
+ * (preventing future `collected_date` values caused by ahead device clocks).
+ */
+export function clampDateToDhakaToday(
+  candidate: string | Date | null | undefined,
+  authoritativeDhakaTodayYmd: string = getAuthoritativeDhakaTodayYmd()
+): { ymd: string; wasClamped: boolean; originalYmd: string | null } {
+  const originalYmd = parseDateToYmd(candidate);
+  if (!originalYmd) {
+    return { ymd: authoritativeDhakaTodayYmd, wasClamped: false, originalYmd: null };
+  }
+  if (originalYmd > authoritativeDhakaTodayYmd) {
+    return {
+      ymd: authoritativeDhakaTodayYmd,
+      wasClamped: true,
+      originalYmd,
+    };
+  }
+  return { ymd: originalYmd, wasClamped: false, originalYmd };
+}
+
+/**
+ * Detects whether the collector's device clock or local calendar is ahead of Asia/Dhaka today.
+ */
+export function detectDeviceClockAhead(
+  deviceNow: Date = new Date(),
+  serverNow: Date | null = getEstimatedServerNow()
+): { isAhead: boolean; deviceYmd: string; dhakaTodayYmd: string } {
+  const deviceDhakaYmd = getDhakaDateString(deviceNow);
+  const deviceLocalYmd = getDeviceLocalDateString(deviceNow);
+  const serverDhakaYmd =
+    serverNow && !Number.isNaN(serverNow.getTime())
+      ? getDhakaDateString(serverNow)
+      : null;
+  const dhakaTodayYmd = serverDhakaYmd ?? deviceDhakaYmd;
+
+  if (serverDhakaYmd && deviceDhakaYmd > serverDhakaYmd) {
+    return { isAhead: true, deviceYmd: deviceDhakaYmd, dhakaTodayYmd };
+  }
+  if (deviceLocalYmd > dhakaTodayYmd) {
+    return { isAhead: true, deviceYmd: deviceLocalYmd, dhakaTodayYmd };
+  }
+  return { isAhead: false, deviceYmd: deviceLocalYmd, dhakaTodayYmd };
+}
+
+/**
+ * Extracts `YYYY-MM-DD` and `HH:mm` values in Asia/Dhaka for the Call Log follow-up modal.
+ */
+export function getDhakaFollowUpFields(
+  followUpAt: string | null | undefined,
+  now: Date = new Date()
+): { date: string; time: string } {
+  if (followUpAt) {
+    const dt = new Date(followUpAt);
+    if (!Number.isNaN(dt.getTime())) {
+      const ymd = getDhakaDateString(dt);
+      const hhmm = DHAKA_HHMM_FORMATTER.format(dt);
+      return {
+        date: ymd,
+        time: /^\d{2}:\d{2}$/.test(hhmm) ? hhmm : '16:00',
+      };
+    }
+  }
+  return {
+    date: getDhakaDateString(now),
+    time: '16:00',
+  };
+}
+
+/**
+ * Converts a YYYY-MM-DD + HH:mm pair entered in Dhaka (+06:00) into an ISO timestamp.
+ */
+export function buildDhakaFollowUpIso(ymd: string, time: string): string | null {
+  if (!parseYmdParts(ymd)) return null;
+  const safeTime = /^\d{2}:\d{2}$/.test(time) ? time : '10:00';
+  const parsed = new Date(`${ymd}T${safeTime}:00+06:00`);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
 }
 
 /**
@@ -552,18 +763,18 @@ export function getLeadCollectedYmd(
 }
 
 /**
- * Checks whether a lead's stored collection date equals Today's local YYYY-MM-DD date.
+ * Checks whether a lead's stored collection date equals Today's Asia/Dhaka YYYY-MM-DD date.
  */
 export function isLeadCollectedToday(
   lead: Partial<Pick<Lead, 'createdAt' | 'collectedDate' | 'date'>>,
   now: Date = new Date()
 ): boolean {
   const ymd = getLeadCollectedYmd(lead);
-  return ymd !== null && ymd === getLocalDateString(now);
+  return ymd !== null && ymd === getDhakaDateString(now);
 }
 
 /**
- * Checks if an ISO timestamp or bare YYYY-MM-DD falls within the active DateRangeFilter.
+ * Checks if an ISO timestamp or bare YYYY-MM-DD falls within the active DateRangeFilter (Asia/Dhaka).
  */
 export function isWithinDateRange(
   isoTimestamp: string,
@@ -571,68 +782,72 @@ export function isWithinDateRange(
   now: Date = new Date()
 ): boolean {
   if (filter.preset === 'all') return true;
-  const trimmed = String(isoTimestamp ?? '').replace(/^'+/, '').trim();
-  const bareLocal = /^\d{4}-\d{2}-\d{2}$/.test(trimmed) ? parseYmdLocal(trimmed) : null;
-  const date = bareLocal ?? new Date(trimmed);
-  if (Number.isNaN(date.getTime())) return false;
+  const recordYmd = parseDateToYmd(isoTimestamp);
+  if (!recordYmd) return false;
 
-  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
-  const endOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+  const todayYmd = getDhakaDateString(now);
 
   if (filter.preset === 'today') {
-    return date >= startOfToday && date <= endOfToday;
+    return recordYmd === todayYmd;
   }
 
   if (filter.preset === 'week') {
-    const weekAgo = new Date(startOfToday);
-    weekAgo.setDate(weekAgo.getDate() - 6);
-    return date >= weekAgo && date <= endOfToday;
+    const weekStartYmd = addDaysToYmd(todayYmd, -6);
+    return recordYmd >= weekStartYmd && recordYmd <= todayYmd;
   }
 
   if (filter.preset === 'month') {
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
-    return date >= monthStart && date <= endOfToday;
+    const monthStartYmd = `${todayYmd.slice(0, 7)}-01`;
+    return recordYmd >= monthStartYmd && recordYmd <= todayYmd;
   }
 
   if (filter.preset === 'custom') {
-    const start = filter.startDate ? new Date(`${filter.startDate}T00:00:00`) : new Date(0);
-    const end = filter.endDate ? new Date(`${filter.endDate}T23:59:59.999`) : new Date(8640000000000000);
-    return date >= start && date <= end;
+    const startOk = !filter.startDate || recordYmd >= filter.startDate;
+    const endOk = !filter.endDate || recordYmd <= filter.endDate;
+    return startOk && endOk;
   }
 
   return true;
 }
 
 /**
- * Checks if a follow-up ISO timestamp is scheduled for today.
+ * Checks if a follow-up ISO timestamp is scheduled for today in Asia/Dhaka.
  */
 export function isFollowUpDueToday(followUpAt: string | null, now: Date = new Date()): boolean {
   if (!followUpAt) return false;
-  const dt = new Date(followUpAt);
-  if (Number.isNaN(dt.getTime())) return false;
-  return (
-    dt.getFullYear() === now.getFullYear() &&
-    dt.getMonth() === now.getMonth() &&
-    dt.getDate() === now.getDate()
-  );
+  const ymd = parseDateToYmd(followUpAt);
+  return ymd !== null && ymd === getDhakaDateString(now);
 }
 
 /**
- * Checks whether an ISO timestamp or YYYY-MM-DD date string falls on today's local date (YYYY-MM-DD).
+ * Checks whether an ISO timestamp or YYYY-MM-DD date string falls on today's Asia/Dhaka date.
  */
 export function isTimestampToday(isoTimestamp: string, now: Date = new Date()): boolean {
   const ymd = parseDateToYmd(isoTimestamp);
   if (!ymd) return false;
-  return ymd === getLocalDateString(now);
+  return ymd === getDhakaDateString(now);
 }
 
 /**
- * Returns only leads collected today (YYYY-MM-DD local date).
+ * Returns only leads collected today (YYYY-MM-DD Asia/Dhaka date).
  * Checks collectedDate / date / createdAt strictly (never updatedAt or render time).
  */
 export function filterTodayLeads(leads: Lead[], now: Date = new Date()): Lead[] {
-  const todayYmd = getLocalDateString(now);
+  const todayYmd = getDhakaDateString(now);
   return leads.filter((l) => getLeadCollectedYmd(l) === todayYmd);
+}
+
+/**
+ * Returns today's Asia/Dhaka leads for the Data Collector's Today-only list AND safely
+ * surfaces any leads accidentally stamped with a future date (>= todayYmd) so newly collected
+ * leads never vanish if a device clock was ahead.
+ */
+export function filterCollectorTodayLeads(leads: Lead[], now: Date = new Date()): Lead[] {
+  const todayYmd = getDhakaDateString(now);
+  return leads.filter((l) => {
+    const ymd = getLeadCollectedYmd(l);
+    return ymd !== null && ymd >= todayYmd;
+  });
 }
 
 /**
@@ -823,7 +1038,9 @@ export function computeDashboardMetrics(
   filter: DateRangeFilter,
   now: Date = new Date()
 ) {
-  const filteredLeads = leads.filter((l) => isWithinDateRange(l.createdAt, filter, now));
+  const filteredLeads = leads.filter((l) =>
+    isWithinDateRange(getLeadCollectedYmd(l) ?? l.createdAt, filter, now)
+  );
   const filteredCalls = deduplicateSameDayCallLogs(
     callLogs.filter((c) => isWithinDateRange(c.timestamp, filter, now))
   );
@@ -859,7 +1076,9 @@ export function computeAgentPerformance(
   filter: DateRangeFilter,
   now: Date = new Date()
 ): AgentPerformanceMetric[] {
-  const filteredLeads = leads.filter((l) => isWithinDateRange(l.createdAt, filter, now));
+  const filteredLeads = leads.filter((l) =>
+    isWithinDateRange(getLeadCollectedYmd(l) ?? l.createdAt, filter, now)
+  );
   const filteredCalls = callLogs.filter((c) => isWithinDateRange(c.timestamp, filter, now));
 
   return agents
@@ -902,7 +1121,7 @@ export function computeCollectorStats(
   return collectors.map((collector) => {
     const collectorLeads = leads.filter((l) => l.collectorId === collector.id);
     const todayCount = collectorLeads.filter((l) =>
-      isWithinDateRange(l.createdAt, todayFilter, now)
+      isWithinDateRange(getLeadCollectedYmd(l) ?? l.createdAt, todayFilter, now)
     ).length;
     const duplicateBlockedCount = duplicateAttempts.filter(
       (d) => d.collectorId === collector.id
@@ -919,15 +1138,22 @@ export function computeCollectorStats(
 }
 
 /**
- * Formats an ISO date string into a readable short date, e.g., "Nov 17, 2026".
+ * Formats an ISO date string or bare YYYY-MM-DD into a readable short date in Asia/Dhaka,
+ * e.g., "Nov 23, 2026". Bare YYYY-MM-DD values are formatted directly without timezone shifting.
  */
 export function formatShortDate(iso: string): string {
   const trimmed = String(iso ?? '').replace(/^'+/, '').trim();
   if (!trimmed || trimmed === '1970-01-01T00:00:00.000Z') return 'Historical Sheet';
-  const bareLocal = /^\d{4}-\d{2}-\d{2}$/.test(trimmed) ? parseYmdLocal(trimmed) : null;
-  const dt = bareLocal ?? new Date(trimmed);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+    const parts = parseYmdParts(trimmed);
+    if (!parts) return iso;
+    const monthLabel = SHORT_MONTH_NAMES[parts.month - 1];
+    return `${monthLabel} ${parts.day}, ${parts.year}`;
+  }
+  const dt = new Date(trimmed);
   if (Number.isNaN(dt.getTime())) return iso;
   return dt.toLocaleDateString('en-US', {
+    timeZone: DHAKA_TIME_ZONE,
     month: 'short',
     day: 'numeric',
     year: 'numeric',
@@ -935,23 +1161,30 @@ export function formatShortDate(iso: string): string {
 }
 
 /**
- * Formats an ISO date string into time, e.g., "02:30 PM".
+ * Formats an ISO date string into time in Asia/Dhaka, e.g., "02:30 PM".
+ * Returns empty string for bare YYYY-MM-DD dates without a time component.
  */
 export function formatTime(iso: string): string {
-  const dt = new Date(iso);
+  const trimmed = String(iso ?? '').replace(/^'+/, '').trim();
+  if (!trimmed || /^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return '';
+  const dt = new Date(trimmed);
   if (Number.isNaN(dt.getTime())) return '';
   return dt.toLocaleTimeString('en-US', {
+    timeZone: DHAKA_TIME_ZONE,
     hour: '2-digit',
     minute: '2-digit',
   });
 }
 
 /**
- * Formats an ISO date string into date + time.
+ * Formats an ISO date string into date + time in Asia/Dhaka (or short date for bare YYYY-MM-DD).
  */
 export function formatDateTime(iso: string): string {
   const trimmed = String(iso ?? '').replace(/^'+/, '').trim();
   if (!trimmed || trimmed === '1970-01-01T00:00:00.000Z') return 'Historical Sheet';
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+    return formatShortDate(trimmed);
+  }
   const dt = new Date(trimmed);
   if (Number.isNaN(dt.getTime())) return iso;
   return `${formatShortDate(trimmed)}, ${formatTime(trimmed)}`;
@@ -1013,10 +1246,7 @@ export function generateDailyReportCsv(
   callLogs: CallLog[],
   reportDate: Date = new Date()
 ): string {
-  const dateLabel = `${reportDate.getFullYear()}-${String(reportDate.getMonth() + 1).padStart(
-    2,
-    '0'
-  )}-${String(reportDate.getDate()).padStart(2, '0')}`;
+  const dateLabel = getDhakaDateString(reportDate);
   const todayFilter: DateRangeFilter = { preset: 'today', startDate: '', endDate: '' };
 
   const escape = (val: string | number) => {
@@ -1513,41 +1743,46 @@ export function generateFinalDailySummaryCsv(summary: FinalDailySummary): string
  * Adds a whole number of calendar days to a YYYY-MM-DD date string and returns YYYY-MM-DD.
  */
 export function addDaysToYmd(ymd: string, days: number): string {
-  const base = parseYmdLocal(ymd) ?? new Date();
-  const next = new Date(base.getFullYear(), base.getMonth(), base.getDate() + days, 0, 0, 0, 0);
-  return getLocalDateString(next);
+  const parts = parseYmdParts(ymd) ?? parseYmdParts(getDhakaDateString());
+  if (!parts) return getDhakaDateString();
+  const next = new Date(Date.UTC(parts.year, parts.month - 1, parts.day + days));
+  return `${next.getUTCFullYear()}-${String(next.getUTCMonth() + 1).padStart(
+    2,
+    '0'
+  )}-${String(next.getUTCDate()).padStart(2, '0')}`;
 }
 
 /**
- * Normalizes any ISO timestamp, Date, or YYYY-MM-DD string into YYYY-MM-DD (local date).
+ * Normalizes any ISO timestamp, Date, or YYYY-MM-DD string into YYYY-MM-DD (Asia/Dhaka).
  */
 export function toYmdString(value: string | Date | null | undefined, fallbackNow: Date = new Date()): string {
   if (value instanceof Date) {
-    return Number.isNaN(value.getTime()) ? getLocalDateString(fallbackNow) : getLocalDateString(value);
+    return Number.isNaN(value.getTime()) ? getDhakaDateString(fallbackNow) : getDhakaDateString(value);
   }
-  const str = String(value ?? '').trim();
+  const str = String(value ?? '').replace(/^'+/, '').trim();
   if (/^\d{4}-\d{2}-\d{2}$/.test(str)) {
-    return str;
+    return parseYmdParts(str) ? str : getDhakaDateString(fallbackNow);
   }
   if (str) {
     const parsed = new Date(str);
     if (!Number.isNaN(parsed.getTime())) {
-      return getLocalDateString(parsed);
+      return getDhakaDateString(parsed);
     }
   }
-  return getLocalDateString(fallbackNow);
+  return getDhakaDateString(fallbackNow);
 }
 
 /**
- * Computes whole calendar days remaining until renewalDate (YYYY-MM-DD) relative to `now`.
+ * Computes whole calendar days remaining until renewalDate (YYYY-MM-DD) relative to Asia/Dhaka `now`.
  * Returns 0 if renewalDate is today, positive integer if upcoming, negative if past.
  */
 export function computeDaysRemaining(renewalDateYmd: string, now: Date = new Date()): number {
-  const renewalDt = parseYmdLocal(toYmdString(renewalDateYmd, now));
-  if (!renewalDt) return 0;
-  const todayDt = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
-  const diffMs = renewalDt.getTime() - todayDt.getTime();
-  return Math.round(diffMs / 86400000);
+  const renParts = parseYmdParts(toYmdString(renewalDateYmd, now));
+  const todayParts = parseYmdParts(getDhakaDateString(now));
+  if (!renParts || !todayParts) return 0;
+  const renUtc = Date.UTC(renParts.year, renParts.month - 1, renParts.day);
+  const todayUtc = Date.UTC(todayParts.year, todayParts.month - 1, todayParts.day);
+  return Math.round((renUtc - todayUtc) / 86400000);
 }
 
 /**

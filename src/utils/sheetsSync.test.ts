@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import { GOOGLE_APPS_SCRIPT_CODE } from '../data/seedData';
 import { CallLog, ContentPost, DuplicateAttempt, Lead, PaidCustomer } from '../types';
 import { extractPhoneCoreKey, filterTodayLeads, normalizeBdPhone } from './leadLogic';
 import {
@@ -7,6 +8,8 @@ import {
   detectPostDuplicatesInList,
   FALLBACK_GOOGLE_SHEETS_WEBHOOK_URL,
   filterPullPayloadByDate,
+  getAgentTabName,
+  getCollectorTabName,
   getDefaultWebhookUrl,
   HISTORICAL_FALLBACK_ISO,
   isFirestoreDocIdSafe,
@@ -20,6 +23,7 @@ import {
   parsePostDuplicateCheckResponse,
   parsePullPayload,
   resolveWebhookUrl,
+  sanitizeSheetTabSuffix,
 } from './sheetsSync';
 
 describe('Google Sheets default webhook URL resolution', () => {
@@ -446,8 +450,8 @@ describe('detectLeadDuplicatesInList & detectPostDuplicatesInList', () => {
 
 describe('on-demand duplicate checks & today-only pull filtering', () => {
   it('filterPullPayloadByDate keeps only records created/logged on the target YYYY-MM-DD date', () => {
-    const todayIso = new Date(2026, 10, 21, 10, 0, 0).toISOString();
-    const yesterdayIso = new Date(2026, 10, 20, 15, 0, 0).toISOString();
+    const todayIso = new Date('2026-11-21T10:00:00+06:00').toISOString();
+    const yesterdayIso = new Date('2026-11-20T15:00:00+06:00').toISOString();
 
     const filtered = filterPullPayloadByDate(
       {
@@ -527,8 +531,8 @@ describe('on-demand duplicate checks & today-only pull filtering', () => {
   });
 
   it('parsePullPayload extracts paidCustomers and filterPullPayloadByDate preserves all paidCustomers while hiding historical leads', () => {
-    const todayIso = new Date(2026, 10, 21, 10, 0, 0).toISOString();
-    const yesterdayIso = new Date(2026, 10, 20, 15, 0, 0).toISOString();
+    const todayIso = new Date('2026-11-21T10:00:00+06:00').toISOString();
+    const yesterdayIso = new Date('2026-11-20T15:00:00+06:00').toISOString();
 
     const parsed = parsePullPayload({
       ok: true,
@@ -614,8 +618,8 @@ describe('on-demand duplicate checks & today-only pull filtering', () => {
   });
 
   it('mergeRemoteLeads and filterPullPayloadByDate preserve bare stored dates and never stamp missing dates as Today', () => {
-    const now = new Date(2026, 10, 21, 11, 0, 0);
-    const todayIso = new Date(2026, 10, 21, 9, 0, 0).toISOString();
+    const now = new Date('2026-11-21T11:00:00+06:00');
+    const todayIso = new Date('2026-11-21T09:00:00+06:00').toISOString();
 
     const filtered = filterPullPayloadByDate(
       {
@@ -831,6 +835,33 @@ describe('on-demand duplicate checks & today-only pull filtering', () => {
     assert.deepEqual(uniquePost, { ok: true, isDuplicate: false });
   });
 });
+
+describe('Per-Collector and Per-Agent Google Sheets tab naming & Apps Script template', () => {
+  it('sanitizes collector and agent names into clean Collector_<Name> and Agent_<Name> sheet tab names', () => {
+    assert.equal(getCollectorTabName('Farhan'), 'Collector_Farhan');
+    assert.equal(getCollectorTabName('Naim'), 'Collector_Naim');
+    assert.equal(getCollectorTabName('  Mehedi Hasan  '), 'Collector_Mehedi_Hasan');
+    assert.equal(getCollectorTabName('Sajib [BD]/2:Lead*'), 'Collector_Sajib_BD_2_Lead');
+    assert.equal(sanitizeSheetTabSuffix('   '), 'Unknown');
+    assert.equal(getAgentTabName('Rakib Hasan'), 'Agent_Rakib_Hasan');
+  });
+
+  it('includes per-collector tab creation/upsert logic and normalizePhoneKey_ in GOOGLE_APPS_SCRIPT_CODE', () => {
+    assert.ok(GOOGLE_APPS_SCRIPT_CODE.includes("var COLLECTOR_NAMES = ['Farhan', 'Naim'];"));
+    assert.ok(GOOGLE_APPS_SCRIPT_CODE.includes('var COLLECTOR_TAB_HEADERS = ['));
+    assert.ok(GOOGLE_APPS_SCRIPT_CODE.includes('function syncLeadAcrossCollectorTabs('));
+    assert.ok(GOOGLE_APPS_SCRIPT_CODE.includes('function getCollectorTabName_(collectorName)'));
+    assert.ok(GOOGLE_APPS_SCRIPT_CODE.includes('function normalizePhoneKey_(raw)'));
+  });
+
+  it('uses explicit Asia/Dhaka timezone everywhere in GOOGLE_APPS_SCRIPT_CODE instead of Session.getScriptTimeZone()', () => {
+    assert.ok(GOOGLE_APPS_SCRIPT_CODE.includes('function getDhakaTodayYmd_()'));
+    assert.ok(GOOGLE_APPS_SCRIPT_CODE.includes("Utilities.formatDate(new Date(), 'Asia/Dhaka', 'yyyy-MM-dd')"));
+    assert.ok(GOOGLE_APPS_SCRIPT_CODE.includes("Utilities.formatDate(d, 'Asia/Dhaka', 'yyyy-MM-dd')"));
+    assert.equal(GOOGLE_APPS_SCRIPT_CODE.includes('Session.getScriptTimeZone()'), false);
+  });
+});
+
 
 
 

@@ -38,6 +38,18 @@ export function hashPasswordWithSalt(
   return { hash: derived, salt: resolvedSalt };
 }
 
+export function hashPasswordSha256Node(
+  plain: string,
+  salt?: string
+): { hash: string; salt: string } {
+  const resolvedSalt = salt?.trim() || crypto.randomBytes(16).toString('hex');
+  const digest = crypto
+    .createHash('sha256')
+    .update(`${resolvedSalt}:${plain}`, 'utf8')
+    .digest('hex');
+  return { hash: `sha256:${digest}`, salt: resolvedSalt };
+}
+
 export function verifyScryptPassword(
   plain: string,
   salt: string,
@@ -52,6 +64,26 @@ export function verifyScryptPassword(
   } catch {
     return false;
   }
+}
+
+export function verifyStoredPassword(
+  plain: string,
+  salt: string,
+  storedHash: string
+): boolean {
+  if (!plain || !salt || !storedHash) return false;
+  if (storedHash.startsWith('sha256:')) {
+    const expectedHex = storedHash.slice('sha256:'.length).trim().toLowerCase();
+    if (!/^[a-f0-9]{64}$/.test(expectedHex)) return false;
+    const derived = crypto
+      .createHash('sha256')
+      .update(`${salt}:${plain}`, 'utf8')
+      .digest();
+    const expected = Buffer.from(expectedHex, 'hex');
+    if (derived.length !== expected.length) return false;
+    return crypto.timingSafeEqual(derived, expected);
+  }
+  return verifyScryptPassword(plain, salt, storedHash);
 }
 
 function hashSeedPassword(plain: string, salt: string): string {
@@ -265,7 +297,7 @@ export async function ensureSeedTeamMembersInSupabase(): Promise<{
     if ((count ?? 0) === 0) {
       const nowIso = new Date().toISOString();
       const seedRows = RAW_ACCOUNTS.map((acct) => {
-        const { hash, salt } = hashPasswordWithSalt(acct.secret);
+        const { hash, salt } = hashPasswordSha256Node(acct.secret);
         return {
           id: acct.id,
           name: acct.name,
@@ -372,7 +404,7 @@ export async function authenticateServerTeamUser(
 
       if (!error && data) {
         const row = data as TeamMemberRow;
-        const validPw = verifyScryptPassword(
+        const validPw = verifyStoredPassword(
           password,
           row.password_salt ?? '',
           row.password_hash ?? ''
@@ -466,7 +498,7 @@ export async function createTeamMemberInSupabase(input: {
     validation.normalized.role,
     existingIds
   );
-  const { hash, salt } = hashPasswordWithSalt(validation.normalized.password);
+  const { hash, salt } = hashPasswordSha256Node(validation.normalized.password);
   const nowIso = new Date().toISOString();
 
   const row = {
@@ -621,7 +653,7 @@ export async function updateTeamMemberInSupabase(
     if (pwCheck.ok === false) {
       return { ok: false, status: 400, error: pwCheck.error };
     }
-    const { hash, salt } = hashPasswordWithSalt(patch.password);
+    const { hash, salt } = hashPasswordSha256Node(patch.password);
     updates.password_hash = hash;
     updates.password_salt = salt;
   }

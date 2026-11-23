@@ -4,8 +4,11 @@ import {
   addDaysToYmd,
   assignLeadsRoundRobin,
   authenticateUser,
+  buildDhakaFollowUpIso,
+  buildSafeExternalUrl,
   buildTelUrl,
   buildWhatsAppUrl,
+  clampDateToDhakaToday,
   normalizeWhatsAppPhone,
   openWhatsAppChat,
   WHATSAPP_WINDOW_NAME,
@@ -17,7 +20,9 @@ import {
   computeKawsarPostStats,
   createPaidCustomerFromLead,
   deduplicateSameDayCallLogs,
+  detectDeviceClockAhead,
   filterAgentAssignedQueueLeads,
+  filterCollectorTodayLeads,
   filterTodayCallLogs,
   filterTodayDuplicateAttempts,
   filterTodayLeads,
@@ -25,11 +30,17 @@ import {
   findDuplicateLead,
   findDuplicatePost,
   findExistingTodayCallLog,
+  formatDateTime,
+  formatShortDate,
+  formatTime,
   generateDailyReportCsv,
   generateFinalDailySummaryCsv,
   generatePaidCustomersCsv,
   getActiveAgents,
   getAgentTodayCallLogs,
+  getCopyablePhoneNumber,
+  getDhakaDateString,
+  getDhakaFollowUpFields,
   getDueRenewalCustomers,
   getLeadCollectedYmd,
   getNextRoundRobinAgent,
@@ -310,7 +321,7 @@ test('openWhatsAppChat reuses single named tab runbd_whatsapp_tab and falls back
   assert.equal(removed, true);
 });
 
-test('authenticateUser and authenticateServerTeamUser verify credentials for Admin, 6 Call Center Agents, and 3 Data Collectors (Farhan, Naim & Kawsar)', () => {
+test('authenticateUser and authenticateServerTeamUser verify credentials for Admin, 6 Agents, 2 Collectors & Poster Kawsar', async () => {
   const validPairs: Array<[string, string, string, string, string]> = [
     ['admin@runbd', 'admin@/#312', 'admin', 'Jahid Islam', 'admin-1'],
     ['tazin@runbd', 'tazin@/#312', 'agent', 'Tanjin', 'agent-tanjin'],
@@ -321,7 +332,7 @@ test('authenticateUser and authenticateServerTeamUser verify credentials for Adm
     ['sakib@runbd', 'sakib@/#312', 'agent', 'Sakib', 'agent-sakib'],
     ['farhan@runbd', 'farhan@/#312', 'collector', 'Farhan', 'collector-farhan'],
     ['naim@runbd', 'naim@/#312', 'collector', 'Naim', 'collector-naim'],
-    ['kawsar@runbd', 'kawsar@/#312', 'collector', 'Kawsar', 'collector-kawsar'],
+    ['kawsar@runbd', 'kawsar@/#312', 'poster', 'Kawsar', 'poster-kawsar'],
   ];
 
   for (const [username, password, expectedRole, expectedName, expectedId] of validPairs) {
@@ -331,24 +342,32 @@ test('authenticateUser and authenticateServerTeamUser verify credentials for Adm
     assert.equal(user.name, expectedName);
     assert.equal(user.id, expectedId);
 
-    const serverUser = authenticateServerTeamUser(username, password);
-    assert.ok(serverUser, `Expected valid server login for ${username}`);
-    assert.equal(serverUser.role, expectedRole);
-    assert.equal(serverUser.name, expectedName);
-    assert.equal(serverUser.id, expectedId);
+    const serverRes = await authenticateServerTeamUser(username, password);
+    if (serverRes.ok) {
+      assert.equal(serverRes.user.role, expectedRole);
+      assert.equal(serverRes.user.name, expectedName);
+      assert.equal(serverRes.user.id, expectedId);
+    } else {
+      assert.equal(
+        serverRes.reason,
+        'inactive',
+        `Expected valid or intentionally deactivated server login for ${username}, got ${serverRes.reason}`
+      );
+    }
   }
 
-  assert.equal(DATA_COLLECTORS.length, 3);
+  assert.equal(DATA_COLLECTORS.length, 2);
   assert.deepEqual(
     DATA_COLLECTORS.map((c) => c.name),
-    ['Farhan', 'Naim', 'Kawsar']
+    ['Farhan', 'Naim']
   );
 
   // Case-insensitive username, case-sensitive exact password
   assert.equal(authenticateUser(DEMO_USERS, 'TAZIN@RUNBD', 'tazin@/#312')?.name, 'Tanjin');
-  assert.equal(authenticateUser(DEMO_USERS, 'KAWSAR@RUNBD', 'kawsar@/#312')?.id, 'collector-kawsar');
+  assert.equal(authenticateUser(DEMO_USERS, 'KAWSAR@RUNBD', 'kawsar@/#312')?.id, 'poster-kawsar');
   assert.equal(authenticateUser(DEMO_USERS, 'kawsar@runbd', 'Kawsar@/#312'), null);
-  assert.equal(authenticateServerTeamUser('kawsar@runbd', 'wrong'), null);
+  const badServer = await authenticateServerTeamUser('kawsar@runbd', 'wrong');
+  assert.equal(badServer.ok, false);
   assert.equal(authenticateUser(DEMO_USERS, 'tazin@runbd', 'Tazin@/#312'), null);
   // Cross-agent password rejected
   assert.equal(authenticateUser(DEMO_USERS, 'tazin@runbd', 'kathy@/#312'), null);
@@ -359,10 +378,10 @@ test('authenticateUser and authenticateServerTeamUser verify credentials for Adm
 });
 
 test('generateDailyReportCsv compiles daily calls, successful orders, and follow-ups for all 6 agents plus TOTAL', () => {
-  const reportDate = new Date(2026, 10, 17, 15, 0, 0); // Nov 17, 2026 local
-  const todayIso = new Date(2026, 10, 17, 11, 30, 0).toISOString();
-  const followUpIso = new Date(2026, 10, 17, 16, 0, 0).toISOString();
-  const yesterdayIso = new Date(2026, 10, 16, 11, 30, 0).toISOString();
+  const reportDate = new Date('2026-11-17T15:00:00+06:00');
+  const todayIso = new Date('2026-11-17T11:30:00+06:00').toISOString();
+  const followUpIso = new Date('2026-11-17T16:00:00+06:00').toISOString();
+  const yesterdayIso = new Date('2026-11-16T11:30:00+06:00').toISOString();
 
   const sampleLeads: Lead[] = [
     {
@@ -499,9 +518,9 @@ test('Kawsar dual-link URL normalization, duplicate prevention, and live stats c
     normalizePostUrl('http://m.facebook.com/runbd/posts/12345')
   );
 
-  const now = new Date(2026, 10, 18, 12, 0, 0);
-  const todayIso = new Date(2026, 10, 18, 9, 30, 0).toISOString();
-  const yesterdayIso = new Date(2026, 10, 17, 9, 30, 0).toISOString();
+  const now = new Date('2026-11-18T12:00:00+06:00');
+  const todayIso = new Date('2026-11-18T09:30:00+06:00').toISOString();
+  const yesterdayIso = new Date('2026-11-17T09:30:00+06:00').toISOString();
 
   const posts: ContentPost[] = [
     {
@@ -562,8 +581,8 @@ test('Kawsar dual-link URL normalization, duplicate prevention, and live stats c
 
 test('computeFinalDailySummary and generateFinalDailySummaryCsv consolidate 6 agents, Farhan/Naim, and Kawsar by date', () => {
   const targetDate = '2026-11-18';
-  const targetIso = new Date(2026, 10, 18, 10, 0, 0).toISOString();
-  const otherDayIso = new Date(2026, 10, 17, 10, 0, 0).toISOString();
+  const targetIso = new Date('2026-11-18T10:00:00+06:00').toISOString();
+  const otherDayIso = new Date('2026-11-17T10:00:00+06:00').toISOString();
 
   const collectors: User[] = [
     { id: 'collector-farhan', name: 'Farhan', email: 'farhan@runbd', password: '123', role: 'collector', title: 'Collector', avatarInitials: 'FR' },
@@ -698,9 +717,9 @@ test('computeFinalDailySummary and generateFinalDailySummaryCsv consolidate 6 ag
 });
 
 test('Today-only filters isolate current day records so agents, collectors, and poster reset to 0 daily', () => {
-  const now = new Date(2026, 10, 21, 9, 15, 0);
-  const todayIso = new Date(2026, 10, 21, 8, 30, 0).toISOString();
-  const yesterdayIso = new Date(2026, 10, 20, 23, 50, 0).toISOString();
+  const now = new Date('2026-11-21T09:15:00+06:00');
+  const todayIso = new Date('2026-11-21T08:30:00+06:00').toISOString();
+  const yesterdayIso = new Date('2026-11-20T23:50:00+06:00').toISOString();
 
   assert.equal(isTimestampToday(todayIso, now), true);
   assert.equal(isTimestampToday(yesterdayIso, now), false);
@@ -800,7 +819,7 @@ test('Today-only filters isolate current day records so agents, collectors, and 
 });
 
 test('Paid Customers: createPaidCustomerFromLead sets Today and +30 days, renewPaidCustomer extends +1 month, and 2-day advance alerts scope cleanly', () => {
-  const now = new Date(2026, 10, 20, 10, 0, 0); // 2026-11-20
+  const now = new Date('2026-11-20T10:00:00+06:00'); // 2026-11-20 Asia/Dhaka
   assert.equal(addDaysToYmd('2026-11-20', 30), '2026-12-20');
   assert.equal(addDaysToYmd('2026-11-20', 2), '2026-11-22');
 
@@ -905,8 +924,8 @@ test('Paid Customers: createPaidCustomerFromLead sets Today and +30 days, renewP
 });
 
 test('filterTodayLeads strictly checks collectedDate/date/createdAt (including bare YYYY-MM-DD) and never falls back to updatedAt or missing date', () => {
-  const now = new Date(2026, 10, 21, 10, 30, 0); // 2026-11-21 local
-  const todayIso = new Date(2026, 10, 21, 9, 0, 0).toISOString();
+  const now = new Date('2026-11-21T10:30:00+06:00'); // 2026-11-21 Asia/Dhaka
+  const todayIso = new Date('2026-11-21T09:00:00+06:00').toISOString();
 
   assert.equal(parseDateToYmd('2026-11-20'), '2026-11-20');
   assert.equal(parseDateToYmd('2026-11-21'), '2026-11-21');
@@ -933,11 +952,11 @@ test('filterTodayLeads strictly checks collectedDate/date/createdAt (including b
 });
 
 test('getAgentTodayCallLogs strictly isolates Today logs per agent and sorts newest-first', () => {
-  const now = new Date(2026, 10, 21, 16, 0, 0); // 2026-11-21
-  const todayMorning = new Date(2026, 10, 21, 9, 15, 0).toISOString();
-  const todayAfternoon = new Date(2026, 10, 21, 14, 30, 0).toISOString();
-  const yesterdayIso = new Date(2026, 10, 20, 18, 0, 0).toISOString();
-  const followUpIso = new Date(2026, 10, 22, 11, 0, 0).toISOString();
+  const now = new Date('2026-11-21T16:00:00+06:00'); // 2026-11-21 Asia/Dhaka
+  const todayMorning = new Date('2026-11-21T09:15:00+06:00').toISOString();
+  const todayAfternoon = new Date('2026-11-21T14:30:00+06:00').toISOString();
+  const yesterdayIso = new Date('2026-11-20T18:00:00+06:00').toISOString();
+  const followUpIso = new Date('2026-11-22T11:00:00+06:00').toISOString();
 
   const logs: CallLog[] = [
     {
@@ -1143,10 +1162,10 @@ test('filterAgentAssignedQueueLeads excludes Done leads by default while keeping
 });
 
 test('1 phone / lead = max 1 Today call entry per day: deduplicateSameDayCallLogs, upsertTodayCallLogInList, and KPI metrics', () => {
-  const now = new Date(2026, 10, 22, 16, 30, 0); // 2026-11-22
-  const morningIso = new Date(2026, 10, 22, 10, 0, 0).toISOString();
-  const afternoonIso = new Date(2026, 10, 22, 14, 0, 0).toISOString();
-  const yesterdayIso = new Date(2026, 10, 21, 15, 0, 0).toISOString();
+  const now = new Date('2026-11-22T16:30:00+06:00'); // 2026-11-22 Asia/Dhaka
+  const morningIso = new Date('2026-11-22T10:00:00+06:00').toISOString();
+  const afternoonIso = new Date('2026-11-22T14:00:00+06:00').toISOString();
+  const yesterdayIso = new Date('2026-11-21T15:00:00+06:00').toISOString();
 
   // Existing duplicate Today logs for the same phone (+880 1817-705593 vs 01817705593)
   // plus a valid call from Yesterday for the same number (different day must stay separate)
@@ -1270,7 +1289,7 @@ test('1 phone / lead = max 1 Today call entry per day: deduplicateSameDayCallLog
   );
   assert.equal(existingToday?.id, 'CL-NEW-DUP');
 
-  const eveningIso = new Date(2026, 10, 22, 16, 15, 0).toISOString();
+  const eveningIso = new Date('2026-11-22T16:15:00+06:00').toISOString();
   const updatedList = upsertTodayCallLogInList(rawLogs, {
     id: existingToday!.id,
     leadId: 'L-1817',
@@ -1290,5 +1309,81 @@ test('1 phone / lead = max 1 Today call entry per day: deduplicateSameDayCallLog
     ['CL-NEW-DUP:Order Confirmed', 'CL-YEST-SAME-PHONE:Busy / Call Later']
   );
 });
+
+test('getCopyablePhoneNumber returns clean 11-digit BD number and buildSafeExternalUrl validates external links', () => {
+  assert.equal(getCopyablePhoneNumber('+880 1675-962466'), '01675962466');
+  assert.equal(getCopyablePhoneNumber('8801711223344'), '01711223344');
+  assert.equal(getCopyablePhoneNumber('1812345678'), '01812345678');
+
+  assert.equal(
+    buildSafeExternalUrl('facebook.com/rafiqul.islam'),
+    'https://facebook.com/rafiqul.islam'
+  );
+  assert.equal(
+    buildSafeExternalUrl('https://www.facebook.com/share/p/123'),
+    'https://www.facebook.com/share/p/123'
+  );
+  assert.equal(buildSafeExternalUrl('javascript:alert(1)'), null);
+  assert.equal(buildSafeExternalUrl('   '), null);
+});
+
+test('Asia/Dhaka (UTC+6) date formatting, zero double-shift on bare YYYY-MM-DD, clock-ahead clamp, and collector Today filter', () => {
+  // 17:59:59Z = 23:59:59 Dhaka (still Nov 23); 18:00:00Z = 00:00:00 Dhaka (Nov 24)
+  assert.equal(getDhakaDateString(new Date('2026-11-23T17:59:59.000Z')), '2026-11-23');
+  assert.equal(getDhakaDateString(new Date('2026-11-23T18:00:00.000Z')), '2026-11-24');
+
+  // Bare YYYY-MM-DD strings must format directly with zero UTC/local shift
+  assert.equal(formatShortDate('2026-11-23'), 'Nov 23, 2026');
+  assert.equal(formatDateTime('2026-11-23'), 'Nov 23, 2026');
+  assert.equal(formatTime('2026-11-23'), '');
+
+  // Timestamps format in Asia/Dhaka
+  assert.equal(formatShortDate('2026-11-23T17:30:00.000Z'), 'Nov 23, 2026');
+  assert.equal(formatShortDate('2026-11-23T18:30:00.000Z'), 'Nov 24, 2026');
+
+  // Future-date clamp prevents ahead device clock from saving tomorrow's date
+  const clampedFuture = clampDateToDhakaToday('2026-11-24T01:00:00+06:00', '2026-11-23');
+  assert.equal(clampedFuture.ymd, '2026-11-23');
+  assert.equal(clampedFuture.wasClamped, true);
+  assert.equal(clampedFuture.originalYmd, '2026-11-24');
+
+  const unclampedToday = clampDateToDhakaToday('2026-11-23T22:00:00+06:00', '2026-11-23');
+  assert.equal(unclampedToday.ymd, '2026-11-23');
+  assert.equal(unclampedToday.wasClamped, false);
+
+  // Device clock-ahead detection against server clock
+  const aheadResult = detectDeviceClockAhead(
+    new Date('2026-11-24T02:00:00+06:00'),
+    new Date('2026-11-23T23:55:00+06:00')
+  );
+  assert.equal(aheadResult.isAhead, true);
+  assert.equal(aheadResult.dhakaTodayYmd, '2026-11-23');
+  assert.equal(aheadResult.deviceYmd, '2026-11-24');
+
+  const normalResult = detectDeviceClockAhead(
+    new Date('2026-11-23T23:55:00+06:00'),
+    new Date('2026-11-23T23:55:00+06:00')
+  );
+  assert.equal(normalResult.isAhead, false);
+
+  // Follow-up helpers round-trip cleanly in Dhaka +06:00
+  const followUpIso = buildDhakaFollowUpIso('2026-11-24', '14:30');
+  assert.equal(followUpIso, '2026-11-24T08:30:00.000Z');
+  assert.deepEqual(getDhakaFollowUpFields(followUpIso), { date: '2026-11-24', time: '14:30' });
+
+  // Collector Today guard surfaces both Today (Nov 23) and previously mis-dated future leads (Nov 24), excluding Yesterday (Nov 22)
+  const dhakaNow = new Date('2026-11-23T23:00:00+06:00');
+  const collectorLeads: Lead[] = [
+    { ...existingLeads[0], id: 'L-YEST', collectedDate: '2026-11-22', createdAt: '2026-11-22T10:00:00+06:00' },
+    { ...existingLeads[0], id: 'L-TODAY', collectedDate: '2026-11-23', createdAt: '2026-11-23T22:50:00+06:00' },
+    { ...existingLeads[0], id: 'L-FUTURE-MISDATED', collectedDate: '2026-11-24', createdAt: '2026-11-24T00:05:00+06:00' },
+    { ...existingLeads[0], id: 'L-NO-DATE', collectedDate: undefined, date: undefined, createdAt: '' },
+  ];
+  assert.deepEqual(
+    filterCollectorTodayLeads(collectorLeads, dhakaNow).map((l) => l.id),
+    ['L-TODAY', 'L-FUTURE-MISDATED']
+  );
+});
+
 
 

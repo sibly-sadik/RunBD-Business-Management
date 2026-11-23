@@ -15,13 +15,15 @@ import {
 } from 'lucide-react';
 import { CsvPreviewRow, DuplicateAttempt, Lead, User } from '../types';
 import {
+  detectDeviceClockAhead,
+  filterCollectorTodayLeads,
   filterTodayDuplicateAttempts,
-  filterTodayLeads,
   findDuplicateLead,
   formatBdPhoneDisplay,
   formatDateTime,
   formatShortDate,
-  getLocalDateString,
+  getAuthoritativeDhakaTodayYmd,
+  getEstimatedServerNow,
   normalizeBdPhone,
   openWhatsAppChat,
   parseCsvLeads,
@@ -102,15 +104,20 @@ export function DataCollectionView({
   }, [allLeads, rawPhone, facebookLink]);
   const activeDuplicate = liveDuplicate ?? sheetDuplicate;
 
-  const todayStr = getLocalDateString();
+  const clockStatus = useMemo(
+    () => detectDeviceClockAhead(new Date(), getEstimatedServerNow()),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [allLeads.length]
+  );
+  const todayStr = getAuthoritativeDhakaTodayYmd();
 
-  // Strictly display ONLY leads collected Today (YYYY-MM-DD) for all roles (Collectors & Admin)
+  // Include today's Asia/Dhaka leads and safely surface any mis-dated future leads so none disappear
   const mySubmissions = useMemo(() => {
-    const todayLeads = filterTodayLeads(allLeads);
+    const collectorTodayLeads = filterCollectorTodayLeads(allLeads);
     const list =
       currentUser.role === 'admin'
-        ? todayLeads
-        : todayLeads.filter((l) => l.collectorId === currentUser.id);
+        ? collectorTodayLeads
+        : collectorTodayLeads.filter((l) => l.collectorId === currentUser.id);
     return [...list].sort(
       (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
     );
@@ -443,6 +450,21 @@ export function DataCollectionView({
           </button>
         </div>
       </div>
+
+      {clockStatus.isAhead && (
+        <div
+          role="status"
+          data-testid="clock-ahead-warning"
+          className="flex items-start gap-2.5 rounded-xl bg-amber-50 dark:bg-amber-500/10 border border-amber-300 dark:border-amber-500/40 px-4 py-2.5 text-xs text-amber-900 dark:text-amber-200"
+        >
+          <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+          <span>
+            Device clock ({clockStatus.deviceYmd}) appears ahead of Asia/Dhaka today (
+            <strong className="font-mono">{todayStr}</strong>). New leads are automatically saved with{' '}
+            <strong className="font-mono">{todayStr}</strong> so they stay in Today&apos;s queue.
+          </span>
+        </div>
+      )}
 
       {/* Today-only Collector Stats (Historical rows remain in Google Sheets) */}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">

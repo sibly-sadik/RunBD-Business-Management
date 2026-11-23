@@ -32,10 +32,12 @@ import {
 } from './types';
 import {
   assignLeadsRoundRobin,
+  clampDateToDhakaToday,
   computeDashboardMetrics,
   computeFinalDailySummary,
   computeKawsarPostStats,
   createPaidCustomerFromLead,
+  filterCollectorTodayLeads,
   filterTodayCallLogs,
   filterTodayLeads,
   filterTodayPosts,
@@ -45,7 +47,9 @@ import {
   formatShortDate,
   getActiveAgents,
   getAgentTodayCallLogs,
+  getAuthoritativeDhakaTodayYmd,
   getDueRenewalCustomers,
+  getEstimatedServerNow,
   getLocalDateString,
   getScheduledFollowUps,
   isValidPostUrl,
@@ -319,9 +323,14 @@ export default function App() {
       }
 
       const isAdmin = currentUser.role === 'admin';
+      const isCollector = currentUser.role === 'collector';
       if (res.leads) {
         setLeads((prev) => {
-          const base = isAdmin ? prev : filterTodayLeads(prev);
+          const base = isAdmin
+            ? prev
+            : isCollector
+            ? filterCollectorTodayLeads(prev)
+            : filterTodayLeads(prev);
           const merged = mergeRemoteLeads(base, res.leads!);
           leadsRef.current = merged;
           return merged;
@@ -1011,7 +1020,9 @@ export default function App() {
       setSyncStatus('synced');
     }
 
-    const nowIso = new Date().toISOString();
+    const nowIso = (getEstimatedServerNow() ?? new Date()).toISOString();
+    const authoritativeToday = getAuthoritativeDhakaTodayYmd();
+    const clampedCollectedDate = clampDateToDhakaToday(nowIso, authoritativeToday).ymd;
     const baseLead = {
       id: makeId('RBD'),
       customerName: input.customerName,
@@ -1027,6 +1038,8 @@ export default function App() {
       lastCallNotes: '',
       createdAt: nowIso,
       updatedAt: nowIso,
+      collectedDate: clampedCollectedDate,
+      date: clampedCollectedDate,
     };
 
     const remoteSettingsRes = await fetchAppSettingsFromSupabase().catch(() => null);
@@ -1117,7 +1130,7 @@ export default function App() {
     if (!currentUser || validRows.length === 0) return;
 
     const currentLeads = mergeRemoteLeads(leadsRef.current, storage.getLeads());
-    const nowIso = new Date().toISOString();
+    const nowIso = (getEstimatedServerNow() ?? new Date()).toISOString();
     const workingLeads = [...currentLeads];
     const localAcceptedRows: CsvPreviewRow[] = [];
     let skippedCount = 0;
@@ -1255,6 +1268,8 @@ export default function App() {
       return;
     }
 
+    const authoritativeToday = getAuthoritativeDhakaTodayYmd();
+    const clampedCollectedDate = clampDateToDhakaToday(nowIso, authoritativeToday).ymd;
     const baseLeads = acceptedRows.map((r) => ({
       id: makeId('RBD'),
       customerName: r.customerName,
@@ -1270,6 +1285,8 @@ export default function App() {
       lastCallNotes: '',
       createdAt: nowIso,
       updatedAt: nowIso,
+      collectedDate: clampedCollectedDate,
+      date: clampedCollectedDate,
     }));
 
     const remoteSettingsRes = await fetchAppSettingsFromSupabase().catch(() => null);
@@ -1980,7 +1997,7 @@ export default function App() {
     if (!currentUser || currentUser.role !== 'admin') {
       return { ok: false, error: 'Only Admin / Supervisor can update team members.' };
     }
-    const res = await updateTeamMemberViaApi(memberId, patch);
+    const res = await updateTeamMemberViaApi(memberId, patch, currentUser.id);
     if (res.schemaMissing) {
       setTeamSchemaMissing(true);
     }
@@ -2042,7 +2059,7 @@ export default function App() {
       return { ok: false, error: 'Only Admin / Supervisor can remove team members.' };
     }
     const target = teamMembersRef.current.find((m) => m.id === memberId);
-    const res = await deleteTeamMemberViaApi(memberId);
+    const res = await deleteTeamMemberViaApi(memberId, currentUser.id);
     if (res.schemaMissing) {
       setTeamSchemaMissing(true);
     }
@@ -2171,7 +2188,7 @@ export default function App() {
       const postStats = computeKawsarPostStats(contentPosts);
       return { label: 'Entries Today', value: String(postStats.todayCount) };
     }
-    const mineToday = filterTodayLeads(leads).filter(
+    const mineToday = filterCollectorTodayLeads(leads).filter(
       (l) => l.collectorId === currentUser.id
     ).length;
     return { label: 'Collected Today', value: String(mineToday) };
@@ -2275,6 +2292,9 @@ export default function App() {
               onExportCsv={() =>
                 addToast('success', 'CSV Exported', 'Paid Customers & Renewals report downloaded.')
               }
+              onPhoneCopied={(cleanPhone) =>
+                addToast('success', 'Phone number copied', cleanPhone)
+              }
             />
           )}
 
@@ -2313,6 +2333,9 @@ export default function App() {
             onOpenPaidCustomers={() => setActiveTab('paid-customers')}
             onOpenTodayCalls={() => setActiveTab('agent-today-calls')}
             onUpdateCallScript={handleUpdateCallScript}
+            onPhoneCopied={(cleanPhone) =>
+              addToast('success', 'Phone number copied', cleanPhone)
+            }
             onLogCall={handleLogCall}
           />
         )}
@@ -2322,6 +2345,9 @@ export default function App() {
             agent={currentUser}
             callLogs={callLogs}
             onBackToQueue={() => setActiveTab('agent-workspace')}
+            onPhoneCopied={(cleanPhone) =>
+              addToast('success', 'Phone number copied', cleanPhone)
+            }
           />
         )}
 
@@ -2345,6 +2371,8 @@ export default function App() {
 
         {currentUser.role === 'admin' && activeTab === 'admin-sheets' && (
           <AdminSheetsView
+            agents={callCenterAgents}
+            collectors={dataCollectors}
             webhookUrl={settings.googleSheetsWebhookUrl}
             defaultWebhookUrl={DEFAULT_GOOGLE_SHEETS_WEBHOOK_URL}
             lastSyncedAt={settings.lastSyncedAt}

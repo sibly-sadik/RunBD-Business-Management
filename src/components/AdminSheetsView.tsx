@@ -16,11 +16,17 @@ import {
 } from 'lucide-react';
 import supabaseSchemaSql from '../../supabase/schema.sql?raw';
 import { GOOGLE_APPS_SCRIPT_CODE } from '../data/seedData';
-import { SyncStatus } from '../types';
+import { SyncStatus, User } from '../types';
 import { formatDateTime } from '../utils/leadLogic';
-import { SheetDuplicateReport } from '../utils/sheetsSync';
+import {
+  getAgentTabName,
+  getCollectorTabName,
+  SheetDuplicateReport,
+} from '../utils/sheetsSync';
 
 interface AdminSheetsViewProps {
+  agents?: User[];
+  collectors?: User[];
   webhookUrl: string;
   defaultWebhookUrl: string;
   lastSyncedAt: string | null;
@@ -32,7 +38,12 @@ interface AdminSheetsViewProps {
   onClearCacheAndSyncToday: (url: string) => Promise<void>;
 }
 
+const DEFAULT_AGENT_NAMES = ['Tanjin', 'Kathy', 'Tania', 'Shanaz', 'Sizon', 'Sakib'];
+const DEFAULT_COLLECTOR_NAMES = ['Farhan', 'Naim'];
+
 export function AdminSheetsView({
+  agents,
+  collectors,
   webhookUrl,
   defaultWebhookUrl,
   lastSyncedAt,
@@ -125,17 +136,17 @@ export function AdminSheetsView({
           </p>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2.5 self-start">
+        <div className="flex flex-wrap items-center gap-2 self-start shrink-0">
           <button
             type="button"
             data-testid="copy-supabase-sql-btn"
             onClick={handleCopySupabaseSql}
-            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg border border-sky-500/40 bg-sky-500/10 hover:bg-sky-500/20 text-xs font-semibold text-sky-700 dark:text-sky-300 transition-colors whitespace-nowrap cursor-pointer"
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-sky-500/40 bg-sky-500/10 hover:bg-sky-500/20 text-xs font-semibold text-sky-700 dark:text-sky-300 transition-colors whitespace-nowrap cursor-pointer"
           >
             {copiedSql ? (
-              <Check className="w-4 h-4 text-emerald-500" />
+              <Check className="w-3.5 h-3.5 text-emerald-500" />
             ) : (
-              <Database className="w-4 h-4 text-sky-500" />
+              <Database className="w-3.5 h-3.5 text-sky-500" />
             )}
             <span>{copiedSql ? 'Copied Supabase SQL' : 'Copy Supabase SQL'}</span>
           </button>
@@ -143,18 +154,32 @@ export function AdminSheetsView({
           <button
             type="button"
             onClick={() => setSqlModalOpen(true)}
-            className="inline-flex items-center gap-2 px-3.5 py-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-semibold text-slate-800 dark:text-slate-100 transition-colors whitespace-nowrap cursor-pointer"
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-semibold text-slate-800 dark:text-slate-100 transition-colors whitespace-nowrap cursor-pointer"
           >
-            <Code2 className="w-4 h-4 text-sky-500" />
+            <Code2 className="w-3.5 h-3.5 text-sky-500" />
             <span>View SQL</span>
           </button>
 
           <button
             type="button"
-            onClick={() => setScriptModalOpen(true)}
-            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-semibold text-slate-800 dark:text-slate-100 transition-colors whitespace-nowrap cursor-pointer"
+            data-testid="copy-code-gs-btn"
+            onClick={handleCopyCode}
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-emerald-500/40 bg-emerald-500/10 hover:bg-emerald-500/20 text-xs font-semibold text-emerald-700 dark:text-emerald-300 transition-colors whitespace-nowrap cursor-pointer"
           >
-            <Code2 className="w-4 h-4 text-emerald-500" />
+            {copied ? (
+              <Check className="w-3.5 h-3.5 text-emerald-500" />
+            ) : (
+              <Copy className="w-3.5 h-3.5 text-emerald-500" />
+            )}
+            <span>{copied ? 'Copied Code.gs' : 'Copy Code.gs'}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setScriptModalOpen(true)}
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-semibold text-slate-800 dark:text-slate-100 transition-colors whitespace-nowrap cursor-pointer"
+          >
+            <Code2 className="w-3.5 h-3.5 text-emerald-500" />
             <span>View Code.gs Script</span>
           </button>
         </div>
@@ -515,6 +540,43 @@ export function AdminSheetsView({
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 pb-3 border-b border-slate-200 dark:border-slate-800">
           <div>
             <h2 className="text-sm font-semibold text-slate-900 dark:text-white">
+              Dedicated Per-Collector Tabs (Auto-Synced)
+            </h2>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+              Each Data Collector&apos;s collected &amp; imported leads are automatically upserted into their own dedicated tab (including newly added collectors from Team Management).
+            </p>
+          </div>
+        </div>
+        <div
+          data-testid="dedicated-collector-tabs-grid"
+          className="mt-4 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3"
+        >
+          {(collectors && collectors.length > 0
+            ? collectors.map((c) => c.name)
+            : DEFAULT_COLLECTOR_NAMES
+          ).map((name) => {
+            const tabName = getCollectorTabName(name);
+            return (
+              <div
+                key={tabName}
+                className="rounded-xl px-3.5 py-2.5 bg-slate-50 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800"
+              >
+                <p className="text-xs font-mono font-semibold text-amber-700 dark:text-amber-400 truncate">
+                  {tabName}
+                </p>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                  {name}&apos;s collected leads
+                </p>
+              </div>
+            );
+          })}
+        </div>
+      </section>
+
+      <section className="glass-panel rounded-2xl p-5">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 pb-3 border-b border-slate-200 dark:border-slate-800">
+          <div>
+            <h2 className="text-sm font-semibold text-slate-900 dark:text-white">
               Dedicated Per-Agent Tabs (Auto-Synced)
             </h2>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
@@ -523,9 +585,16 @@ export function AdminSheetsView({
             </p>
           </div>
         </div>
-        <div className="mt-4 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-          {['Agent_Tanjin', 'Agent_Kathy', 'Agent_Tania', 'Agent_Shanaz', 'Agent_Sizon', 'Agent_Sakib'].map(
-            (tabName) => (
+        <div
+          data-testid="dedicated-agent-tabs-grid"
+          className="mt-4 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3"
+        >
+          {(agents && agents.length > 0
+            ? agents.map((a) => a.name)
+            : DEFAULT_AGENT_NAMES
+          ).map((name) => {
+            const tabName = getAgentTabName(name);
+            return (
               <div
                 key={tabName}
                 className="rounded-xl px-3.5 py-2.5 bg-slate-50 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800"
@@ -537,8 +606,8 @@ export function AdminSheetsView({
                   Assigned leads only
                 </p>
               </div>
-            )
-          )}
+            );
+          })}
         </div>
       </section>
 

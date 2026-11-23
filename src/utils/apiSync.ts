@@ -10,8 +10,15 @@ import {
   User,
   UserRole,
 } from '../types';
-import { supabase } from '../lib/supabase';
-import { authenticateUser } from './leadLogic';
+import { authenticateUser, recordServerClockHeader } from './leadLogic';
+import {
+  authenticateAgainstSupabaseDirect,
+  createTeamMemberDirect,
+  deleteTeamMemberDirect,
+  fetchTeamMembersDirect,
+  restoreUserFromSupabaseDirect,
+  updateTeamMemberDirect,
+} from './supabaseTeamFallback';
 import { stripUserPassword } from './teamLogic';
 import { storage } from './storage';
 
@@ -25,6 +32,13 @@ export function getInMemoryAuthToken(): string | null {
   return inMemoryAuthToken;
 }
 
+function isUnavailableEndpointResponse(res: Response, contentType: string): boolean {
+  if (res.status === 404 || res.status === 405 || res.status === 501) {
+    return true;
+  }
+  return !contentType.toLowerCase().includes('application/json');
+}
+
 async function apiFetch(input: string, init: RequestInit = {}): Promise<Response> {
   const headers = new Headers(init.headers);
   headers.set('X-Requested-With', 'RunBD-Client');
@@ -34,11 +48,13 @@ async function apiFetch(input: string, init: RequestInit = {}): Promise<Response
   if (inMemoryAuthToken && !headers.has('Authorization')) {
     headers.set('Authorization', `Bearer ${inMemoryAuthToken}`);
   }
-  return fetch(input, {
+  const res = await fetch(input, {
     ...init,
     headers,
     credentials: 'include',
   });
+  recordServerClockHeader(res.headers.get('date'));
+  return res;
 }
 
 function toClientUser(raw: Omit<User, 'password'> & { password?: string }): User {
@@ -55,7 +71,7 @@ export async function loginWithServer(
       body: JSON.stringify({ username, password }),
     });
     const contentType = res.headers.get('content-type') || '';
-    if (contentType.includes('application/json')) {
+    if (!isUnavailableEndpointResponse(res, contentType)) {
       const data = (await res.json()) as {
         user?: Omit<User, 'password'>;
         token?: string;
@@ -77,7 +93,20 @@ export async function loginWithServer(
       }
     }
   } catch {
-    // Backend /api/auth/login not reachable (e.g., static Shared App deployment) -> fall through cleanly
+    // Backend /api/auth/login not reachable (e.g., static Vercel deployment) -> fall back to direct Supabase
+  }
+
+  const directAuth = await authenticateAgainstSupabaseDirect(username, password);
+  if (directAuth.ok && directAuth.user) {
+    return { ok: true, user: toClientUser(directAuth.user) };
+  }
+  if (directAuth.authoritative) {
+    return {
+      ok: false,
+      error:
+        directAuth.error ??
+        'Invalid username or password. Please verify your assigned RunBD credentials.',
+    };
   }
 
   const matched = authenticateUser(DEMO_USERS, username, password);
@@ -100,15 +129,21 @@ export async function restoreServerSession(
       return null;
     }
     const contentType = res.headers.get('content-type') || '';
-    if (res.ok && contentType.includes('application/json')) {
+    if (res.ok && !isUnavailableEndpointResponse(res, contentType)) {
       const data = (await res.json()) as { user?: Omit<User, 'password'> };
       return data.user ? toClientUser(data.user) : null;
     }
   } catch {
-    // Fall through to static session lookup when backend is not present
+    // Fall through to direct Supabase / static session lookup when backend is not present
   }
 
   if (!savedUserId) return null;
+
+  const directRestore = await restoreUserFromSupabaseDirect(savedUserId);
+  if (directRestore.authoritative) {
+    return directRestore.user;
+  }
+
   const cachedMatched = storage
     .getTeamMembers()
     .find((u) => u.id === savedUserId && u.isActive !== false);
@@ -126,7 +161,7 @@ export async function fetchTeamDirectory(): Promise<{
   try {
     const res = await apiFetch('/api/team-members/directory', { method: 'GET' });
     const contentType = res.headers.get('content-type') || '';
-    if (res.ok && contentType.includes('application/json')) {
+    if (res.ok && !isUnavailableEndpointResponse(res, contentType)) {
       const data = (await res.json()) as {
         ok?: boolean;
         members?: Array<Omit<User, 'password'>>;
@@ -144,36 +179,19 @@ export async function fetchTeamDirectory(): Promise<{
     // Fall through to direct Supabase public directory query
   }
 
-  try {
-    const { data, error } = await supabase
-      .from('team_members')
-      .select('id, name, email, role, title, avatar_initials, is_active, created_at')
-      .eq('is_active', true);
-
-    if (!error && Array.isArray(data) && data.length > 0) {
-      return {
-        ok: true,
-        members: data.map((row) =>
-          toClientUser({
-            id: String(row.id),
-            name: String(row.name),
-            email: String(row.email),
-            role: row.role as UserRole,
-            title: String(row.title || ''),
-            avatarInitials: String(row.avatar_initials || ''),
-            isActive: row.is_active !== false,
-            createdAt: typeof row.created_at === 'string' ? row.created_at : undefined,
-          })
-        ),
-      };
-    }
-  } catch {
-    // Fall through to cached / default team members
+  const directRes = await fetchTeamMembersDirect(false);
+  if (directRes.ok && directRes.members && directRes.members.length > 0) {
+    return {
+      ok: true,
+      members: directRes.members,
+      schemaMissing: Boolean(directRes.schemaMissing),
+    };
   }
 
   return {
     ok: false,
     members: DEMO_USERS.map(toClientUser),
+    schemaMissing: Boolean(directRes.schemaMissing),
   };
 }
 
@@ -186,8 +204,8 @@ export async function fetchAdminTeamMembers(): Promise<{
   try {
     const res = await apiFetch('/api/team-members', { method: 'GET' });
     const contentType = res.headers.get('content-type') || '';
-    if (!contentType.includes('application/json')) {
-      return { ok: false, error: 'Team Management API unavailable in current preview mode.' };
+    if (isUnavailableEndpointResponse(res, contentType)) {
+      return await fetchTeamMembersDirect(true);
     }
     const data = (await res.json()) as {
       ok?: boolean;
@@ -207,11 +225,8 @@ export async function fetchAdminTeamMembers(): Promise<{
       members: (data.members ?? []).map(toClientUser),
       schemaMissing: Boolean(data.schemaMissing),
     };
-  } catch (err) {
-    return {
-      ok: false,
-      error: err instanceof Error ? err.message : 'Failed to load team members.',
-    };
+  } catch {
+    return await fetchTeamMembersDirect(true);
   }
 }
 
@@ -233,8 +248,8 @@ export async function createTeamMemberViaApi(input: {
       body: JSON.stringify(input),
     });
     const contentType = res.headers.get('content-type') || '';
-    if (!contentType.includes('application/json')) {
-      return { ok: false, error: 'Team Management server endpoint is unavailable.' };
+    if (isUnavailableEndpointResponse(res, contentType)) {
+      return await createTeamMemberDirect(input);
     }
     const data = (await res.json()) as {
       ok?: boolean;
@@ -250,11 +265,8 @@ export async function createTeamMemberViaApi(input: {
       };
     }
     return { ok: true, member: toClientUser(data.member) };
-  } catch (err) {
-    return {
-      ok: false,
-      error: err instanceof Error ? err.message : 'Failed to create team member.',
-    };
+  } catch {
+    return await createTeamMemberDirect(input);
   }
 }
 
@@ -266,7 +278,8 @@ export async function updateTeamMemberViaApi(
     title?: string;
     isActive?: boolean;
     password?: string;
-  }
+  },
+  actingAdminId?: string
 ): Promise<{
   ok: boolean;
   member?: User;
@@ -280,8 +293,8 @@ export async function updateTeamMemberViaApi(
       body: JSON.stringify(patch),
     });
     const contentType = res.headers.get('content-type') || '';
-    if (!contentType.includes('application/json')) {
-      return { ok: false, error: 'Team Management server endpoint is unavailable.' };
+    if (isUnavailableEndpointResponse(res, contentType)) {
+      return await updateTeamMemberDirect(memberId, actingAdminId, patch);
     }
     const data = (await res.json()) as {
       ok?: boolean;
@@ -302,15 +315,15 @@ export async function updateTeamMemberViaApi(
       member: toClientUser(data.member),
       previousMember: data.previousMember ? toClientUser(data.previousMember) : undefined,
     };
-  } catch (err) {
-    return {
-      ok: false,
-      error: err instanceof Error ? err.message : 'Failed to update team member.',
-    };
+  } catch {
+    return await updateTeamMemberDirect(memberId, actingAdminId, patch);
   }
 }
 
-export async function deleteTeamMemberViaApi(memberId: string): Promise<{
+export async function deleteTeamMemberViaApi(
+  memberId: string,
+  actingAdminId?: string
+): Promise<{
   ok: boolean;
   removedMember?: User;
   schemaMissing?: boolean;
@@ -321,8 +334,8 @@ export async function deleteTeamMemberViaApi(memberId: string): Promise<{
       method: 'DELETE',
     });
     const contentType = res.headers.get('content-type') || '';
-    if (!contentType.includes('application/json')) {
-      return { ok: false, error: 'Team Management server endpoint is unavailable.' };
+    if (isUnavailableEndpointResponse(res, contentType)) {
+      return await deleteTeamMemberDirect(memberId, actingAdminId);
     }
     const data = (await res.json()) as {
       ok?: boolean;
@@ -341,11 +354,8 @@ export async function deleteTeamMemberViaApi(memberId: string): Promise<{
       ok: true,
       removedMember: data.removedMember ? toClientUser(data.removedMember) : undefined,
     };
-  } catch (err) {
-    return {
-      ok: false,
-      error: err instanceof Error ? err.message : 'Failed to remove team member.',
-    };
+  } catch {
+    return await deleteTeamMemberDirect(memberId, actingAdminId);
   }
 }
 

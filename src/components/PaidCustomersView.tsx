@@ -17,8 +17,10 @@ import {
   computeEffectiveRenewalStatus,
   formatBdPhoneDisplay,
   generatePaidCustomersCsv,
+  getDhakaDateString,
   openWhatsAppChat,
 } from '../utils/leadLogic';
+import { CopyPhoneButton } from './CopyPhoneButton';
 
 interface PaidCustomersViewProps {
   currentUser: User;
@@ -27,6 +29,7 @@ interface PaidCustomersViewProps {
   onMarkRenewed: (customerId: string) => void;
   onUpdateRenewalStatus?: (customerId: string, status: RenewalStatus) => void;
   onExportCsv?: () => void;
+  onPhoneCopied?: (cleanPhone: string) => void;
 }
 
 type FilterMode = 'ALL' | 'DUE_SOON' | RenewalStatus;
@@ -65,6 +68,7 @@ export function PaidCustomersView({
   onMarkRenewed,
   onUpdateRenewalStatus,
   onExportCsv,
+  onPhoneCopied,
 }: PaidCustomersViewProps) {
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<FilterMode>('ALL');
@@ -142,7 +146,7 @@ export function PaidCustomersView({
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `runbd_paid_customers_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.download = `runbd_paid_customers_${getDhakaDateString()}.csv`;
     a.click();
     URL.revokeObjectURL(url);
     onExportCsv?.();
@@ -344,6 +348,11 @@ export function PaidCustomersView({
                             <span className="font-mono text-xs tabular-nums text-slate-700 dark:text-slate-300 whitespace-nowrap">
                               {formatBdPhoneDisplay(customer.phone)}
                             </span>
+                            <CopyPhoneButton
+                              phone={customer.phone}
+                              customerName={customer.customerName}
+                              onCopied={onPhoneCopied}
+                            />
                             <a
                               href={buildTelUrl(customer.phone)}
                               aria-label={`Call ${customer.customerName}`}
@@ -433,9 +442,16 @@ export function PaidCustomersView({
                       <p className="text-sm font-semibold text-slate-900 dark:text-white truncate">
                         {customer.customerName}
                       </p>
-                      <p className="text-xs font-mono tabular-nums text-slate-600 dark:text-slate-400 mt-0.5">
-                        {formatBdPhoneDisplay(customer.phone)}
-                      </p>
+                      <div className="flex items-center gap-1.5 mt-0.5">
+                        <p className="text-xs font-mono tabular-nums text-slate-600 dark:text-slate-400 whitespace-nowrap">
+                          {formatBdPhoneDisplay(customer.phone)}
+                        </p>
+                        <CopyPhoneButton
+                          phone={customer.phone}
+                          customerName={customer.customerName}
+                          onCopied={onPhoneCopied}
+                        />
+                      </div>
                     </div>
                     <RenewalStatusBadge status={effectiveStatus} />
                   </div>

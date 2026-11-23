@@ -422,7 +422,7 @@ export function AdminTeamManagementView({
                   Add Team Member
                 </h2>
                 <p className="text-xs text-slate-500 dark:text-slate-400">
-                  Credentials are hashed securely on the server before saving to Supabase.
+                  Credentials are salted and hashed securely before saving to Supabase.
                 </p>
               </div>
             </div>
@@ -952,7 +952,7 @@ export function AdminTeamManagementView({
             </div>
             <form onSubmit={handleSaveResetPassword} className="p-5 space-y-4">
               <p className="text-xs text-slate-500 dark:text-slate-400">
-                Assign a new password for <strong className="font-mono">{resettingMember.email}</strong>. It will be salted and hashed securely on the server before storing.
+                Assign a new password for <strong className="font-mono">{resettingMember.email}</strong>. It will be salted and hashed securely before storing in Supabase.
               </p>
               <div>
                 <label

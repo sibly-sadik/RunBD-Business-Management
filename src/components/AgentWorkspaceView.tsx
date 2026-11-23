@@ -14,6 +14,8 @@ import {
 } from 'lucide-react';
 import { CALL_STATUSES, CallLog, CallStatus, Lead, User } from '../types';
 import {
+  buildDhakaFollowUpIso,
+  buildSafeExternalUrl,
   buildTelUrl,
   DueRenewalItem,
   filterAgentAssignedQueueLeads,
@@ -23,11 +25,13 @@ import {
   formatShortDate,
   formatTime,
   getAgentTodayCallLogs,
+  getDhakaFollowUpFields,
   getLocalDateString,
   getScheduledFollowUps,
   isFollowUpDueToday,
   openWhatsAppChat,
 } from '../utils/leadLogic';
+import { CopyPhoneButton } from './CopyPhoneButton';
 import { RenewalAlertBanner } from './RenewalAlertBanner';
 import { StatusBadge } from './StatusBadge';
 
@@ -41,6 +45,7 @@ interface AgentWorkspaceViewProps {
   onOpenPaidCustomers: () => void;
   onOpenTodayCalls?: () => void;
   onUpdateCallScript: (script: string) => void;
+  onPhoneCopied?: (cleanPhone: string) => void;
   onLogCall: (input: {
     leadId: string;
     newStatus: CallStatus;
@@ -59,6 +64,7 @@ export function AgentWorkspaceView({
   onOpenPaidCustomers,
   onOpenTodayCalls,
   onUpdateCallScript,
+  onPhoneCopied,
   onLogCall,
 }: AgentWorkspaceViewProps) {
   const [searchQuery, setSearchQuery] = useState('');
@@ -143,23 +149,9 @@ export function AgentWorkspaceView({
     setActiveLead(lead);
     setModalStatus(lead.status);
     setModalNotes(lead.lastCallNotes || '');
-    if (lead.followUpAt) {
-      const dt = new Date(lead.followUpAt);
-      const yyyy = dt.getFullYear();
-      const mm = String(dt.getMonth() + 1).padStart(2, '0');
-      const dd = String(dt.getDate()).padStart(2, '0');
-      const hh = String(dt.getHours()).padStart(2, '0');
-      const min = String(dt.getMinutes()).padStart(2, '0');
-      setModalFollowUpDate(`${yyyy}-${mm}-${dd}`);
-      setModalFollowUpTime(`${hh}:${min}`);
-    } else {
-      const today = new Date();
-      const yyyy = today.getFullYear();
-      const mm = String(today.getMonth() + 1).padStart(2, '0');
-      const dd = String(today.getDate()).padStart(2, '0');
-      setModalFollowUpDate(`${yyyy}-${mm}-${dd}`);
-      setModalFollowUpTime('16:00');
-    }
+    const followUpFields = getDhakaFollowUpFields(lead.followUpAt);
+    setModalFollowUpDate(followUpFields.date);
+    setModalFollowUpTime(followUpFields.time);
   };
 
   const highlightFollowUp =
@@ -175,11 +167,7 @@ export function AgentWorkspaceView({
       (highlightFollowUp || modalStatus === 'Switched Off / No Answer') &&
       modalFollowUpDate
     ) {
-      const safeTime = modalFollowUpTime || '10:00';
-      const parsed = new Date(`${modalFollowUpDate}T${safeTime}:00`);
-      if (!Number.isNaN(parsed.getTime())) {
-        followUpIso = parsed.toISOString();
-      }
+      followUpIso = buildDhakaFollowUpIso(modalFollowUpDate, modalFollowUpTime || '10:00');
     }
 
     onLogCall({
@@ -323,11 +311,26 @@ export function AgentWorkspaceView({
               >
                 <div>
                   <div className="flex items-start justify-between gap-2">
-                    <p className="text-sm font-semibold text-slate-900 dark:text-white truncate">
-                      {lead.customerName}
-                    </p>
+                    <div className="min-w-0">
+                      <p className="text-sm font-semibold text-slate-900 dark:text-white truncate">
+                        {lead.customerName}
+                      </p>
+                      {buildSafeExternalUrl(lead.facebookLink) && (
+                        <a
+                          href={buildSafeExternalUrl(lead.facebookLink) as string}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={(e) => e.stopPropagation()}
+                          data-testid={`followup-fb-link-${lead.id}`}
+                          className="inline-flex items-center gap-1 text-xs text-sky-600 dark:text-sky-400 hover:underline mt-0.5"
+                        >
+                          <span>Facebook</span>
+                          <ExternalLink className="w-3 h-3" />
+                        </a>
+                      )}
+                    </div>
                     <span
-                      className={`text-xs font-mono font-semibold tabular-nums px-2 py-0.5 rounded whitespace-nowrap ${
+                      className={`text-xs font-mono font-semibold tabular-nums px-2 py-0.5 rounded whitespace-nowrap shrink-0 ${
                         isOverdue
                           ? 'text-rose-700 dark:text-rose-300 bg-rose-500/15'
                           : isToday
@@ -338,10 +341,17 @@ export function AgentWorkspaceView({
                       {badgeLabel}
                     </span>
                   </div>
-                  <div className="flex items-center justify-between gap-2 mt-1.5">
-                    <p className="text-xs font-mono tabular-nums text-slate-600 dark:text-slate-400">
-                      {formatBdPhoneDisplay(lead.phone)}
-                    </p>
+                  <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1.5 mt-2">
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <p className="text-xs font-mono tabular-nums text-slate-600 dark:text-slate-400 whitespace-nowrap">
+                        {formatBdPhoneDisplay(lead.phone)}
+                      </p>
+                      <CopyPhoneButton
+                        phone={lead.phone}
+                        customerName={lead.customerName}
+                        onCopied={onPhoneCopied}
+                      />
+                    </div>
                     <StatusBadge status={lead.status} compact />
                   </div>
                   {lead.lastCallNotes && (
@@ -507,15 +517,11 @@ export function AgentWorkspaceView({
                           {lead.customerName}
                         </div>
                         <div className="flex items-center gap-2 mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-                          {lead.facebookLink && (
+                          {buildSafeExternalUrl(lead.facebookLink) && (
                             <a
-                              href={
-                                lead.facebookLink.startsWith('http')
-                                  ? lead.facebookLink
-                                  : `https://${lead.facebookLink}`
-                              }
+                              href={buildSafeExternalUrl(lead.facebookLink) as string}
                               target="_blank"
-                              rel="noreferrer"
+                              rel="noopener noreferrer"
                               className="inline-flex items-center gap-1 text-sky-600 dark:text-sky-400 hover:underline"
                             >
                               <span>Facebook</span>
@@ -524,7 +530,9 @@ export function AgentWorkspaceView({
                           )}
                           {lead.lastCallNotes && (
                             <>
-                              {lead.facebookLink && <span aria-hidden="true">·</span>}
+                              {buildSafeExternalUrl(lead.facebookLink) && (
+                                <span aria-hidden="true">·</span>
+                              )}
                               <span className="truncate max-w-[220px]">{lead.lastCallNotes}</span>
                             </>
                           )}
@@ -535,6 +543,11 @@ export function AgentWorkspaceView({
                           <span className="font-mono text-xs tabular-nums text-slate-700 dark:text-slate-300 whitespace-nowrap">
                             {formatBdPhoneDisplay(lead.phone)}
                           </span>
+                          <CopyPhoneButton
+                            phone={lead.phone}
+                            customerName={lead.customerName}
+                            onCopied={onPhoneCopied}
+                          />
                           <a
                             href={buildTelUrl(lead.phone)}
                             aria-label={`Call ${lead.customerName}`}
@@ -603,24 +616,27 @@ export function AgentWorkspaceView({
                       <p className="text-sm font-semibold text-slate-900 dark:text-white truncate">
                         {lead.customerName}
                       </p>
-                      <p className="text-xs font-mono tabular-nums text-slate-600 dark:text-slate-400 mt-0.5">
-                        {formatBdPhoneDisplay(lead.phone)}
-                      </p>
+                      <div className="flex items-center gap-1.5 mt-0.5">
+                        <p className="text-xs font-mono tabular-nums text-slate-600 dark:text-slate-400 whitespace-nowrap">
+                          {formatBdPhoneDisplay(lead.phone)}
+                        </p>
+                        <CopyPhoneButton
+                          phone={lead.phone}
+                          customerName={lead.customerName}
+                          onCopied={onPhoneCopied}
+                        />
+                      </div>
                     </div>
                     <StatusBadge status={lead.status} compact />
                   </div>
 
                   <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
                     <span>Added {formatShortDate(lead.createdAt)}</span>
-                    {lead.facebookLink && (
+                    {buildSafeExternalUrl(lead.facebookLink) && (
                       <a
-                        href={
-                          lead.facebookLink.startsWith('http')
-                            ? lead.facebookLink
-                            : `https://${lead.facebookLink}`
-                        }
+                        href={buildSafeExternalUrl(lead.facebookLink) as string}
                         target="_blank"
-                        rel="noreferrer"
+                        rel="noopener noreferrer"
                         className="inline-flex items-center gap-1 text-sky-600 dark:text-sky-400 font-medium"
                       >
                         <span>Facebook</span>

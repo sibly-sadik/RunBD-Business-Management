@@ -17,17 +17,20 @@ import {
   openWhatsAppChat,
 } from '../utils/leadLogic';
 import { StatusBadge } from './StatusBadge';
+import { CopyPhoneButton } from './CopyPhoneButton';
 
 interface AgentTodayCallsViewProps {
   agent: User;
   callLogs: CallLog[];
   onBackToQueue?: () => void;
+  onPhoneCopied?: (cleanPhone: string) => void;
 }
 
 export function AgentTodayCallsView({
   agent,
   callLogs,
   onBackToQueue,
+  onPhoneCopied,
 }: AgentTodayCallsViewProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<CallStatus | 'ALL'>('ALL');
@@ -226,6 +229,11 @@ export function AgentTodayCallsView({
                           <span className="font-mono text-xs tabular-nums text-slate-700 dark:text-slate-300 whitespace-nowrap">
                             {formatBdPhoneDisplay(log.phone)}
                           </span>
+                          <CopyPhoneButton
+                            phone={log.phone}
+                            customerName={log.customerName}
+                            onCopied={onPhoneCopied}
+                          />
                           <a
                             href={buildTelUrl(log.phone)}
                             aria-label={`Call ${log.customerName}`}
@@ -290,9 +298,16 @@ export function AgentTodayCallsView({
                       <p className="text-sm font-semibold text-slate-900 dark:text-white truncate">
                         {log.customerName}
                       </p>
-                      <p className="text-xs font-mono tabular-nums text-slate-600 dark:text-slate-400 mt-0.5">
-                        {formatBdPhoneDisplay(log.phone)}
-                      </p>
+                      <div className="flex items-center gap-1.5 mt-0.5">
+                        <p className="text-xs font-mono tabular-nums text-slate-600 dark:text-slate-400 whitespace-nowrap">
+                          {formatBdPhoneDisplay(log.phone)}
+                        </p>
+                        <CopyPhoneButton
+                          phone={log.phone}
+                          customerName={log.customerName}
+                          onCopied={onPhoneCopied}
+                        />
+                      </div>
                     </div>
                     <span className="text-[11px] font-mono tabular-nums text-slate-500 dark:text-slate-400 whitespace-nowrap">
                       {formatTime(log.timestamp) || formatDateTime(log.timestamp)}

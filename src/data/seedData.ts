@@ -155,7 +155,8 @@ export const GOOGLE_APPS_SCRIPT_CODE = `/**
  * RunBD Business Management Application - Google Sheets Real-Time Multi-Tab Sync
  * Automatically creates and syncs:
  *   - Core Tabs: Master_Data, Agent_Logs, Daily_Summary, Kawsar_Posts_Log, Paid_Customers, Final_Daily_Summary
- *   - Dedicated Agent Tabs: Agent_Tanjin, Agent_Kathy, Agent_Tania, Agent_Shanaz, Agent_Sizon, Agent_Sakib
+ *   - Dedicated Agent Tabs: Agent_Tanjin, Agent_Kathy, Agent_Tania, Agent_Shanaz, Agent_Sizon, Agent_Sakib (and dynamic Agent_<Name>)
+ *   - Dedicated Collector Tabs: Collector_Farhan, Collector_Naim (and dynamic Collector_<Name> for Team Management collectors)
  *
  * Instructions:
  * 1. Open your Google Sheet -> Extensions -> Apps Script
@@ -167,6 +168,7 @@ export const GOOGLE_APPS_SCRIPT_CODE = `/**
  */
 
 var AGENT_NAMES = ['Tanjin', 'Kathy', 'Tania', 'Shanaz', 'Sizon', 'Sakib'];
+var COLLECTOR_NAMES = ['Farhan', 'Naim'];
 var MASTER_HEADERS = [
   'Lead ID', 'Customer Name', 'Phone', 'Facebook Link', 'Collector',
   'Assigned Agent', 'Latest Status', 'Follow-up At', 'Notes', 'Updated At', 'Created At'
@@ -174,6 +176,10 @@ var MASTER_HEADERS = [
 var AGENT_TAB_HEADERS = [
   'Lead ID', 'Customer Name', 'Phone', 'Facebook Link',
   'Latest Status', 'Follow-up At', 'Call Notes', 'Added By', 'Updated At'
+];
+var COLLECTOR_TAB_HEADERS = [
+  'Lead ID', 'Customer Name', 'Phone', 'Facebook Link', 'Assigned Agent',
+  'Latest Status', 'Follow-up At', 'Notes', 'Collector', 'Updated At', 'Created At'
 ];
 var KAWSAR_POST_HEADERS = [
   'Post ID', 'Title / Note', 'Facebook Link', 'Website Link', 'Posted By', 'Timestamp'
@@ -214,6 +220,28 @@ function extractPhoneCore_(raw) {
   var digits = String(raw || '').replace(/^'+/, '').replace(/\\D/g, '');
   if (!digits) return '';
   return digits.replace(/^(00880|0088|880|88)/, '').replace(/^0+/, '');
+}
+
+function normalizePhoneKey_(raw) {
+  return extractPhoneCore_(raw);
+}
+
+function sanitizeTabSuffix_(raw) {
+  var clean = String(raw || '').trim()
+    .replace(/[\\\\\\/\\?\\*\\[\\]:]/g, '_')
+    .replace(/\\s+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 80);
+  return clean || 'Unknown';
+}
+
+function getAgentTabName_(agentName) {
+  return 'Agent_' + sanitizeTabSuffix_(agentName);
+}
+
+function getCollectorTabName_(collectorName) {
+  return 'Collector_' + sanitizeTabSuffix_(collectorName);
 }
 
 function normalizeFb_(raw) {
@@ -257,11 +285,20 @@ function normalizeUrlKey_(raw) {
   return kept.length ? (base + '?' + kept.join('&')) : base;
 }
 
+function getDhakaTodayYmd_() {
+  return Utilities.formatDate(new Date(), 'Asia/Dhaka', 'yyyy-MM-dd');
+}
+
 function toYmd_(val) {
   if (!val) return '';
-  var d = new Date(val);
+  if (typeof val === 'string') {
+    var trimmed = val.replace(/^'+/, '').trim();
+    if (!trimmed) return '';
+    if (/^\\d{4}-\\d{2}-\\d{2}$/.test(trimmed)) return trimmed;
+  }
+  var d = (val instanceof Date) ? val : new Date(val);
   if (isNaN(d.getTime())) return '';
-  return Utilities.formatDate(d, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  return Utilities.formatDate(d, 'Asia/Dhaka', 'yyyy-MM-dd');
 }
 
 function jsonOut_(obj) {
@@ -362,7 +399,7 @@ function doGet(e) {
 
     // 3. Pull records (filtered to Today when scope=today)
     var scope = String(params.scope || 'today').toLowerCase();
-    var targetDate = params.date ? String(params.date).trim() : Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
+    var targetDate = params.date ? String(params.date).trim() : Utilities.formatDate(new Date(), 'Asia/Dhaka', 'yyyy-MM-dd');
     var todayOnly = scope !== 'all';
 
     var leads = [];
@@ -504,11 +541,19 @@ function doPost(e) {
       'Kawsar FB Links', 'Kawsar Web Links', 'Agent Breakdown (Calls/Orders)', 'Last Synced At'
     ]);
 
-    // Ensure all 6 dedicated agent tabs exist
+    // Ensure all dedicated agent & collector tabs exist
     var agentSheets = {};
     for (var i = 0; i < AGENT_NAMES.length; i++) {
       var name = AGENT_NAMES[i];
-      agentSheets[name] = getOrCreateSheet(ss, 'Agent_' + name, AGENT_TAB_HEADERS);
+      var agentTab = getAgentTabName_(name);
+      agentSheets[agentTab] = getOrCreateSheet(ss, agentTab, AGENT_TAB_HEADERS);
+    }
+
+    var collectorSheets = {};
+    for (var ci0 = 0; ci0 < COLLECTOR_NAMES.length; ci0++) {
+      var cName = COLLECTOR_NAMES[ci0];
+      var collectorTab = getCollectorTabName_(cName);
+      collectorSheets[collectorTab] = getOrCreateSheet(ss, collectorTab, COLLECTOR_TAB_HEADERS);
     }
 
     if (payload.event === 'FULL_SYNC' || payload.event === 'TEST_SYNC' || payload.event === 'LEADS_BATCH_UPSERT') {
@@ -517,6 +562,7 @@ function doPost(e) {
           var leadItem = payload.leads[li];
           upsertRowById(masterSheet, leadItem.id, formatMasterRow(leadItem));
           syncLeadAcrossAgentTabs(ss, agentSheets, leadItem);
+          syncLeadAcrossCollectorTabs(ss, collectorSheets, leadItem);
         }
       }
       if (Array.isArray(payload.callLogs)) {
@@ -542,6 +588,7 @@ function doPost(e) {
     } else if (payload.event === 'LEAD_UPSERT' && payload.lead) {
       upsertRowById(masterSheet, payload.lead.id, formatMasterRow(payload.lead));
       syncLeadAcrossAgentTabs(ss, agentSheets, payload.lead);
+      syncLeadAcrossCollectorTabs(ss, collectorSheets, payload.lead);
       if (payload.paidCustomer) {
         upsertRowById(paidSheet, payload.paidCustomer.id, formatPaidCustomerRow(payload.paidCustomer));
       }
@@ -549,6 +596,7 @@ function doPost(e) {
       if (payload.lead) {
         upsertRowById(masterSheet, payload.lead.id, formatMasterRow(payload.lead));
         syncLeadAcrossAgentTabs(ss, agentSheets, payload.lead);
+        syncLeadAcrossCollectorTabs(ss, collectorSheets, payload.lead);
       }
       upsertCallLogRow(logsSheet, payload.callLog);
       if (payload.paidCustomer) {
@@ -608,10 +656,12 @@ function doPost(e) {
 }
 
 function formatMasterRow(l) {
+  var fallbackDate = Utilities.formatDate(new Date(), 'Asia/Dhaka', 'yyyy-MM-dd');
+  var createdVal = l.createdAt || l.collectedDate || l.updatedAt || fallbackDate;
   return [
     l.id, l.customerName, "'" + l.phone, l.facebookLink, l.collectorName,
     l.assignedAgentName || 'Unassigned', l.status, l.followUpAt || '',
-    l.lastCallNotes || l.notes || '', l.updatedAt, l.createdAt || l.updatedAt
+    l.lastCallNotes || l.notes || '', l.updatedAt || fallbackDate, createdVal
   ];
 }
 
@@ -619,14 +669,24 @@ function formatAgentRow(l) {
   return [
     l.id, l.customerName, "'" + l.phone, l.facebookLink,
     l.status, l.followUpAt || '', l.lastCallNotes || l.notes || '',
-    l.collectorName, l.updatedAt
+    l.collectorName, l.updatedAt || Utilities.formatDate(new Date(), 'Asia/Dhaka', 'yyyy-MM-dd')
+  ];
+}
+
+function formatCollectorRow(l) {
+  var fallbackDate = Utilities.formatDate(new Date(), 'Asia/Dhaka', 'yyyy-MM-dd');
+  return [
+    l.id, l.customerName, "'" + l.phone, l.facebookLink,
+    l.assignedAgentName || 'Unassigned', l.status, l.followUpAt || '',
+    l.lastCallNotes || l.notes || '', l.collectorName || 'Unknown',
+    l.updatedAt || fallbackDate, l.createdAt || l.collectedDate || l.updatedAt || fallbackDate
   ];
 }
 
 function formatPaidCustomerRow(pc) {
   var daysRemaining = 0;
   if (pc.renewalDate) {
-    var todayStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
+    var todayStr = Utilities.formatDate(new Date(), 'Asia/Dhaka', 'yyyy-MM-dd');
     var tParts = todayStr.split('-');
     var rParts = String(pc.renewalDate).replace(/^'+/, '').split('-');
     if (rParts.length === 3) {
@@ -651,17 +711,36 @@ function formatPaidCustomerRow(pc) {
 
 function syncLeadAcrossAgentTabs(ss, agentSheets, lead) {
   var targetName = lead.assignedAgentName ? String(lead.assignedAgentName).trim() : '';
-  if (targetName && !agentSheets[targetName]) {
-    agentSheets[targetName] = getOrCreateSheet(ss, 'Agent_' + targetName, AGENT_TAB_HEADERS);
+  var targetTabName = targetName ? getAgentTabName_(targetName) : '';
+  if (targetTabName && !agentSheets[targetTabName]) {
+    agentSheets[targetTabName] = getOrCreateSheet(ss, targetTabName, AGENT_TAB_HEADERS);
   }
   var allSheets = ss.getSheets();
   for (var i = 0; i < allSheets.length; i++) {
     var sheet = allSheets[i];
     var sheetName = sheet.getName();
     if (sheetName.indexOf('Agent_') !== 0 || sheetName === 'Agent_Logs') continue;
-    var tabAgentName = sheetName.slice('Agent_'.length);
-    if (targetName && tabAgentName === targetName) {
+    if (targetTabName && sheetName === targetTabName) {
       upsertRowById(sheet, lead.id, formatAgentRow(lead));
+    } else {
+      deleteRowById(sheet, lead.id);
+    }
+  }
+}
+
+function syncLeadAcrossCollectorTabs(ss, collectorSheets, lead) {
+  var rawCollector = lead && lead.collectorName ? String(lead.collectorName).trim() : '';
+  var targetTabName = rawCollector ? getCollectorTabName_(rawCollector) : '';
+  if (targetTabName && !collectorSheets[targetTabName]) {
+    collectorSheets[targetTabName] = getOrCreateSheet(ss, targetTabName, COLLECTOR_TAB_HEADERS);
+  }
+  var allSheets = ss.getSheets();
+  for (var i = 0; i < allSheets.length; i++) {
+    var sheet = allSheets[i];
+    var sheetName = sheet.getName();
+    if (sheetName.indexOf('Collector_') !== 0) continue;
+    if (targetTabName && sheetName === targetTabName) {
+      upsertRowById(sheet, lead.id, formatCollectorRow(lead));
     } else {
       deleteRowById(sheet, lead.id);
     }

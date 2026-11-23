@@ -75,6 +75,29 @@ export function resolveWebhookUrl(
   return getDefaultWebhookUrl(envUrl);
 }
 
+/**
+ * Sanitizes a user/collector/agent name into a safe Google Sheets tab suffix
+ * free of forbidden sheet title characters ([ ] * ? : / \) and bounded well within 100 chars.
+ */
+export function sanitizeSheetTabSuffix(rawName: string): string {
+  const cleaned = String(rawName || '')
+    .trim()
+    .replace(/[\\/*?:[\]]/g, '_')
+    .replace(/\s+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 80);
+  return cleaned || 'Unknown';
+}
+
+export function getCollectorTabName(collectorName: string): string {
+  return `Collector_${sanitizeSheetTabSuffix(collectorName)}`;
+}
+
+export function getAgentTabName(agentName: string): string {
+  return `Agent_${sanitizeSheetTabSuffix(agentName)}`;
+}
+
 const VALID_CALL_STATUSES: ReadonlySet<CallStatus> = new Set(CALL_STATUSES);
 
 function normalizeStatus(status: unknown): CallStatus {

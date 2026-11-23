@@ -17,11 +17,13 @@ import {
   User,
 } from '../types';
 import {
+  addDaysToYmd,
   computeAgentPerformance,
   computeCollectorStats,
   computeDashboardMetrics,
   DueRenewalItem,
   generateDailyReportCsv,
+  getDhakaDateString,
   isWithinDateRange,
 } from '../utils/leadLogic';
 import { AdminAgentDetailSection } from './AdminAgentDetailSection';
@@ -65,10 +67,13 @@ export function AdminDashboardView({
   onDownloadDailyReport,
 }: AdminDashboardViewProps) {
   const [selectedAgentTab, setSelectedAgentTab] = useState<string>('overview');
-  const [dateFilter, setDateFilter] = useState<DateRangeFilter>({
-    preset: 'all',
-    startDate: new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10),
-    endDate: new Date().toISOString().slice(0, 10),
+  const [dateFilter, setDateFilter] = useState<DateRangeFilter>(() => {
+    const dhakaToday = getDhakaDateString();
+    return {
+      preset: 'all',
+      startDate: addDaysToYmd(dhakaToday, -7),
+      endDate: dhakaToday,
+    };
   });
 
   const activeAgent = useMemo(
@@ -78,10 +83,7 @@ export function AdminDashboardView({
 
   const handleDownloadDailyReport = () => {
     const today = new Date();
-    const dateStamp = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(
-      2,
-      '0'
-    )}-${String(today.getDate()).padStart(2, '0')}`;
+    const dateStamp = getDhakaDateString(today);
     const filename = `runbd_daily_report_${dateStamp}.csv`;
     const csv = generateDailyReportCsv(agents, leads, callLogs, today);
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });

@@ -16,7 +16,9 @@ import {
   UserRole,
 } from '../types';
 import {
+  clampDateToDhakaToday,
   extractPhoneCoreKey,
+  getAuthoritativeDhakaTodayYmd,
   getLocalDateString,
   normalizeBdPhone,
   normalizeFacebookUrl,
@@ -232,9 +234,10 @@ export function leadToSupabaseRow(lead: Lead): SupabaseLeadRow {
     lead.rawPhone.trim();
   const facebookNormalized =
     lead.normalizedFacebookLink?.trim() || normalizeFacebookUrl(lead.facebookLink);
-  const collectedDate =
-    parseDateToYmd(lead.collectedDate ?? lead.date ?? lead.createdAt) ??
-    getLocalDateString();
+  const collectedDate = clampDateToDhakaToday(
+    lead.collectedDate ?? lead.date ?? lead.createdAt,
+    getAuthoritativeDhakaTodayYmd()
+  ).ymd;
 
   return {
     id: lead.id,
@@ -459,7 +462,7 @@ export async function fetchBootstrapFromSupabase(
       : supabase
           .from('leads')
           .select('*')
-          .eq('collected_date', todayYmd)
+          .gte('collected_date', todayYmd)
           .order('created_at', { ascending: false })
           .limit(500);
 

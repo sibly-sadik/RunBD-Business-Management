@@ -89,7 +89,7 @@ export function AdminLeadsView({
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `runbd_leads_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.download = `runbd_leads_${todayStr}.csv`;
     a.click();
     URL.revokeObjectURL(url);
     onExportCsv();
