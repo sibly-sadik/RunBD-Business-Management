@@ -27,7 +27,7 @@ import {
 export const HISTORICAL_FALLBACK_ISO = '1970-01-01T00:00:00.000Z';
 
 export const FALLBACK_GOOGLE_SHEETS_WEBHOOK_URL =
-  'https://script.google.com/macros/s/AKfycbxRNhBGGML3PspDMwunGObPsdI45y6UU1uU1QTxtzg98yRQeFrtqrcAeXbywE1ZWJ4P/exec';
+  'https://script.google.com/macros/s/AKfycbweLkUjHVnD5RsfuatSfFC00xDSTnEbbjxAgDdtTapYWV0oDbQO5wmtQkv6N-hrpkYP/exec';
 
 export const LEGACY_GOOGLE_SHEETS_WEBHOOK_URLS: ReadonlySet<string> = new Set([
   'https://script.google.com/macros/s/AKfycbwqMl23Bi200Idn267ySCDpKBY30b1FdYC8OWPOPK90neBvSPwWyn7Eq-VqV8ublfUD/exec',
