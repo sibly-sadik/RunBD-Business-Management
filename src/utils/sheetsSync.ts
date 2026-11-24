@@ -6,6 +6,7 @@ import {
   DuplicateAttempt,
   Lead,
   PaidCustomer,
+  PostLinkField,
   RenewalStatus,
   RENEWAL_STATUSES,
 } from '../types';
@@ -306,7 +307,7 @@ export interface SheetLeadDuplicateFlag {
 export interface SheetPostDuplicateFlag {
   duplicatePostId: string;
   originalPostId: string;
-  matchedField: 'Facebook Link' | 'Website Link';
+  matchedField: PostLinkField;
   url: string;
   posterName: string;
   note: string;
@@ -338,12 +339,15 @@ export interface LeadDuplicateCheckResult {
 export interface PostDuplicateCheckResult {
   ok: boolean;
   isDuplicate: boolean;
-  matchedField?: 'Facebook Link' | 'Website Link';
+  matchedField?: PostLinkField;
   existingPost?: {
     id: string;
     note: string;
     facebookLink: string;
     websiteLink: string;
+    tiktokLink?: string;
+    instagramLink?: string;
+    twitterLink?: string;
     posterName: string;
     createdAt: string;
   };
@@ -443,6 +447,9 @@ function buildExistingPostSummary(rawPost: Record<string, unknown>): NonNullable
     note: typeof rawPost.note === 'string' ? rawPost.note.trim() : '',
     facebookLink: typeof rawPost.facebookLink === 'string' ? rawPost.facebookLink.trim() : '',
     websiteLink: typeof rawPost.websiteLink === 'string' ? rawPost.websiteLink.trim() : '',
+    tiktokLink: typeof rawPost.tiktokLink === 'string' ? rawPost.tiktokLink.trim() : '',
+    instagramLink: typeof rawPost.instagramLink === 'string' ? rawPost.instagramLink.trim() : '',
+    twitterLink: typeof rawPost.twitterLink === 'string' ? rawPost.twitterLink.trim() : '',
     posterName:
       typeof rawPost.posterName === 'string' && rawPost.posterName.trim()
         ? rawPost.posterName.trim()
@@ -543,6 +550,15 @@ export function parseLeadDuplicateCheckResponse(
   return { ok: true, isDuplicate: false };
 }
 
+function parseMatchedPostField(rawField: unknown): PostLinkField {
+  const lower = String(rawField ?? 'Facebook Link').toLowerCase();
+  if (lower.includes('web')) return 'Website Link';
+  if (lower.includes('tiktok')) return 'TikTok Link';
+  if (lower.includes('insta')) return 'Instagram Link';
+  if (lower.includes('twit') || lower.includes('x link')) return 'Twitter Link';
+  return 'Facebook Link';
+}
+
 /**
  * Parses an on-demand `?action=check_post_duplicate` JSON response from Google Apps Script.
  * Supports both dedicated `{ ok, isDuplicate, post }` responses and pull-style `{ ok: true, contentPosts: [...] }`
@@ -550,7 +566,13 @@ export function parseLeadDuplicateCheckResponse(
  */
 export function parsePostDuplicateCheckResponse(
   raw: unknown,
-  query?: { facebookLink?: string; websiteLink?: string }
+  query?: {
+    facebookLink?: string;
+    websiteLink?: string;
+    tiktokLink?: string;
+    instagramLink?: string;
+    twitterLink?: string;
+  }
 ): PostDuplicateCheckResult | null {
   if (!raw || typeof raw !== 'object') return null;
   const obj = raw as Record<string, unknown>;
@@ -577,12 +599,7 @@ export function parsePostDuplicateCheckResponse(
         ? (obj.existingPost as Record<string, unknown>)
         : obj;
 
-    const matchedRaw = String(
-      obj.matchedField ?? rawPost.matchedField ?? 'Facebook Link'
-    ).toLowerCase();
-    const matchedField: 'Facebook Link' | 'Website Link' = matchedRaw.includes('web')
-      ? 'Website Link'
-      : 'Facebook Link';
+    const matchedField = parseMatchedPostField(obj.matchedField ?? rawPost.matchedField);
 
     return {
       ok: true,
@@ -605,42 +622,68 @@ export function parsePostDuplicateCheckResponse(
 
   if (!candidatePosts) return null;
 
-  const targetFb = normalizePostUrl(query?.facebookLink ?? '');
-  const targetWeb = normalizePostUrl(query?.websiteLink ?? '');
+  const targets: Array<{ field: PostLinkField; norm: string }> = [
+    { field: 'Facebook Link' as PostLinkField, norm: normalizePostUrl(query?.facebookLink ?? '') },
+    { field: 'Website Link' as PostLinkField, norm: normalizePostUrl(query?.websiteLink ?? '') },
+    { field: 'TikTok Link' as PostLinkField, norm: normalizePostUrl(query?.tiktokLink ?? '') },
+    { field: 'Instagram Link' as PostLinkField, norm: normalizePostUrl(query?.instagramLink ?? '') },
+    { field: 'Twitter Link' as PostLinkField, norm: normalizePostUrl(query?.twitterLink ?? '') },
+  ].filter((t) => Boolean(t.norm));
+
+  if (targets.length === 0) return { ok: true, isDuplicate: false };
 
   for (const item of candidatePosts) {
     if (!item || typeof item !== 'object') continue;
     const row = item as Record<string, unknown>;
-    const rowFb = normalizePostUrl(
-      typeof row.facebookLink === 'string'
-        ? row.facebookLink
-        : typeof row.normalizedFacebookLink === 'string'
-        ? row.normalizedFacebookLink
-        : ''
-    );
-    const rowWeb = normalizePostUrl(
-      typeof row.websiteLink === 'string'
-        ? row.websiteLink
-        : typeof row.normalizedWebsiteLink === 'string'
-        ? row.normalizedWebsiteLink
-        : ''
+    const rowNorms = new Set<string>(
+      [
+        normalizePostUrl(
+          typeof row.facebookLink === 'string'
+            ? row.facebookLink
+            : typeof row.normalizedFacebookLink === 'string'
+            ? row.normalizedFacebookLink
+            : ''
+        ),
+        normalizePostUrl(
+          typeof row.websiteLink === 'string'
+            ? row.websiteLink
+            : typeof row.normalizedWebsiteLink === 'string'
+            ? row.normalizedWebsiteLink
+            : ''
+        ),
+        normalizePostUrl(
+          typeof row.tiktokLink === 'string'
+            ? row.tiktokLink
+            : typeof row.normalizedTiktokLink === 'string'
+            ? row.normalizedTiktokLink
+            : ''
+        ),
+        normalizePostUrl(
+          typeof row.instagramLink === 'string'
+            ? row.instagramLink
+            : typeof row.normalizedInstagramLink === 'string'
+            ? row.normalizedInstagramLink
+            : ''
+        ),
+        normalizePostUrl(
+          typeof row.twitterLink === 'string'
+            ? row.twitterLink
+            : typeof row.normalizedTwitterLink === 'string'
+            ? row.normalizedTwitterLink
+            : ''
+        ),
+      ].filter(Boolean)
     );
 
-    if (targetFb && (targetFb === rowFb || targetFb === rowWeb)) {
-      return {
-        ok: true,
-        isDuplicate: true,
-        matchedField: 'Facebook Link',
-        existingPost: buildExistingPostSummary(row),
-      };
-    }
-    if (targetWeb && (targetWeb === rowWeb || targetWeb === rowFb)) {
-      return {
-        ok: true,
-        isDuplicate: true,
-        matchedField: 'Website Link',
-        existingPost: buildExistingPostSummary(row),
-      };
+    for (const target of targets) {
+      if (rowNorms.has(target.norm)) {
+        return {
+          ok: true,
+          isDuplicate: true,
+          matchedField: target.field,
+          existingPost: buildExistingPostSummary(row),
+        };
+      }
     }
   }
 
@@ -715,7 +758,10 @@ function buildDeterministicLeadId(r: Partial<Lead>, index: number): string {
 function buildDeterministicPostId(r: Partial<ContentPost>, index: number): string {
   const fb = normalizePostUrl(typeof r.facebookLink === 'string' ? r.facebookLink : '');
   const web = normalizePostUrl(typeof r.websiteLink === 'string' ? r.websiteLink : '');
-  const rawSlug = (fb || web)
+  const tt = normalizePostUrl(typeof r.tiktokLink === 'string' ? r.tiktokLink : '');
+  const ig = normalizePostUrl(typeof r.instagramLink === 'string' ? r.instagramLink : '');
+  const tw = normalizePostUrl(typeof r.twitterLink === 'string' ? r.twitterLink : '');
+  const rawSlug = (fb || web || tt || ig || tw)
     .replace(/[^a-z0-9]+/gi, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 48);
@@ -943,7 +989,10 @@ export function mergeRemoteContentPosts(
   remotePosts.forEach((r, idx) => {
     const facebookLink = typeof r.facebookLink === 'string' ? r.facebookLink.trim() : '';
     const websiteLink = typeof r.websiteLink === 'string' ? r.websiteLink.trim() : '';
-    if (!facebookLink && !websiteLink) return;
+    const tiktokLink = typeof r.tiktokLink === 'string' ? r.tiktokLink.trim() : '';
+    const instagramLink = typeof r.instagramLink === 'string' ? r.instagramLink.trim() : '';
+    const twitterLink = typeof r.twitterLink === 'string' ? r.twitterLink.trim() : '';
+    if (!facebookLink && !websiteLink && !tiktokLink && !instagramLink && !twitterLink) return;
 
     const explicitId = typeof r.id === 'string' ? r.id.trim() : '';
     const id = explicitId || buildDeterministicPostId(r, idx);
@@ -959,6 +1008,18 @@ export function mergeRemoteContentPosts(
       normalizedWebsiteLink:
         r.normalizedWebsiteLink?.trim() ||
         (websiteLink ? normalizePostUrl(websiteLink) : ''),
+      tiktokLink,
+      normalizedTiktokLink:
+        r.normalizedTiktokLink?.trim() ||
+        (tiktokLink ? normalizePostUrl(tiktokLink) : ''),
+      instagramLink,
+      normalizedInstagramLink:
+        r.normalizedInstagramLink?.trim() ||
+        (instagramLink ? normalizePostUrl(instagramLink) : ''),
+      twitterLink,
+      normalizedTwitterLink:
+        r.normalizedTwitterLink?.trim() ||
+        (twitterLink ? normalizePostUrl(twitterLink) : ''),
       note: typeof r.note === 'string' ? r.note.trim() : '',
       posterId: typeof r.posterId === 'string' ? r.posterId : 'poster-kawsar',
       posterName:
@@ -1234,51 +1295,62 @@ export function detectPostDuplicatesInList(
     (a, b) => (Date.parse(a.createdAt) || 0) - (Date.parse(b.createdAt) || 0)
   );
 
-  const seenUrls = new Map<string, { post: ContentPost; field: 'Facebook Link' | 'Website Link' }>();
+  const seenUrls = new Map<string, { post: ContentPost; field: PostLinkField }>();
   const flags: SheetPostDuplicateFlag[] = [];
   const flaggedKeys = new Set<string>();
 
   for (const post of chronological) {
-    const fbNorm = post.normalizedFacebookLink || normalizePostUrl(post.facebookLink || '');
-    const webNorm = post.normalizedWebsiteLink || normalizePostUrl(post.websiteLink || '');
+    const entries: Array<{ field: PostLinkField; keyTag: string; url: string; norm: string }> = [
+      {
+        field: 'Facebook Link',
+        keyTag: 'fb',
+        url: post.facebookLink || '',
+        norm: post.normalizedFacebookLink || normalizePostUrl(post.facebookLink || ''),
+      },
+      {
+        field: 'Website Link',
+        keyTag: 'web',
+        url: post.websiteLink || '',
+        norm: post.normalizedWebsiteLink || normalizePostUrl(post.websiteLink || ''),
+      },
+      {
+        field: 'TikTok Link',
+        keyTag: 'tt',
+        url: post.tiktokLink || '',
+        norm: post.normalizedTiktokLink || normalizePostUrl(post.tiktokLink || ''),
+      },
+      {
+        field: 'Instagram Link',
+        keyTag: 'ig',
+        url: post.instagramLink || '',
+        norm: post.normalizedInstagramLink || normalizePostUrl(post.instagramLink || ''),
+      },
+      {
+        field: 'Twitter Link',
+        keyTag: 'tw',
+        url: post.twitterLink || '',
+        norm: post.normalizedTwitterLink || normalizePostUrl(post.twitterLink || ''),
+      },
+    ];
 
-    if (fbNorm) {
-      const orig = seenUrls.get(fbNorm);
+    for (const entry of entries) {
+      if (!entry.norm) continue;
+      const orig = seenUrls.get(entry.norm);
       if (orig && orig.post.id !== post.id) {
-        const key = `${post.id}:${orig.post.id}:fb`;
+        const key = `${post.id}:${orig.post.id}:${entry.keyTag}`;
         if (!flaggedKeys.has(key)) {
           flaggedKeys.add(key);
           flags.push({
             duplicatePostId: post.id,
             originalPostId: orig.post.id,
-            matchedField: 'Facebook Link',
-            url: post.facebookLink,
+            matchedField: entry.field,
+            url: entry.url,
             posterName: post.posterName,
             note: post.note,
           });
         }
       } else if (!orig) {
-        seenUrls.set(fbNorm, { post, field: 'Facebook Link' });
-      }
-    }
-
-    if (webNorm) {
-      const orig = seenUrls.get(webNorm);
-      if (orig && orig.post.id !== post.id) {
-        const key = `${post.id}:${orig.post.id}:web`;
-        if (!flaggedKeys.has(key)) {
-          flaggedKeys.add(key);
-          flags.push({
-            duplicatePostId: post.id,
-            originalPostId: orig.post.id,
-            matchedField: 'Website Link',
-            url: post.websiteLink,
-            posterName: post.posterName,
-            note: post.note,
-          });
-        }
-      } else if (!orig) {
-        seenUrls.set(webNorm, { post, field: 'Website Link' });
+        seenUrls.set(entry.norm, { post, field: entry.field });
       }
     }
   }

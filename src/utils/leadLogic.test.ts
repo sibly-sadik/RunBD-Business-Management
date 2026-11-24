@@ -1419,6 +1419,127 @@ test('VEHICLE_TYPES, normalizeVehicleType (Track -> Truck), and Bulk CSV Vehicle
   assert.equal(preview[3].status, 'invalid');
 });
 
+test('Multi-platform post links: normalizePostUrl, findDuplicatePost, computeKawsarPostStats, and Final Daily Summary CSV support TikTok, Instagram, and Twitter', () => {
+  // 1. Social URL normalization strips tracking params and normalizes twitter.com <-> x.com
+  assert.equal(
+    normalizePostUrl('https://www.tiktok.com/@runbd/video/74123456789?is_from_webapp=1&sender_device=pc'),
+    'tiktok.com/@runbd/video/74123456789'
+  );
+  assert.equal(
+    normalizePostUrl('https://www.instagram.com/p/C9abc123XYZ/?igsh=MzRlODBiNWFlZA=='),
+    'instagram.com/p/c9abc123xyz'
+  );
+  assert.equal(
+    normalizePostUrl('https://twitter.com/runbd/status/185000111222?s=20&t=abcd'),
+    'x.com/runbd/status/185000111222'
+  );
+  assert.equal(
+    normalizePostUrl('https://x.com/runbd/status/185000111222/'),
+    'x.com/runbd/status/185000111222'
+  );
+
+  const todayIso = new Date().toISOString();
+  const existingPosts: ContentPost[] = [
+    {
+      id: 'PST-MULTI-1',
+      facebookLink: 'https://facebook.com/runbd/posts/101',
+      normalizedFacebookLink: 'facebook.com/runbd/posts/101',
+      websiteLink: '',
+      normalizedWebsiteLink: '',
+      tiktokLink: 'https://www.tiktok.com/@runbd/video/74123456789',
+      normalizedTiktokLink: 'tiktok.com/@runbd/video/74123456789',
+      instagramLink: 'https://www.instagram.com/p/C9abc123XYZ/',
+      normalizedInstagramLink: 'instagram.com/p/c9abc123xyz',
+      twitterLink: 'https://x.com/runbd/status/185000111222',
+      normalizedTwitterLink: 'x.com/runbd/status/185000111222',
+      note: 'Multi-channel launch',
+      posterId: 'poster-kawsar',
+      posterName: 'Kawsar',
+      createdAt: todayIso,
+    },
+    {
+      id: 'PST-TT-ONLY',
+      facebookLink: '',
+      normalizedFacebookLink: '',
+      websiteLink: 'https://runbd.com/offer',
+      normalizedWebsiteLink: 'runbd.com/offer',
+      tiktokLink: 'https://www.tiktok.com/@runbd/video/999888777',
+      normalizedTiktokLink: 'tiktok.com/@runbd/video/999888777',
+      note: 'Web + TikTok promo',
+      posterId: 'poster-kawsar',
+      posterName: 'Kawsar',
+      createdAt: todayIso,
+    },
+  ];
+
+  // 2. Duplicate detection matches TikTok, Instagram, and Twitter variants
+  const ttDup = findDuplicatePost(
+    existingPosts,
+    '',
+    '',
+    'https://www.tiktok.com/@runbd/video/74123456789?is_from_webapp=1'
+  );
+  assert.equal(ttDup?.matchedField, 'TikTok Link');
+  assert.equal(ttDup?.post.id, 'PST-MULTI-1');
+
+  const igDup = findDuplicatePost(
+    existingPosts,
+    '',
+    '',
+    '',
+    'https://instagram.com/p/C9abc123XYZ?igsh=xyz'
+  );
+  assert.equal(igDup?.matchedField, 'Instagram Link');
+  assert.equal(igDup?.post.id, 'PST-MULTI-1');
+
+  const twDup = findDuplicatePost(
+    existingPosts,
+    '',
+    '',
+    '',
+    '',
+    'https://twitter.com/runbd/status/185000111222?s=46&t=foo'
+  );
+  assert.equal(twDup?.matchedField, 'Twitter Link');
+  assert.equal(twDup?.post.id, 'PST-MULTI-1');
+
+  const uniqueRes = findDuplicatePost(
+    existingPosts,
+    '',
+    '',
+    'https://www.tiktok.com/@runbd/video/555444333',
+    'https://www.instagram.com/p/BRANDNEW/',
+    'https://x.com/runbd/status/99999999'
+  );
+  assert.equal(uniqueRes, null);
+
+  // 3. Stats & Final Daily Summary include all 5 platforms
+  const stats = computeKawsarPostStats(existingPosts);
+  assert.equal(stats.totalCount, 2);
+  assert.equal(stats.facebookCount, 1);
+  assert.equal(stats.websiteCount, 1);
+  assert.equal(stats.tiktokCount, 2);
+  assert.equal(stats.instagramCount, 1);
+  assert.equal(stats.twitterCount, 1);
+  assert.equal(stats.todayTiktokCount, 2);
+  assert.equal(stats.todayInstagramCount, 1);
+  assert.equal(stats.todayTwitterCount, 1);
+
+  const todayYmd = getDhakaDateString(new Date(todayIso));
+  const summary = computeFinalDailySummary(mockAgents, DATA_COLLECTORS, [], [], existingPosts, todayYmd);
+  assert.equal(summary.kawsar.entriesCount, 2);
+  assert.equal(summary.kawsar.facebookLinks, 1);
+  assert.equal(summary.kawsar.websiteLinks, 1);
+  assert.equal(summary.kawsar.tiktokLinks, 2);
+  assert.equal(summary.kawsar.instagramLinks, 1);
+  assert.equal(summary.kawsar.twitterLinks, 1);
+
+  const csv = generateFinalDailySummaryCsv(summary);
+  assert.ok(csv.includes('TikTok Links,Instagram Links,Twitter Links'));
+  assert.ok(csv.includes('Kawsar,2,1,1,2,1,1'));
+});
+
+
 
 
 

@@ -478,7 +478,19 @@ app.get('/api/posts/check-duplicate', requireAuth, async (req: AuthRequest, res)
       typeof req.query.facebookLink === 'string' ? req.query.facebookLink : '';
     const websiteLink =
       typeof req.query.websiteLink === 'string' ? req.query.websiteLink : '';
-    const result = await findPostDuplicateInDb(facebookLink, websiteLink);
+    const tiktokLink =
+      typeof req.query.tiktokLink === 'string' ? req.query.tiktokLink : '';
+    const instagramLink =
+      typeof req.query.instagramLink === 'string' ? req.query.instagramLink : '';
+    const twitterLink =
+      typeof req.query.twitterLink === 'string' ? req.query.twitterLink : '';
+    const result = await findPostDuplicateInDb(
+      facebookLink,
+      websiteLink,
+      tiktokLink,
+      instagramLink,
+      twitterLink
+    );
     res.json({
       ok: true,
       isDuplicate: result.isDuplicate,
@@ -507,7 +519,13 @@ app.post('/api/posts', requireAuth, async (req: AuthRequest, res) => {
       return;
     }
 
-    const dup = await findPostDuplicateInDb(post.facebookLink, post.websiteLink);
+    const dup = await findPostDuplicateInDb(
+      post.facebookLink ?? '',
+      post.websiteLink ?? '',
+      post.tiktokLink ?? '',
+      post.instagramLink ?? '',
+      post.twitterLink ?? ''
+    );
     if (dup.isDuplicate && dup.existingPost) {
       res.status(409).json({
         ok: false,

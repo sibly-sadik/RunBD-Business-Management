@@ -595,7 +595,8 @@ export function AdminDashboardView({
             Kawsar — Content &amp; Link Posting Activity
           </h2>
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-            Live daily post counts and submitted Facebook &amp; Website links synced to Kawsar_Posts_Log.
+            Live daily post counts and submitted Facebook, Website, TikTok, Instagram &amp; Twitter
+            links synced to Kawsar_Posts_Log.
           </p>
         </div>
         <KawsarPostsView posts={contentPosts} canSubmit={false} compact />

@@ -12,7 +12,7 @@ import {
   Search,
   X,
 } from 'lucide-react';
-import { CALL_STATUSES, CallLog, CallStatus, Lead, User } from '../types';
+import { CALL_STATUSES, CallLog, CallStatus, Lead, PaidCustomer, User } from '../types';
 import {
   buildDhakaFollowUpIso,
   buildSafeExternalUrl,
@@ -39,6 +39,7 @@ interface AgentWorkspaceViewProps {
   agent: User;
   leads: Lead[];
   callLogs: CallLog[];
+  paidCustomers: PaidCustomer[];
   callScript: string;
   dueRenewals: DueRenewalItem[];
   onMarkPaidCustomerRenewed: (customerId: string) => void;
@@ -58,6 +59,7 @@ export function AgentWorkspaceView({
   agent,
   leads,
   callLogs,
+  paidCustomers,
   callScript,
   dueRenewals,
   onMarkPaidCustomerRenewed,
@@ -119,10 +121,13 @@ export function AgentWorkspaceView({
     [myLeads]
   );
 
-  const confirmedCount = useMemo(
-    () => myLeads.filter((l) => l.status === 'Order Confirmed').length,
-    [myLeads]
-  );
+  const confirmedCount = useMemo(() => {
+    const paidMatch = paidCustomers.filter((c) => c.assignedAgentId === agent.id).length;
+    const leadMatch = leads.filter(
+      (l) => l.assignedAgentId === agent.id && l.status === 'Order Confirmed'
+    ).length;
+    return Math.max(paidMatch, leadMatch);
+  }, [paidCustomers, leads, agent.id]);
 
   const activeQueueLeads = useMemo(
     () => myLeads.filter((l) => l.status !== 'Done'),

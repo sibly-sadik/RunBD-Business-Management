@@ -174,12 +174,25 @@ export interface CollectorStat {
   duplicateBlockedCount: number;
 }
 
+export type PostLinkField =
+  | 'Facebook Link'
+  | 'Website Link'
+  | 'TikTok Link'
+  | 'Instagram Link'
+  | 'Twitter Link';
+
 export interface ContentPost {
   id: string;
   facebookLink: string;
   normalizedFacebookLink: string;
   websiteLink: string;
   normalizedWebsiteLink: string;
+  tiktokLink?: string;
+  normalizedTiktokLink?: string;
+  instagramLink?: string;
+  normalizedInstagramLink?: string;
+  twitterLink?: string;
+  normalizedTwitterLink?: string;
   note: string;
   posterId: string;
   posterName: string;

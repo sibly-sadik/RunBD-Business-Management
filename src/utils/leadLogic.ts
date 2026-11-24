@@ -9,6 +9,7 @@ import {
   DuplicateAttempt,
   Lead,
   PaidCustomer,
+  PostLinkField,
   RenewalStatus,
   User,
 } from '../types';
@@ -1367,11 +1368,23 @@ const TRACKING_QUERY_PARAMS = new Set([
   'gclid',
   'ref',
   'refsrc',
+  'ref_src',
+  'ref_url',
   'rdid',
   'share_url',
   'sfnsn',
   '__tn__',
   'mibextid',
+  'igsh',
+  'igshid',
+  'is_from_webapp',
+  'sender_device',
+  'sender_web_id',
+  'tt_from',
+  'u_code',
+  'share_app_id',
+  '_r',
+  '_t',
   'utm_source',
   'utm_medium',
   'utm_campaign',
@@ -1379,18 +1392,25 @@ const TRACKING_QUERY_PARAMS = new Set([
   'utm_content',
 ]);
 
-function isTrackingQueryParam(key: string): boolean {
-  return (
+function isTrackingQueryParam(key: string, host: string): boolean {
+  if (
     TRACKING_QUERY_PARAMS.has(key) ||
     key.startsWith('utm_') ||
     key.startsWith('__cft__')
-  );
+  ) {
+    return true;
+  }
+  if ((host === 'x.com' || host === 'twitter.com') && (key === 's' || key === 't')) {
+    return true;
+  }
+  return false;
 }
 
 /**
- * Normalizes any Facebook or Website URL for strict duplicate comparison:
- * strips protocol, www./m./mbasic., fb.me -> facebook.com, trailing slashes,
- * hash fragments, and tracking query parameters while keeping meaningful params.
+ * Normalizes any social or website URL (Facebook, Website, TikTok, Instagram, Twitter/X)
+ * for strict duplicate comparison: strips protocol, www./m./mbasic., fb.me -> facebook.com,
+ * twitter.com -> x.com, trailing slashes, hash fragments, and tracking query parameters
+ * while keeping meaningful params.
  */
 export function normalizePostUrl(raw: string): string {
   const trimmed = raw.trim();
@@ -1402,13 +1422,15 @@ export function normalizePostUrl(raw: string): string {
     let host = parsed.hostname.toLowerCase().replace(/^(www\.|m\.|mobile\.|mbasic\.|touch\.)+/g, '');
     if (host === 'fb.me' || host === 'fb.com') {
       host = 'facebook.com';
+    } else if (host === 'twitter.com') {
+      host = 'x.com';
     }
     const pathname = parsed.pathname.replace(/\/+$/, '').toLowerCase();
 
     const keptParams: Array<[string, string]> = [];
     parsed.searchParams.forEach((value, key) => {
       const lowerKey = key.toLowerCase();
-      if (!isTrackingQueryParam(lowerKey)) {
+      if (!isTrackingQueryParam(lowerKey, host)) {
         keptParams.push([lowerKey, value]);
       }
     });
@@ -1424,6 +1446,7 @@ export function normalizePostUrl(raw: string): string {
       .toLowerCase()
       .replace(/^https?:\/\//, '')
       .replace(/^(www\.|m\.|mobile\.|mbasic\.|touch\.)+/g, '')
+      .replace(/^twitter\.com\//, 'x.com/')
       .split('#')[0]
       .replace(/\/+$/, '');
   }
@@ -1444,20 +1467,39 @@ export function isValidPostUrl(raw: string): boolean {
 export function findDuplicatePost(
   posts: ContentPost[],
   rawFacebookUrl: string,
-  rawWebsiteUrl: string
-): { post: ContentPost; matchedField: 'Facebook Link' | 'Website Link' } | null {
-  const targetFb = normalizePostUrl(rawFacebookUrl);
-  const targetWeb = normalizePostUrl(rawWebsiteUrl);
+  rawWebsiteUrl: string,
+  rawTiktokUrl = '',
+  rawInstagramUrl = '',
+  rawTwitterUrl = ''
+): { post: ContentPost; matchedField: PostLinkField } | null {
+  const targets: Array<{ field: PostLinkField; norm: string }> = [
+    { field: 'Facebook Link' as PostLinkField, norm: normalizePostUrl(rawFacebookUrl) },
+    { field: 'Website Link' as PostLinkField, norm: normalizePostUrl(rawWebsiteUrl) },
+    { field: 'TikTok Link' as PostLinkField, norm: normalizePostUrl(rawTiktokUrl) },
+    { field: 'Instagram Link' as PostLinkField, norm: normalizePostUrl(rawInstagramUrl) },
+    { field: 'Twitter Link' as PostLinkField, norm: normalizePostUrl(rawTwitterUrl) },
+  ].filter((t) => Boolean(t.norm));
+
+  if (targets.length === 0) return null;
 
   for (const post of posts) {
-    const existingFb = post.normalizedFacebookLink || normalizePostUrl(post.facebookLink || '');
-    const existingWeb = post.normalizedWebsiteLink || normalizePostUrl(post.websiteLink || '');
+    const existingSet = new Set<string>();
+    const fbNorm = post.normalizedFacebookLink || normalizePostUrl(post.facebookLink || '');
+    const webNorm = post.normalizedWebsiteLink || normalizePostUrl(post.websiteLink || '');
+    const ttNorm = post.normalizedTiktokLink || normalizePostUrl(post.tiktokLink || '');
+    const igNorm = post.normalizedInstagramLink || normalizePostUrl(post.instagramLink || '');
+    const twNorm = post.normalizedTwitterLink || normalizePostUrl(post.twitterLink || '');
 
-    if (targetFb && (targetFb === existingFb || targetFb === existingWeb)) {
-      return { post, matchedField: 'Facebook Link' };
-    }
-    if (targetWeb && (targetWeb === existingWeb || targetWeb === existingFb)) {
-      return { post, matchedField: 'Website Link' };
+    if (fbNorm) existingSet.add(fbNorm);
+    if (webNorm) existingSet.add(webNorm);
+    if (ttNorm) existingSet.add(ttNorm);
+    if (igNorm) existingSet.add(igNorm);
+    if (twNorm) existingSet.add(twNorm);
+
+    for (const target of targets) {
+      if (existingSet.has(target.norm)) {
+        return { post, matchedField: target.field };
+      }
     }
   }
 
@@ -1471,41 +1513,64 @@ export function computeKawsarPostStats(
   todayCount: number;
   todayFacebookCount: number;
   todayWebsiteCount: number;
+  todayTiktokCount: number;
+  todayInstagramCount: number;
+  todayTwitterCount: number;
   facebookCount: number;
   websiteCount: number;
+  tiktokCount: number;
+  instagramCount: number;
+  twitterCount: number;
   totalCount: number;
 } {
   const todayFilter: DateRangeFilter = { preset: 'today', startDate: '', endDate: '' };
   let todayCount = 0;
   let todayFacebookCount = 0;
   let todayWebsiteCount = 0;
+  let todayTiktokCount = 0;
+  let todayInstagramCount = 0;
+  let todayTwitterCount = 0;
   let facebookCount = 0;
   let websiteCount = 0;
+  let tiktokCount = 0;
+  let instagramCount = 0;
+  let twitterCount = 0;
 
   for (const post of posts) {
     const isToday = isWithinDateRange(post.createdAt, todayFilter, now);
     const hasFb = Boolean(post.facebookLink && post.facebookLink.trim());
     const hasWeb = Boolean(post.websiteLink && post.websiteLink.trim());
+    const hasTt = Boolean(post.tiktokLink && post.tiktokLink.trim());
+    const hasIg = Boolean(post.instagramLink && post.instagramLink.trim());
+    const hasTw = Boolean(post.twitterLink && post.twitterLink.trim());
 
     if (isToday) {
       todayCount++;
       if (hasFb) todayFacebookCount++;
       if (hasWeb) todayWebsiteCount++;
+      if (hasTt) todayTiktokCount++;
+      if (hasIg) todayInstagramCount++;
+      if (hasTw) todayTwitterCount++;
     }
-    if (hasFb) {
-      facebookCount++;
-    }
-    if (hasWeb) {
-      websiteCount++;
-    }
+    if (hasFb) facebookCount++;
+    if (hasWeb) websiteCount++;
+    if (hasTt) tiktokCount++;
+    if (hasIg) instagramCount++;
+    if (hasTw) twitterCount++;
   }
 
   return {
     todayCount,
     todayFacebookCount,
     todayWebsiteCount,
+    todayTiktokCount,
+    todayInstagramCount,
+    todayTwitterCount,
     facebookCount,
     websiteCount,
+    tiktokCount,
+    instagramCount,
+    twitterCount,
     totalCount: posts.length,
   };
 }
@@ -1551,6 +1616,9 @@ export interface FinalDailySummary {
     entriesCount: number;
     facebookLinks: number;
     websiteLinks: number;
+    tiktokLinks: number;
+    instagramLinks: number;
+    twitterLinks: number;
   };
 }
 
@@ -1653,6 +1721,9 @@ export function computeFinalDailySummary(
   const datePosts = contentPosts.filter((p) => isIsoOnLocalDate(p.createdAt, dateStr));
   const facebookLinks = datePosts.filter((p) => p.facebookLink && p.facebookLink.trim()).length;
   const websiteLinks = datePosts.filter((p) => p.websiteLink && p.websiteLink.trim()).length;
+  const tiktokLinks = datePosts.filter((p) => p.tiktokLink && p.tiktokLink.trim()).length;
+  const instagramLinks = datePosts.filter((p) => p.instagramLink && p.instagramLink.trim()).length;
+  const twitterLinks = datePosts.filter((p) => p.twitterLink && p.twitterLink.trim()).length;
 
   return {
     date: dateStr,
@@ -1664,6 +1735,9 @@ export function computeFinalDailySummary(
       entriesCount: datePosts.length,
       facebookLinks,
       websiteLinks,
+      tiktokLinks,
+      instagramLinks,
+      twitterLinks,
     },
   };
 }
@@ -1752,7 +1826,15 @@ export function generateFinalDailySummaryCsv(summary: FinalDailySummary): string
   // Section 3: Content & Link Poster (Kawsar)
   lines.push(`CONTENT & LINK POSTER (KAWSAR - ${summary.date})`);
   lines.push(
-    ['Poster Name', `Total Entries (${summary.date})`, 'Facebook Post Links', 'Website Post Links']
+    [
+      'Poster Name',
+      `Total Entries (${summary.date})`,
+      'Facebook Post Links',
+      'Website Post Links',
+      'TikTok Links',
+      'Instagram Links',
+      'Twitter Links',
+    ]
       .map(escape)
       .join(',')
   );
@@ -1762,6 +1844,9 @@ export function generateFinalDailySummaryCsv(summary: FinalDailySummary): string
       summary.kawsar.entriesCount,
       summary.kawsar.facebookLinks,
       summary.kawsar.websiteLinks,
+      summary.kawsar.tiktokLinks,
+      summary.kawsar.instagramLinks,
+      summary.kawsar.twitterLinks,
     ]
       .map(escape)
       .join(',')

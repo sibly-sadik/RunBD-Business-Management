@@ -183,7 +183,8 @@ var COLLECTOR_TAB_HEADERS = [
   'Latest Status', 'Follow-up At', 'Notes', 'Collector', 'Updated At', 'Created At'
 ];
 var KAWSAR_POST_HEADERS = [
-  'Post ID', 'Title / Note', 'Facebook Link', 'Website Link', 'Posted By', 'Timestamp'
+  'Post ID', 'Title / Note', 'Facebook Link', 'Website Link',
+  'TikTok Link', 'Instagram Link', 'Twitter Link', 'Posted By', 'Timestamp'
 ];
 var PAID_CUSTOMER_HEADERS = [
   'Customer ID', 'Lead ID', 'Customer Name', 'Phone', 'Assigned Agent',
@@ -302,18 +303,79 @@ function normalizeUrlKey_(raw) {
     .replace(/^https?:\\/\\//, '')
     .replace(/^(www\\.|m\\.|mobile\\.|mbasic\\.|touch\\.)+/g, '')
     .replace(/^(fb\\.com|fb\\.me)\\//, 'facebook.com/')
+    .replace(/^twitter\\.com\\//, 'x.com/')
     .split('#')[0];
   if (!cleaned) return '';
   var parts = cleaned.split('?');
   var base = parts[0].replace(/\\/+$/, '');
   if (parts.length < 2 || !parts[1]) return base;
+  var isTwitterHost = base.indexOf('x.com/') === 0 || base === 'x.com';
   var kept = parts[1].split('&').filter(function(kv) {
     var k = kv.split('=')[0].toLowerCase();
     return k && k !== 'fbclid' && k !== 'gclid' && k !== 'ref' && k !== 'refsrc' &&
-      k !== 'rdid' && k !== 'share_url' && k !== 'sfnsn' && k !== '__tn__' &&
-      k !== 'mibextid' && k.indexOf('utm_') !== 0 && k.indexOf('__cft__') !== 0;
+      k !== 'ref_src' && k !== 'ref_url' && k !== 'rdid' && k !== 'share_url' &&
+      k !== 'sfnsn' && k !== '__tn__' && k !== 'mibextid' &&
+      k !== 'igsh' && k !== 'igshid' && k !== 'is_from_webapp' &&
+      k !== 'sender_device' && k !== 'sender_web_id' && k !== 'tt_from' &&
+      k !== 'u_code' && k !== 'share_app_id' && k !== '_r' && k !== '_t' &&
+      !(isTwitterHost && (k === 's' || k === 't')) &&
+      k.indexOf('utm_') !== 0 && k.indexOf('__cft__') !== 0;
   }).sort();
   return kept.length ? (base + '?' + kept.join('&')) : base;
+}
+
+function getKawsarColMap_(kawsarSheet) {
+  var lastCol = kawsarSheet ? Math.max(6, kawsarSheet.getLastColumn()) : 9;
+  var hdrRow = (kawsarSheet && kawsarSheet.getLastRow() >= 1)
+    ? kawsarSheet.getRange(1, 1, 1, lastCol).getValues()[0]
+    : KAWSAR_POST_HEADERS;
+  var map = { id: 0, note: 1, fb: 2, web: 3, tt: -1, ig: -1, tw: -1, poster: 4, ts: 5, totalCols: lastCol };
+  for (var c = 0; c < hdrRow.length; c++) {
+    var h = String(hdrRow[c] || '').trim().toLowerCase();
+    if (h === 'post id') map.id = c;
+    else if (h.indexOf('title') !== -1 || h.indexOf('note') !== -1) map.note = c;
+    else if (h.indexOf('facebook') !== -1) map.fb = c;
+    else if (h.indexOf('website') !== -1) map.web = c;
+    else if (h.indexOf('tiktok') !== -1) map.tt = c;
+    else if (h.indexOf('instagram') !== -1) map.ig = c;
+    else if (h.indexOf('twitter') !== -1) map.tw = c;
+    else if (h.indexOf('posted by') !== -1) map.poster = c;
+    else if (h.indexOf('timestamp') !== -1) map.ts = c;
+  }
+  return map;
+}
+
+function ensureKawsarPostHeaders_(kawsarSheet) {
+  if (!kawsarSheet) return;
+  if (kawsarSheet.getLastRow() < 1) {
+    kawsarSheet.appendRow(KAWSAR_POST_HEADERS);
+    kawsarSheet.getRange(1, 1, 1, KAWSAR_POST_HEADERS.length).setFontWeight('bold');
+    return;
+  }
+  var lastCol = Math.max(6, kawsarSheet.getLastColumn());
+  var hdr = kawsarSheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  var col5 = String(hdr[4] || '').trim().toLowerCase();
+  if (col5 === 'posted by' && typeof kawsarSheet.insertColumnsBefore === 'function') {
+    kawsarSheet.insertColumnsBefore(5, 3);
+  }
+  if (col5 === 'posted by' || lastCol < KAWSAR_POST_HEADERS.length || String(hdr[4] || '').trim().toLowerCase() !== 'tiktok link') {
+    kawsarSheet.getRange(1, 1, 1, KAWSAR_POST_HEADERS.length).setValues([KAWSAR_POST_HEADERS]);
+    kawsarSheet.getRange(1, 1, 1, KAWSAR_POST_HEADERS.length).setFontWeight('bold');
+  }
+}
+
+function formatKawsarPostRow_(cp) {
+  return [
+    cp.id,
+    cp.note || '',
+    cp.facebookLink || '',
+    cp.websiteLink || '',
+    cp.tiktokLink || '',
+    cp.instagramLink || '',
+    cp.twitterLink || '',
+    cp.posterName || 'Kawsar',
+    cp.createdAt
+  ];
 }
 
 function getDhakaTodayYmd_() {
@@ -391,22 +453,35 @@ function doGet(e) {
     if (action === 'check_post_duplicate') {
       var targetPostFb = normalizeUrlKey_(params.facebookLink || '');
       var targetPostWeb = normalizeUrlKey_(params.websiteLink || '');
+      var targetPostTt = normalizeUrlKey_(params.tiktokLink || '');
+      var targetPostIg = normalizeUrlKey_(params.instagramLink || '');
+      var targetPostTw = normalizeUrlKey_(params.twitterLink || '');
 
-      if (kawsarSheet && kawsarSheet.getLastRow() > 1 && (targetPostFb || targetPostWeb)) {
-        var pRows = kawsarSheet.getRange(2, 1, kawsarSheet.getLastRow() - 1, 6).getValues();
+      if (kawsarSheet && kawsarSheet.getLastRow() > 1 && (targetPostFb || targetPostWeb || targetPostTt || targetPostIg || targetPostTw)) {
+        var colMap = getKawsarColMap_(kawsarSheet);
+        var pRows = kawsarSheet.getRange(2, 1, kawsarSheet.getLastRow() - 1, colMap.totalCols).getValues();
         for (var p = 0; p < pRows.length; p++) {
           var pr = pRows[p];
-          var existingFbRaw = String(pr[2] || '').trim();
-          var existingWebRaw = String(pr[3] || '').trim();
-          var existingFb = normalizeUrlKey_(existingFbRaw);
-          var existingWeb = normalizeUrlKey_(existingWebRaw);
+          var existingFbRaw = String(pr[colMap.fb] || '').trim();
+          var existingWebRaw = String(pr[colMap.web] || '').trim();
+          var existingTtRaw = colMap.tt >= 0 ? String(pr[colMap.tt] || '').trim() : '';
+          var existingIgRaw = colMap.ig >= 0 ? String(pr[colMap.ig] || '').trim() : '';
+          var existingTwRaw = colMap.tw >= 0 ? String(pr[colMap.tw] || '').trim() : '';
+
+          var existingList = [
+            normalizeUrlKey_(existingFbRaw),
+            normalizeUrlKey_(existingWebRaw),
+            normalizeUrlKey_(existingTtRaw),
+            normalizeUrlKey_(existingIgRaw),
+            normalizeUrlKey_(existingTwRaw)
+          ].filter(Boolean);
 
           var matchedField = '';
-          if (targetPostFb && (targetPostFb === existingFb || targetPostFb === existingWeb)) {
-            matchedField = 'Facebook Link';
-          } else if (targetPostWeb && (targetPostWeb === existingWeb || targetPostWeb === existingFb)) {
-            matchedField = 'Website Link';
-          }
+          if (targetPostFb && existingList.indexOf(targetPostFb) !== -1) matchedField = 'Facebook Link';
+          else if (targetPostWeb && existingList.indexOf(targetPostWeb) !== -1) matchedField = 'Website Link';
+          else if (targetPostTt && existingList.indexOf(targetPostTt) !== -1) matchedField = 'TikTok Link';
+          else if (targetPostIg && existingList.indexOf(targetPostIg) !== -1) matchedField = 'Instagram Link';
+          else if (targetPostTw && existingList.indexOf(targetPostTw) !== -1) matchedField = 'Twitter Link';
 
           if (matchedField) {
             return jsonOut_({
@@ -414,12 +489,15 @@ function doGet(e) {
               isDuplicate: true,
               matchedField: matchedField,
               post: {
-                id: pr[0] ? String(pr[0]).trim() : ('SHEET-PST-' + (p + 2)),
-                note: String(pr[1] || '').trim(),
+                id: pr[colMap.id] ? String(pr[colMap.id]).trim() : ('SHEET-PST-' + (p + 2)),
+                note: String(pr[colMap.note] || '').trim(),
                 facebookLink: existingFbRaw,
                 websiteLink: existingWebRaw,
-                posterName: String(pr[4] || 'Kawsar').trim(),
-                createdAt: pr[5] ? new Date(pr[5]).toISOString() : new Date().toISOString()
+                tiktokLink: existingTtRaw,
+                instagramLink: existingIgRaw,
+                twitterLink: existingTwRaw,
+                posterName: String(pr[colMap.poster] || 'Kawsar').trim(),
+                createdAt: pr[colMap.ts] ? new Date(pr[colMap.ts]).toISOString() : new Date().toISOString()
               }
             });
           }
@@ -486,21 +564,28 @@ function doGet(e) {
 
     var contentPosts = [];
     if (kawsarSheet && kawsarSheet.getLastRow() > 1) {
-      var kRows = kawsarSheet.getRange(2, 1, kawsarSheet.getLastRow() - 1, 6).getValues();
+      var pMap = getKawsarColMap_(kawsarSheet);
+      var kRows = kawsarSheet.getRange(2, 1, kawsarSheet.getLastRow() - 1, pMap.totalCols).getValues();
       for (var k = 0; k < kRows.length; k++) {
         var kr = kRows[k];
-        var postFb = String(kr[2] || '').trim();
-        var postWeb = String(kr[3] || '').trim();
-        if (!kr[0] && !postFb && !postWeb) continue;
-        if (todayOnly && toYmd_(kr[5]) !== targetDate) continue;
-        var postId = kr[0] ? String(kr[0]).trim() : ('SHEET-PST-' + (k + 2));
+        var postFb = String(kr[pMap.fb] || '').trim();
+        var postWeb = String(kr[pMap.web] || '').trim();
+        var postTt = pMap.tt >= 0 ? String(kr[pMap.tt] || '').trim() : '';
+        var postIg = pMap.ig >= 0 ? String(kr[pMap.ig] || '').trim() : '';
+        var postTw = pMap.tw >= 0 ? String(kr[pMap.tw] || '').trim() : '';
+        if (!kr[pMap.id] && !postFb && !postWeb && !postTt && !postIg && !postTw) continue;
+        if (todayOnly && toYmd_(kr[pMap.ts]) !== targetDate) continue;
+        var postId = kr[pMap.id] ? String(kr[pMap.id]).trim() : ('SHEET-PST-' + (k + 2));
         contentPosts.push({
           id: postId,
-          note: String(kr[1] || ''),
+          note: String(kr[pMap.note] || ''),
           facebookLink: postFb,
           websiteLink: postWeb,
-          posterName: String(kr[4] || 'Kawsar'),
-          createdAt: kr[5] ? new Date(kr[5]).toISOString() : new Date().toISOString()
+          tiktokLink: postTt,
+          instagramLink: postIg,
+          twitterLink: postTw,
+          posterName: String(kr[pMap.poster] || 'Kawsar'),
+          createdAt: kr[pMap.ts] ? new Date(kr[pMap.ts]).toISOString() : new Date().toISOString()
         });
       }
     }
@@ -568,10 +653,12 @@ function doPost(e) {
       'Interested', 'Conversion Rate (%)', 'Last Synced At'
     ]);
     var kawsarSheet = getOrCreateSheetCached_(ss, sheetsByName, 'Kawsar_Posts_Log', KAWSAR_POST_HEADERS);
+    ensureKawsarPostHeaders_(kawsarSheet);
     var paidSheet = getOrCreateSheetCached_(ss, sheetsByName, 'Paid_Customers', PAID_CUSTOMER_HEADERS);
     var finalSummarySheet = getOrCreateSheetCached_(ss, sheetsByName, 'Final_Daily_Summary', [
       'Date', 'Total Calls', 'Orders Confirmed', 'Farhan Leads', 'Naim Leads',
-      'Kawsar FB Links', 'Kawsar Web Links', 'Agent Breakdown (Calls/Orders)', 'Last Synced At'
+      'Kawsar FB Links', 'Kawsar Web Links', 'Kawsar TikTok Links', 'Kawsar IG Links', 'Kawsar Twitter Links',
+      'Agent Breakdown (Calls/Orders)', 'Last Synced At'
     ]);
 
     // Collect dynamic agent and collector names from defaults, Team Management payload, and records
@@ -724,9 +811,7 @@ function doPost(e) {
         var kawsarSession = getSheetSession_(sessionCache, kawsarSheet, KAWSAR_POST_HEADERS.length, 'id');
         for (var pi = 0; pi < payload.contentPosts.length; pi++) {
           var cp = payload.contentPosts[pi];
-          upsertSessionRowById_(kawsarSession, String(cp.id || '').trim(), [
-            cp.id, cp.note || '', cp.facebookLink || '', cp.websiteLink || '', cp.posterName, cp.createdAt
-          ], '');
+          upsertSessionRowById_(kawsarSession, String(cp.id || '').trim(), formatKawsarPostRow_(cp), '');
         }
       }
 
@@ -793,9 +878,7 @@ function doPost(e) {
     } else if (payload.event === 'KAWSAR_POST_LOGGED' && payload.post) {
       var p = payload.post;
       var kawsarSessionSingle = getSheetSession_(sessionCache, kawsarSheet, KAWSAR_POST_HEADERS.length, 'id');
-      upsertSessionRowById_(kawsarSessionSingle, String(p.id || '').trim(), [
-        p.id, p.note || '', p.facebookLink || '', p.websiteLink || '', p.posterName, p.createdAt
-      ], '');
+      upsertSessionRowById_(kawsarSessionSingle, String(p.id || '').trim(), formatKawsarPostRow_(p), '');
     } else if (payload.event === 'PAID_CUSTOMER_UPSERT' && payload.paidCustomer) {
       var paidSessionP = getSheetSession_(sessionCache, paidSheet, PAID_CUSTOMER_HEADERS.length, 'id');
       syncPaidBatchAcrossPaidTabs_(ss, sheetsByName, sessionCache, paidSessionP, paidAgentSheets, [payload.paidCustomer], leadLookup);
@@ -827,7 +910,16 @@ function doPost(e) {
       var agentSummaryStr = Array.isArray(f.agents)
         ? f.agents.map(function(a) { return a.agentName + ':' + a.callsMade + '/' + a.orderConfirmed; }).join(' | ')
         : '';
-      var finalSession = getSheetSession_(sessionCache, finalSummarySheet, 9, 'id');
+      var finalHeaders = [
+        'Date', 'Total Calls', 'Orders Confirmed', 'Farhan Leads', 'Naim Leads',
+        'Kawsar FB Links', 'Kawsar Web Links', 'Kawsar TikTok Links', 'Kawsar IG Links', 'Kawsar Twitter Links',
+        'Agent Breakdown (Calls/Orders)', 'Last Synced At'
+      ];
+      if (finalSummarySheet.getLastColumn() < finalHeaders.length) {
+        finalSummarySheet.getRange(1, 1, 1, finalHeaders.length).setValues([finalHeaders]);
+        finalSummarySheet.getRange(1, 1, 1, finalHeaders.length).setFontWeight('bold');
+      }
+      var finalSession = getSheetSession_(sessionCache, finalSummarySheet, finalHeaders.length, 'id');
       upsertSessionRowById_(finalSession, String(f.date || '').trim(), [
         f.date,
         f.agentTotals ? f.agentTotals.callsMade : 0,
@@ -836,6 +928,9 @@ function doPost(e) {
         naimCount,
         f.kawsar ? f.kawsar.facebookLinks : 0,
         f.kawsar ? f.kawsar.websiteLinks : 0,
+        f.kawsar ? (f.kawsar.tiktokLinks || 0) : 0,
+        f.kawsar ? (f.kawsar.instagramLinks || 0) : 0,
+        f.kawsar ? (f.kawsar.twitterLinks || 0) : 0,
         agentSummaryStr,
         new Date().toISOString()
       ], '');

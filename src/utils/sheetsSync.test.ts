@@ -1620,6 +1620,255 @@ describe('Chunked Google Sheets sync & Code.gs O(tabs) batch performance on 195+
   });
 });
 
+describe('Kawsar_Posts_Log TikTok, Instagram, and Twitter links in sheetsSync and Apps Script', () => {
+  it('merges, deduplicates, and parses post duplicate responses across TikTok, Instagram, and Twitter', () => {
+    const parsedDup = parsePostDuplicateCheckResponse({
+      ok: true,
+      isDuplicate: true,
+      matchedField: 'Instagram Link',
+      existingPost: {
+        id: 'PST-EXT-1',
+        instagramLink: 'https://www.instagram.com/p/C9xyz',
+        tiktokLink: 'https://www.tiktok.com/@runbd/video/123',
+        twitterLink: 'https://x.com/runbd/status/456',
+        posterName: 'Kawsar',
+        note: 'Promo reel',
+        timestamp: '2026-11-23T10:00:00.000Z',
+      },
+    });
+    assert.ok(parsedDup);
+    assert.equal(parsedDup.ok, true);
+    assert.equal(parsedDup.isDuplicate, true);
+    assert.equal(parsedDup.matchedField, 'Instagram Link');
+    assert.equal(parsedDup.existingPost?.tiktokLink, 'https://www.tiktok.com/@runbd/video/123');
+    assert.equal(parsedDup.existingPost?.twitterLink, 'https://x.com/runbd/status/456');
+
+    const localPosts: ContentPost[] = [
+      {
+        id: 'PST-1',
+        facebookLink: '',
+        normalizedFacebookLink: '',
+        websiteLink: '',
+        normalizedWebsiteLink: '',
+        tiktokLink: 'https://www.tiktok.com/@runbd/video/111',
+        normalizedTiktokLink: 'tiktok.com/@runbd/video/111',
+        instagramLink: '',
+        normalizedInstagramLink: '',
+        twitterLink: '',
+        normalizedTwitterLink: '',
+        note: 'TT post',
+        posterId: 'poster-kawsar',
+        posterName: 'Kawsar',
+        createdAt: '2026-11-23T08:00:00.000Z',
+      },
+    ];
+    const remotePosts: ContentPost[] = [
+      {
+        id: 'PST-2',
+        facebookLink: '',
+        normalizedFacebookLink: '',
+        websiteLink: '',
+        normalizedWebsiteLink: '',
+        tiktokLink: 'https://www.tiktok.com/@runbd/video/111?is_from_webapp=1',
+        normalizedTiktokLink: 'tiktok.com/@runbd/video/111',
+        instagramLink: 'https://instagram.com/p/NEW1',
+        normalizedInstagramLink: 'instagram.com/p/NEW1',
+        twitterLink: 'https://twitter.com/runbd/status/777',
+        normalizedTwitterLink: 'x.com/runbd/status/777',
+        note: 'Duplicate TT + new IG/TW',
+        posterId: 'poster-kawsar',
+        posterName: 'Kawsar',
+        createdAt: '2026-11-23T09:00:00.000Z',
+      },
+    ];
+
+    const merged = mergeRemoteContentPosts(localPosts, remotePosts);
+    assert.equal(merged.length, 2);
+    assert.equal(merged.find((p) => p.id === 'PST-2')?.normalizedTwitterLink, 'x.com/runbd/status/777');
+
+    const flags = detectPostDuplicatesInList(merged);
+    assert.equal(flags.length, 1);
+    assert.equal(flags[0].matchedField, 'TikTok Link');
+    assert.equal(flags[0].originalPostId, 'PST-1');
+    assert.equal(flags[0].duplicatePostId, 'PST-2');
+  });
+
+  it('upgrades legacy 6-col Kawsar_Posts_Log, logs TikTok/Instagram/Twitter links, checks duplicates via doGet, and pulls all 5 link fields', () => {
+    const makeUpgradeableSheet = (name: string) => {
+      const rows: unknown[][] = [];
+      return {
+        getName: () => name,
+        appendRow: (row: unknown[]) => rows.push([...row]),
+        getLastRow: () => rows.length,
+        getLastColumn: () => (rows[0] ? rows[0].length : 0),
+        insertColumnsBefore: (beforePos: number, howMany: number) => {
+          const idx = beforePos - 1;
+          for (let r = 0; r < rows.length; r++) {
+            const blanks = Array.from({ length: howMany }, () => '');
+            rows[r].splice(idx, 0, ...blanks);
+          }
+        },
+        getDataRange: () => ({
+          getValues: () => rows.map((r) => [...r]),
+        }),
+        getRange: (row: number, col: number, numRows: number, numCols: number) => ({
+          setFontWeight: () => {},
+          getValues: () => {
+            const out: unknown[][] = [];
+            for (let r = row - 1; r < row - 1 + numRows; r++) {
+              const src = rows[r] ?? [];
+              const slice: unknown[] = [];
+              for (let c = col - 1; c < col - 1 + numCols; c++) {
+                slice.push(src[c] ?? '');
+              }
+              out.push(slice);
+            }
+            return out;
+          },
+          setValues: (newVals: unknown[][]) => {
+            for (let r = 0; r < numRows; r++) {
+              const targetIdx = row - 1 + r;
+              while (rows.length <= targetIdx) rows.push([]);
+              for (let c = 0; c < numCols; c++) {
+                rows[targetIdx][col - 1 + c] = newVals[r][c];
+              }
+            }
+          },
+        }),
+        deleteRow: (rowNum: number) => rows.splice(rowNum - 1, 1),
+        setFrozenRows: () => {},
+        _rows: rows,
+      };
+    };
+
+    const sheetsMap = new Map<string, ReturnType<typeof makeUpgradeableSheet>>();
+    const mockSpreadsheet = {
+      getSheetByName: (name: string) => sheetsMap.get(name) ?? null,
+      insertSheet: (name: string) => {
+        const s = makeUpgradeableSheet(name);
+        sheetsMap.set(name, s);
+        return s;
+      },
+      getSheets: () => Array.from(sheetsMap.values()),
+    };
+
+    // Seed legacy 6-column Kawsar_Posts_Log to test seamless schema upgrade
+    const kawsarSheet = mockSpreadsheet.insertSheet('Kawsar_Posts_Log');
+    kawsarSheet.appendRow([
+      'Post ID',
+      'Title / Note',
+      'Facebook Link',
+      'Website Link',
+      'Posted By',
+      'Timestamp',
+    ]);
+    kawsarSheet.appendRow([
+      'PST-LEGACY-1',
+      'Old Post',
+      'https://facebook.com/runbd/posts/old1',
+      'https://runbd.com/old1',
+      'Kawsar',
+      '2026-11-22T10:00:00.000Z',
+    ]);
+
+    const sandbox: Record<string, unknown> = {
+      SpreadsheetApp: { getActiveSpreadsheet: () => mockSpreadsheet },
+      Utilities: {
+        formatDate: (d: Date) => new Date(d.getTime() + 6 * 3600 * 1000).toISOString().slice(0, 10),
+      },
+      ContentService: {
+        MimeType: { JSON: 'JSON' },
+        createTextOutput: (txt: string) => ({ setMimeType: () => txt }),
+      },
+    };
+    vm.createContext(sandbox);
+    vm.runInContext(GOOGLE_APPS_SCRIPT_CODE, sandbox);
+
+    const doPost = sandbox.doPost as (e: { postData: { contents: string } }) => string;
+    const doGet = sandbox.doGet as (e: { parameter: Record<string, string> }) => string;
+
+    // 1. Log a new post with TikTok + Instagram + Twitter links via KAWSAR_POST_LOGGED
+    const postRes = JSON.parse(
+      doPost({
+        postData: {
+          contents: JSON.stringify({
+            event: 'KAWSAR_POST_LOGGED',
+            post: {
+              id: 'PST-NEW-1',
+              note: 'Social Reel + Thread',
+              facebookLink: '',
+              websiteLink: '',
+              tiktokLink: 'https://www.tiktok.com/@runbd/video/74999',
+              instagramLink: 'https://www.instagram.com/p/C9NEW/',
+              twitterLink: 'https://x.com/runbd/status/18999',
+              posterName: 'Kawsar',
+              createdAt: '2026-11-23T12:00:00.000Z',
+            },
+          }),
+        },
+      })
+    );
+    assert.equal(postRes.ok, true);
+
+    // Header upgraded to 9 cols, legacy row preserved Posted By='Kawsar' and Timestamp
+    assert.deepEqual(kawsarSheet._rows[0], [
+      'Post ID',
+      'Title / Note',
+      'Facebook Link',
+      'Website Link',
+      'TikTok Link',
+      'Instagram Link',
+      'Twitter Link',
+      'Posted By',
+      'Timestamp',
+    ]);
+    assert.equal(kawsarSheet._rows[1][7], 'Kawsar');
+    assert.equal(kawsarSheet._rows[1][8], '2026-11-22T10:00:00.000Z');
+    assert.equal(kawsarSheet._rows[2][4], 'https://www.tiktok.com/@runbd/video/74999');
+    assert.equal(kawsarSheet._rows[2][5], 'https://www.instagram.com/p/C9NEW/');
+    assert.equal(kawsarSheet._rows[2][6], 'https://x.com/runbd/status/18999');
+
+    // 2. Duplicate check via doGet matches normalized Twitter (twitter.com -> x.com) & TikTok
+    const twCheck = JSON.parse(
+      doGet({
+        parameter: {
+          action: 'check_post_duplicate',
+          twitterLink: 'https://twitter.com/runbd/status/18999?s=20',
+        },
+      })
+    );
+    assert.equal(twCheck.ok, true);
+    assert.equal(twCheck.isDuplicate, true);
+    assert.equal(twCheck.matchedField, 'Twitter Link');
+    assert.equal(twCheck.post.id, 'PST-NEW-1');
+    const parsedTwCheck = parsePostDuplicateCheckResponse(twCheck);
+    assert.ok(parsedTwCheck);
+    assert.equal(parsedTwCheck.existingPost?.id, 'PST-NEW-1');
+    assert.equal(parsedTwCheck.existingPost?.twitterLink, 'https://x.com/runbd/status/18999');
+
+    const ttCheck = JSON.parse(
+      doGet({
+        parameter: {
+          action: 'check_post_duplicate',
+          tiktokLink: 'https://www.tiktok.com/@runbd/video/74999?is_from_webapp=1',
+        },
+      })
+    );
+    assert.equal(ttCheck.isDuplicate, true);
+    assert.equal(ttCheck.matchedField, 'TikTok Link');
+
+    // 3. Pull returns all 5 link fields accurately
+    const pullRes = JSON.parse(doGet({ parameter: { scope: 'all' } }));
+    assert.equal(pullRes.ok, true);
+    const pulledNew = pullRes.contentPosts.find((p: { id: string }) => p.id === 'PST-NEW-1');
+    assert.equal(pulledNew.tiktokLink, 'https://www.tiktok.com/@runbd/video/74999');
+    assert.equal(pulledNew.instagramLink, 'https://www.instagram.com/p/C9NEW/');
+    assert.equal(pulledNew.twitterLink, 'https://x.com/runbd/status/18999');
+    assert.equal(pulledNew.posterName, 'Kawsar');
+  });
+});
+
+
 
 
 

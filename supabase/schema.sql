@@ -74,14 +74,31 @@ CREATE TABLE IF NOT EXISTS public.kawsar_posts (
   facebook_normalized TEXT NOT NULL DEFAULT '',
   website_link TEXT NOT NULL DEFAULT '',
   website_normalized TEXT NOT NULL DEFAULT '',
+  tiktok_link TEXT NOT NULL DEFAULT '',
+  tiktok_normalized TEXT NOT NULL DEFAULT '',
+  instagram_link TEXT NOT NULL DEFAULT '',
+  instagram_normalized TEXT NOT NULL DEFAULT '',
+  twitter_link TEXT NOT NULL DEFAULT '',
+  twitter_normalized TEXT NOT NULL DEFAULT '',
   poster_id TEXT NOT NULL DEFAULT 'poster-kawsar',
   poster_name TEXT NOT NULL DEFAULT 'Kawsar',
   posted_date TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
 
+ALTER TABLE public.kawsar_posts
+  ADD COLUMN IF NOT EXISTS tiktok_link TEXT NOT NULL DEFAULT '',
+  ADD COLUMN IF NOT EXISTS tiktok_normalized TEXT NOT NULL DEFAULT '',
+  ADD COLUMN IF NOT EXISTS instagram_link TEXT NOT NULL DEFAULT '',
+  ADD COLUMN IF NOT EXISTS instagram_normalized TEXT NOT NULL DEFAULT '',
+  ADD COLUMN IF NOT EXISTS twitter_link TEXT NOT NULL DEFAULT '',
+  ADD COLUMN IF NOT EXISTS twitter_normalized TEXT NOT NULL DEFAULT '';
+
 CREATE INDEX IF NOT EXISTS idx_kawsar_posts_fb_norm ON public.kawsar_posts (facebook_normalized);
 CREATE INDEX IF NOT EXISTS idx_kawsar_posts_web_norm ON public.kawsar_posts (website_normalized);
+CREATE INDEX IF NOT EXISTS idx_kawsar_posts_tiktok_norm ON public.kawsar_posts (tiktok_normalized);
+CREATE INDEX IF NOT EXISTS idx_kawsar_posts_ig_norm ON public.kawsar_posts (instagram_normalized);
+CREATE INDEX IF NOT EXISTS idx_kawsar_posts_tw_norm ON public.kawsar_posts (twitter_normalized);
 CREATE INDEX IF NOT EXISTS idx_kawsar_posts_posted_date ON public.kawsar_posts (posted_date);
 
 -- 5. Duplicate Attempts table (Blocked Duplicates Today & Audit)

@@ -506,11 +506,11 @@ export function AdminSheetsView({
             Core Tab 4: Kawsar_Posts_Log
           </p>
           <p className="mt-2 text-sm font-semibold text-slate-900 dark:text-white">
-            Facebook &amp; Website Links
+            Multi-Platform Post Links
           </p>
           <p className="mt-1 text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
-            Logs every Facebook and Website link submitted by Kawsar in real time via the{' '}
-            <code className="font-mono text-[11px]">KAWSAR_POST_LOGGED</code> webhook event.
+            Logs every Facebook, Website, TikTok, Instagram, and Twitter link submitted by Kawsar in
+            real time via <code className="font-mono text-[11px]">KAWSAR_POST_LOGGED</code>.
           </p>
         </div>
 

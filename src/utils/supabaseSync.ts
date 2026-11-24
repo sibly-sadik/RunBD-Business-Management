@@ -11,6 +11,7 @@ import {
   DuplicateAttempt,
   Lead,
   PaidCustomer,
+  PostLinkField,
   RENEWAL_STATUSES,
   RenewalStatus,
   UserRole,
@@ -88,6 +89,12 @@ export interface SupabaseContentPostRow {
   facebook_normalized: string | null;
   website_link: string | null;
   website_normalized: string | null;
+  tiktok_link?: string | null;
+  tiktok_normalized?: string | null;
+  instagram_link?: string | null;
+  instagram_normalized?: string | null;
+  twitter_link?: string | null;
+  twitter_normalized?: string | null;
   poster_id?: string | null;
   poster_name?: string | null;
   posted_date: string;
@@ -345,6 +352,12 @@ export function rowToContentPost(row: SupabaseContentPostRow): ContentPost {
     normalizedFacebookLink: row.facebook_normalized ?? '',
     websiteLink: row.website_link ?? '',
     normalizedWebsiteLink: row.website_normalized ?? '',
+    tiktokLink: row.tiktok_link ?? '',
+    normalizedTiktokLink: row.tiktok_normalized ?? '',
+    instagramLink: row.instagram_link ?? '',
+    normalizedInstagramLink: row.instagram_normalized ?? '',
+    twitterLink: row.twitter_link ?? '',
+    normalizedTwitterLink: row.twitter_normalized ?? '',
     note: row.title ?? '',
     posterId: row.poster_id?.trim() || 'poster-kawsar',
     posterName: row.poster_name?.trim() || 'Kawsar',
@@ -359,6 +372,15 @@ export function contentPostToSupabaseRow(post: ContentPost): SupabaseContentPost
   const webNorm = post.websiteLink
     ? post.normalizedWebsiteLink || normalizePostUrl(post.websiteLink)
     : '';
+  const tiktokNorm = post.tiktokLink
+    ? post.normalizedTiktokLink || normalizePostUrl(post.tiktokLink)
+    : '';
+  const igNorm = post.instagramLink
+    ? post.normalizedInstagramLink || normalizePostUrl(post.instagramLink)
+    : '';
+  const twNorm = post.twitterLink
+    ? post.normalizedTwitterLink || normalizePostUrl(post.twitterLink)
+    : '';
   const postedDate = parseDateToYmd(post.createdAt) ?? getLocalDateString();
   return {
     id: post.id,
@@ -367,10 +389,31 @@ export function contentPostToSupabaseRow(post: ContentPost): SupabaseContentPost
     facebook_normalized: fbNorm,
     website_link: post.websiteLink ?? '',
     website_normalized: webNorm,
+    tiktok_link: post.tiktokLink ?? '',
+    tiktok_normalized: tiktokNorm,
+    instagram_link: post.instagramLink ?? '',
+    instagram_normalized: igNorm,
+    twitter_link: post.twitterLink ?? '',
+    twitter_normalized: twNorm,
     poster_id: post.posterId,
     poster_name: post.posterName,
     posted_date: postedDate,
     created_at: post.createdAt,
+  };
+}
+
+function toLegacySupabaseContentPostRow(row: SupabaseContentPostRow): SupabaseContentPostRow {
+  return {
+    id: row.id,
+    title: row.title,
+    facebook_link: row.facebook_link,
+    facebook_normalized: row.facebook_normalized,
+    website_link: row.website_link,
+    website_normalized: row.website_normalized,
+    poster_id: row.poster_id,
+    poster_name: row.poster_name,
+    posted_date: row.posted_date,
+    created_at: row.created_at,
   };
 }
 
@@ -555,6 +598,26 @@ export async function fetchBootstrapFromSupabase(
       };
     }
 
+    if (Array.isArray(postsRes.data) && postsRes.data.length > 0) {
+      const sample = postsRes.data[0] as Record<string, unknown>;
+      supabaseSupportsExtendedKawsarColumns =
+        'tiktok_link' in sample &&
+        'instagram_link' in sample &&
+        'twitter_link' in sample;
+    } else if (!postsRes.error && (role === 'poster' || role === 'admin')) {
+      const { data: sampleRows } = await supabase
+        .from('kawsar_posts')
+        .select('*')
+        .limit(1);
+      if (Array.isArray(sampleRows) && sampleRows.length > 0) {
+        const sample = sampleRows[0] as Record<string, unknown>;
+        supabaseSupportsExtendedKawsarColumns =
+          'tiktok_link' in sample &&
+          'instagram_link' in sample &&
+          'twitter_link' in sample;
+      }
+    }
+
     return {
       ok: true,
       leads: ((leadsRes.data ?? []) as SupabaseLeadRow[]).map(rowToLead),
@@ -660,69 +723,94 @@ export async function checkLeadDuplicateInSupabase(
   }
 }
 
+const KAWSAR_POST_LEGACY_NORM_COLUMNS = [
+  'facebook_normalized',
+  'website_normalized',
+] as const;
+
+const KAWSAR_POST_EXTENDED_NORM_COLUMNS = [
+  'facebook_normalized',
+  'website_normalized',
+  'tiktok_normalized',
+  'instagram_normalized',
+  'twitter_normalized',
+] as const;
+
+let supabaseSupportsExtendedKawsarColumns: boolean | null = null;
+
+export function resetSupabaseKawsarColumnCacheForTest(): void {
+  supabaseSupportsExtendedKawsarColumns = null;
+}
+
 export async function checkPostDuplicateInSupabase(
   rawFacebookLink: string,
-  rawWebsiteLink: string
+  rawWebsiteLink: string,
+  rawTiktokLink = '',
+  rawInstagramLink = '',
+  rawTwitterLink = ''
 ): Promise<{
   ok: boolean;
   isDuplicate: boolean;
-  matchedField?: 'Facebook Link' | 'Website Link';
+  matchedField?: PostLinkField;
   existingPost?: ContentPost;
   schemaMissing?: boolean;
   error?: string;
 }> {
   try {
-    const fbNorm = rawFacebookLink.trim() ? normalizePostUrl(rawFacebookLink) : '';
-    if (fbNorm) {
-      const { data, error } = await supabase
-        .from('kawsar_posts')
-        .select('*')
-        .eq('facebook_normalized', fbNorm)
-        .limit(1)
-        .maybeSingle();
+    const targets: Array<{ field: PostLinkField; norm: string }> = [
+      { field: 'Facebook Link' as PostLinkField, norm: rawFacebookLink.trim() ? normalizePostUrl(rawFacebookLink) : '' },
+      { field: 'Website Link' as PostLinkField, norm: rawWebsiteLink.trim() ? normalizePostUrl(rawWebsiteLink) : '' },
+      { field: 'TikTok Link' as PostLinkField, norm: rawTiktokLink.trim() ? normalizePostUrl(rawTiktokLink) : '' },
+      { field: 'Instagram Link' as PostLinkField, norm: rawInstagramLink.trim() ? normalizePostUrl(rawInstagramLink) : '' },
+      { field: 'Twitter Link' as PostLinkField, norm: rawTwitterLink.trim() ? normalizePostUrl(rawTwitterLink) : '' },
+    ].filter((t) => Boolean(t.norm));
 
-      if (error) {
-        return {
-          ok: false,
-          isDuplicate: false,
-          schemaMissing: isSchemaMissingError(error),
-          error: error.message,
-        };
-      }
-      if (data) {
-        return {
-          ok: true,
-          isDuplicate: true,
-          matchedField: 'Facebook Link',
-          existingPost: rowToContentPost(data as SupabaseContentPostRow),
-        };
-      }
-    }
+    const normCols =
+      supabaseSupportsExtendedKawsarColumns === false
+        ? KAWSAR_POST_LEGACY_NORM_COLUMNS
+        : KAWSAR_POST_EXTENDED_NORM_COLUMNS;
 
-    const webNorm = rawWebsiteLink.trim() ? normalizePostUrl(rawWebsiteLink) : '';
-    if (webNorm) {
-      const { data, error } = await supabase
-        .from('kawsar_posts')
-        .select('*')
-        .eq('website_normalized', webNorm)
-        .limit(1)
-        .maybeSingle();
+    for (const target of targets) {
+      const results = await Promise.all(
+        normCols.map((col) =>
+          supabase
+            .from('kawsar_posts')
+            .select('*')
+            .eq(col, target.norm)
+            .limit(1)
+            .maybeSingle()
+        )
+      );
 
-      if (error) {
-        return {
-          ok: false,
-          isDuplicate: false,
-          schemaMissing: isSchemaMissingError(error),
-          error: error.message,
-        };
-      }
-      if (data) {
-        return {
-          ok: true,
-          isDuplicate: true,
-          matchedField: 'Website Link',
-          existingPost: rowToContentPost(data as SupabaseContentPostRow),
-        };
+      for (let i = 0; i < results.length; i++) {
+        const res = results[i];
+        const col = normCols[i];
+        if (res.error) {
+          if (isMissingColumnError(res.error, col)) {
+            if (
+              col === 'tiktok_normalized' ||
+              col === 'instagram_normalized' ||
+              col === 'twitter_normalized'
+            ) {
+              supabaseSupportsExtendedKawsarColumns = false;
+            }
+            continue;
+          }
+          return {
+            ok: false,
+            isDuplicate: false,
+            schemaMissing: isSchemaMissingError(res.error),
+            error: res.error.message,
+          };
+        }
+        if (res.data) {
+          return {
+            ok: true,
+            isDuplicate: true,
+            matchedField: target.field,
+            existingPost: rowToContentPost(res.data as SupabaseContentPostRow),
+          };
+        }
       }
     }
 
@@ -924,11 +1012,17 @@ export async function saveCallLogInSupabase(
 export async function createPostInSupabase(post: ContentPost): Promise<{
   ok: boolean;
   isDuplicate?: boolean;
-  matchedField?: 'Facebook Link' | 'Website Link';
+  matchedField?: PostLinkField;
   existingPost?: ContentPost;
   error?: string;
 }> {
-  const dup = await checkPostDuplicateInSupabase(post.facebookLink, post.websiteLink);
+  const dup = await checkPostDuplicateInSupabase(
+    post.facebookLink,
+    post.websiteLink,
+    post.tiktokLink ?? '',
+    post.instagramLink ?? '',
+    post.twitterLink ?? ''
+  );
   if (dup.ok && dup.isDuplicate && dup.existingPost) {
     return {
       ok: false,
@@ -940,10 +1034,32 @@ export async function createPostInSupabase(post: ContentPost): Promise<{
 
   try {
     const row = contentPostToSupabaseRow(post);
+    if (supabaseSupportsExtendedKawsarColumns === false) {
+      const legacyRes = await supabase
+        .from('kawsar_posts')
+        .upsert(toLegacySupabaseContentPostRow(row), { onConflict: 'id' });
+      if (legacyRes.error) return { ok: false, error: legacyRes.error.message };
+      return { ok: true };
+    }
     const { error } = await supabase
       .from('kawsar_posts')
       .upsert(row, { onConflict: 'id' });
-    if (error) return { ok: false, error: error.message };
+    if (error) {
+      if (
+        isMissingColumnError(error, 'tiktok_link') ||
+        isMissingColumnError(error, 'instagram_link') ||
+        isMissingColumnError(error, 'twitter_link')
+      ) {
+        supabaseSupportsExtendedKawsarColumns = false;
+        const legacyRes = await supabase
+          .from('kawsar_posts')
+          .upsert(toLegacySupabaseContentPostRow(row), { onConflict: 'id' });
+        if (legacyRes.error) return { ok: false, error: legacyRes.error.message };
+        return { ok: true };
+      }
+      return { ok: false, error: error.message };
+    }
+    supabaseSupportsExtendedKawsarColumns = true;
     return { ok: true };
   } catch (err) {
     return {
@@ -1056,12 +1172,27 @@ export async function syncPulledRecordsToSupabase(payload: {
     );
   }
   if (payload.contentPosts && payload.contentPosts.length > 0) {
+    const postRows = payload.contentPosts.map(contentPostToSupabaseRow);
+    const rowsToSend =
+      supabaseSupportsExtendedKawsarColumns === false
+        ? postRows.map(toLegacySupabaseContentPostRow)
+        : postRows;
     ops.push(
       Promise.resolve(
-        supabase
-          .from('kawsar_posts')
-          .upsert(payload.contentPosts.map(contentPostToSupabaseRow), { onConflict: 'id' })
-      )
+        supabase.from('kawsar_posts').upsert(rowsToSend, { onConflict: 'id' })
+      ).then(async (res) => {
+        if (
+          res.error &&
+          (isMissingColumnError(res.error, 'tiktok_link') ||
+            isMissingColumnError(res.error, 'instagram_link') ||
+            isMissingColumnError(res.error, 'twitter_link'))
+        ) {
+          supabaseSupportsExtendedKawsarColumns = false;
+          await supabase
+            .from('kawsar_posts')
+            .upsert(postRows.map(toLegacySupabaseContentPostRow), { onConflict: 'id' });
+        }
+      })
     );
   }
   if (payload.paidCustomers && payload.paidCustomers.length > 0) {

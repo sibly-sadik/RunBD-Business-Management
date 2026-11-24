@@ -331,7 +331,7 @@ export function LoginScreen({
                   <div>
                     <div className="flex items-center gap-2 text-xs font-semibold text-slate-600 dark:text-slate-400 mb-2.5">
                       <Link2 className="w-4 h-4 text-violet-500" />
-                      <span>Content &amp; Link Poster — Facebook &amp; Website Post Tracking</span>
+                      <span>Content &amp; Link Poster — Social &amp; Website Post Tracking</span>
                     </div>
                     <div className="grid grid-cols-1 gap-2.5">
                       {posterUsers.map((user) => (

@@ -102,6 +102,12 @@ export const kawsarPosts = pgTable(
     facebookNormalized: text('facebook_normalized').notNull().default(''),
     websiteLink: text('website_link').notNull().default(''),
     websiteNormalized: text('website_normalized').notNull().default(''),
+    tiktokLink: text('tiktok_link').notNull().default(''),
+    tiktokNormalized: text('tiktok_normalized').notNull().default(''),
+    instagramLink: text('instagram_link').notNull().default(''),
+    instagramNormalized: text('instagram_normalized').notNull().default(''),
+    twitterLink: text('twitter_link').notNull().default(''),
+    twitterNormalized: text('twitter_normalized').notNull().default(''),
     posterId: text('poster_id').notNull(),
     posterName: text('poster_name').notNull(),
     postedDate: text('posted_date').notNull(),
@@ -110,6 +116,9 @@ export const kawsarPosts = pgTable(
   (table) => [
     index('kawsar_posts_facebook_normalized_idx').on(table.facebookNormalized),
     index('kawsar_posts_website_normalized_idx').on(table.websiteNormalized),
+    index('kawsar_posts_tiktok_normalized_idx').on(table.tiktokNormalized),
+    index('kawsar_posts_instagram_normalized_idx').on(table.instagramNormalized),
+    index('kawsar_posts_twitter_normalized_idx').on(table.twitterNormalized),
     index('kawsar_posts_posted_date_idx').on(table.postedDate),
   ]
 );

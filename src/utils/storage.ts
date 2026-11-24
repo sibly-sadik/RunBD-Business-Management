@@ -777,7 +777,12 @@ export async function checkPostDuplicateInSheets(
   webhookUrl: string,
   facebookLink: string,
   websiteLink: string,
-  options?: { timeoutMs?: number }
+  options?: {
+    timeoutMs?: number;
+    tiktokLink?: string;
+    instagramLink?: string;
+    twitterLink?: string;
+  }
 ): Promise<PostDuplicateCheckResult> {
   const trimmed = webhookUrl.trim();
   if (!trimmed) {
@@ -786,7 +791,10 @@ export async function checkPostDuplicateInSheets(
 
   const trimmedFb = facebookLink.trim();
   const trimmedWeb = websiteLink.trim();
-  if (!trimmedFb && !trimmedWeb) {
+  const trimmedTt = (options?.tiktokLink ?? '').trim();
+  const trimmedIg = (options?.instagramLink ?? '').trim();
+  const trimmedTw = (options?.twitterLink ?? '').trim();
+  if (!trimmedFb && !trimmedWeb && !trimmedTt && !trimmedIg && !trimmedTw) {
     return { ok: true, isDuplicate: false };
   }
 
@@ -796,6 +804,9 @@ export async function checkPostDuplicateInSheets(
     parsed.searchParams.set('action', 'check_post_duplicate');
     parsed.searchParams.set('facebookLink', trimmedFb);
     parsed.searchParams.set('websiteLink', trimmedWeb);
+    if (trimmedTt) parsed.searchParams.set('tiktokLink', trimmedTt);
+    if (trimmedIg) parsed.searchParams.set('instagramLink', trimmedIg);
+    if (trimmedTw) parsed.searchParams.set('twitterLink', trimmedTw);
     targetUrl = parsed.toString();
   } catch {
     return { ok: false, isDuplicate: false, error: 'Invalid webhook URL format' };
@@ -829,6 +840,9 @@ export async function checkPostDuplicateInSheets(
     const parsedResult = parsePostDuplicateCheckResponse(json, {
       facebookLink: trimmedFb,
       websiteLink: trimmedWeb,
+      tiktokLink: trimmedTt,
+      instagramLink: trimmedIg,
+      twitterLink: trimmedTw,
     });
     if (!parsedResult) {
       const error = 'Unsupported post duplicate check response format from Google Apps Script.';

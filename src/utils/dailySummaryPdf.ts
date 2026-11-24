@@ -62,7 +62,7 @@ export function buildFinalDailySummaryPdfDoc(
       String(summary.agentTotals.callsMade),
       String(summary.agentTotals.orderConfirmed),
       `${summary.totalCollectedOnDate} (Assigned: ${summary.agentTotals.assignedLeads})`,
-      `${summary.kawsar.facebookLinks + summary.kawsar.websiteLinks} (${summary.kawsar.facebookLinks} FB · ${summary.kawsar.websiteLinks} Web)`,
+      `${summary.kawsar.facebookLinks + summary.kawsar.websiteLinks + summary.kawsar.tiktokLinks + summary.kawsar.instagramLinks + summary.kawsar.twitterLinks} (FB:${summary.kawsar.facebookLinks} Web:${summary.kawsar.websiteLinks} TT:${summary.kawsar.tiktokLinks} IG:${summary.kawsar.instagramLinks} TW:${summary.kawsar.twitterLinks})`,
     ]],
   });
 
@@ -152,11 +152,14 @@ export function buildFinalDailySummaryPdfDoc(
     theme: 'grid',
     headStyles: { fillColor: [241, 245, 249], textColor: [15, 23, 42], fontStyle: 'bold', fontSize: 8 },
     bodyStyles: { textColor: [15, 23, 42], fontSize: 8.5 },
-    head: [['Total Entries', 'Facebook Links', 'Website Links']],
+    head: [['Total Entries', 'Facebook', 'Website', 'TikTok', 'Instagram', 'Twitter']],
     body: [[
       String(summary.kawsar.entriesCount),
       String(summary.kawsar.facebookLinks),
       String(summary.kawsar.websiteLinks),
+      String(summary.kawsar.tiktokLinks),
+      String(summary.kawsar.instagramLinks),
+      String(summary.kawsar.twitterLinks),
     ]],
   });
 
@@ -234,7 +237,7 @@ export function buildFinalDailySummaryPdfDoc(
     theme: 'grid',
     headStyles: { fillColor: [241, 245, 249], textColor: [15, 23, 42], fontStyle: 'bold', fontSize: 7.5 },
     bodyStyles: { textColor: [15, 23, 42], fontSize: 7.5 },
-    head: [['Time', 'Title / Note', 'Facebook Link', 'Website Link']],
+    head: [['Time', 'Title / Note', 'Facebook', 'Website', 'TikTok', 'Instagram', 'Twitter']],
     body:
       datePosts.length > 0
         ? datePosts.map((p) => [
@@ -242,8 +245,11 @@ export function buildFinalDailySummaryPdfDoc(
             p.note || 'Post Entry',
             p.facebookLink || '—',
             p.websiteLink || '—',
+            p.tiktokLink || '—',
+            p.instagramLink || '—',
+            p.twitterLink || '—',
           ])
-        : [['—', `No links posted on ${summary.date}`, '—', '—']],
+        : [['—', `No links posted on ${summary.date}`, '—', '—', '—', '—', '—']],
   });
 
   return {

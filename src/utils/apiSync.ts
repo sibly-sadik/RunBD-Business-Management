@@ -569,11 +569,19 @@ export async function saveCallLogInDb(
 
 export async function checkPostDuplicateInDb(
   facebookLink: string,
-  websiteLink: string
+  websiteLink: string,
+  tiktokLink = '',
+  instagramLink = '',
+  twitterLink = ''
 ): Promise<{
   ok: boolean;
   isDuplicate: boolean;
-  matchedField?: 'Facebook Link' | 'Website Link';
+  matchedField?:
+    | 'Facebook Link'
+    | 'Website Link'
+    | 'TikTok Link'
+    | 'Instagram Link'
+    | 'Twitter Link';
   existingPost?: ContentPost;
   error?: string;
 }> {
@@ -581,13 +589,21 @@ export async function checkPostDuplicateInDb(
     const params = new URLSearchParams();
     if (facebookLink.trim()) params.set('facebookLink', facebookLink.trim());
     if (websiteLink.trim()) params.set('websiteLink', websiteLink.trim());
+    if (tiktokLink.trim()) params.set('tiktokLink', tiktokLink.trim());
+    if (instagramLink.trim()) params.set('instagramLink', instagramLink.trim());
+    if (twitterLink.trim()) params.set('twitterLink', twitterLink.trim());
     const res = await apiFetch(`/api/posts/check-duplicate?${params.toString()}`, {
       method: 'GET',
     });
     const data = (await res.json()) as {
       ok?: boolean;
       isDuplicate?: boolean;
-      matchedField?: 'Facebook Link' | 'Website Link';
+      matchedField?:
+        | 'Facebook Link'
+        | 'Website Link'
+        | 'TikTok Link'
+        | 'Instagram Link'
+        | 'Twitter Link';
       existingPost?: ContentPost;
       error?: string;
     };
@@ -617,7 +633,12 @@ export async function checkPostDuplicateInDb(
 export async function createPostInDb(post: ContentPost): Promise<{
   ok: boolean;
   isDuplicate?: boolean;
-  matchedField?: 'Facebook Link' | 'Website Link';
+  matchedField?:
+    | 'Facebook Link'
+    | 'Website Link'
+    | 'TikTok Link'
+    | 'Instagram Link'
+    | 'Twitter Link';
   existingPost?: ContentPost;
   error?: string;
 }> {
@@ -629,7 +650,12 @@ export async function createPostInDb(post: ContentPost): Promise<{
     const data = (await res.json()) as {
       ok?: boolean;
       isDuplicate?: boolean;
-      matchedField?: 'Facebook Link' | 'Website Link';
+      matchedField?:
+        | 'Facebook Link'
+        | 'Website Link'
+        | 'TikTok Link'
+        | 'Instagram Link'
+        | 'Twitter Link';
       existingPost?: ContentPost;
       error?: string;
     };

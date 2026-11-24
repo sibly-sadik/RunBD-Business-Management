@@ -1,4 +1,4 @@
-import { asc, desc, eq } from 'drizzle-orm';
+import { asc, desc, eq, or } from 'drizzle-orm';
 import { db } from './index.ts';
 import {
   appSettings,
@@ -30,6 +30,7 @@ import type {
   DuplicateAttempt,
   Lead,
   PaidCustomer,
+  PostLinkField,
   UserRole,
 } from '../types/index.ts';
 
@@ -97,6 +98,12 @@ function rowToContentPost(row: typeof kawsarPosts.$inferSelect): ContentPost {
     normalizedFacebookLink: row.facebookNormalized,
     websiteLink: row.websiteLink,
     normalizedWebsiteLink: row.websiteNormalized,
+    tiktokLink: row.tiktokLink ?? '',
+    normalizedTiktokLink: row.tiktokNormalized ?? '',
+    instagramLink: row.instagramLink ?? '',
+    normalizedInstagramLink: row.instagramNormalized ?? '',
+    twitterLink: row.twitterLink ?? '',
+    normalizedTwitterLink: row.twitterNormalized ?? '',
     note: row.title,
     posterId: row.posterId,
     posterName: row.posterName,
@@ -260,41 +267,43 @@ export async function findLeadDuplicateInDb(
 
 export async function findPostDuplicateInDb(
   rawFacebookLink: string,
-  rawWebsiteLink: string
+  rawWebsiteLink: string,
+  rawTiktokLink = '',
+  rawInstagramLink = '',
+  rawTwitterLink = ''
 ): Promise<{
   isDuplicate: boolean;
-  matchedField?: 'Facebook Link' | 'Website Link';
+  matchedField?: PostLinkField;
   existingPost?: ContentPost;
 }> {
   try {
-    const fbNorm = rawFacebookLink ? normalizePostUrlServer(rawFacebookLink) : '';
-    if (fbNorm) {
-      const fbMatch = await db
-        .select()
-        .from(kawsarPosts)
-        .where(eq(kawsarPosts.facebookNormalized, fbNorm))
-        .limit(1);
-      if (fbMatch.length > 0) {
-        return {
-          isDuplicate: true,
-          matchedField: 'Facebook Link',
-          existingPost: rowToContentPost(fbMatch[0]),
-        };
-      }
-    }
+    const targets: Array<{ field: PostLinkField; norm: string }> = [
+      { field: 'Facebook Link' as PostLinkField, norm: rawFacebookLink ? normalizePostUrlServer(rawFacebookLink) : '' },
+      { field: 'Website Link' as PostLinkField, norm: rawWebsiteLink ? normalizePostUrlServer(rawWebsiteLink) : '' },
+      { field: 'TikTok Link' as PostLinkField, norm: rawTiktokLink ? normalizePostUrlServer(rawTiktokLink) : '' },
+      { field: 'Instagram Link' as PostLinkField, norm: rawInstagramLink ? normalizePostUrlServer(rawInstagramLink) : '' },
+      { field: 'Twitter Link' as PostLinkField, norm: rawTwitterLink ? normalizePostUrlServer(rawTwitterLink) : '' },
+    ].filter((t) => Boolean(t.norm));
 
-    const webNorm = rawWebsiteLink ? normalizePostUrlServer(rawWebsiteLink) : '';
-    if (webNorm) {
-      const webMatch = await db
+    for (const target of targets) {
+      const match = await db
         .select()
         .from(kawsarPosts)
-        .where(eq(kawsarPosts.websiteNormalized, webNorm))
+        .where(
+          or(
+            eq(kawsarPosts.facebookNormalized, target.norm),
+            eq(kawsarPosts.websiteNormalized, target.norm),
+            eq(kawsarPosts.tiktokNormalized, target.norm),
+            eq(kawsarPosts.instagramNormalized, target.norm),
+            eq(kawsarPosts.twitterNormalized, target.norm)
+          )
+        )
         .limit(1);
-      if (webMatch.length > 0) {
+      if (match.length > 0) {
         return {
           isDuplicate: true,
-          matchedField: 'Website Link',
-          existingPost: rowToContentPost(webMatch[0]),
+          matchedField: target.field,
+          existingPost: rowToContentPost(match[0]),
         };
       }
     }
@@ -796,6 +805,15 @@ export async function insertContentPostInDb(post: ContentPost): Promise<void> {
     const webNorm = post.websiteLink
       ? post.normalizedWebsiteLink || normalizePostUrlServer(post.websiteLink)
       : '';
+    const tiktokNorm = post.tiktokLink
+      ? post.normalizedTiktokLink || normalizePostUrlServer(post.tiktokLink)
+      : '';
+    const igNorm = post.instagramLink
+      ? post.normalizedInstagramLink || normalizePostUrlServer(post.instagramLink)
+      : '';
+    const twNorm = post.twitterLink
+      ? post.normalizedTwitterLink || normalizePostUrlServer(post.twitterLink)
+      : '';
     const postedDate =
       parseDateToYmdServer(post.createdAt) ?? getTodayYmdServer();
 
@@ -808,6 +826,12 @@ export async function insertContentPostInDb(post: ContentPost): Promise<void> {
         facebookNormalized: fbNorm,
         websiteLink: post.websiteLink ?? '',
         websiteNormalized: webNorm,
+        tiktokLink: post.tiktokLink ?? '',
+        tiktokNormalized: tiktokNorm,
+        instagramLink: post.instagramLink ?? '',
+        instagramNormalized: igNorm,
+        twitterLink: post.twitterLink ?? '',
+        twitterNormalized: twNorm,
         posterId: post.posterId,
         posterName: post.posterName,
         postedDate,
@@ -937,6 +961,15 @@ export async function syncPulledRecordsToDb(input: {
           const webNorm = post.websiteLink
             ? post.normalizedWebsiteLink || normalizePostUrlServer(post.websiteLink)
             : '';
+          const tiktokNorm = post.tiktokLink
+            ? post.normalizedTiktokLink || normalizePostUrlServer(post.tiktokLink)
+            : '';
+          const igNorm = post.instagramLink
+            ? post.normalizedInstagramLink || normalizePostUrlServer(post.instagramLink)
+            : '';
+          const twNorm = post.twitterLink
+            ? post.normalizedTwitterLink || normalizePostUrlServer(post.twitterLink)
+            : '';
           const postedDate =
             parseDateToYmdServer(post.createdAt) ?? getTodayYmdServer();
           await tx
@@ -948,6 +981,12 @@ export async function syncPulledRecordsToDb(input: {
               facebookNormalized: fbNorm,
               websiteLink: post.websiteLink ?? '',
               websiteNormalized: webNorm,
+              tiktokLink: post.tiktokLink ?? '',
+              tiktokNormalized: tiktokNorm,
+              instagramLink: post.instagramLink ?? '',
+              instagramNormalized: igNorm,
+              twitterLink: post.twitterLink ?? '',
+              twitterNormalized: twNorm,
               posterId: post.posterId,
               posterName: post.posterName,
               postedDate,

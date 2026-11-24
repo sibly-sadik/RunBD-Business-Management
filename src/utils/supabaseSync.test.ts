@@ -100,13 +100,19 @@ test('Supabase call log and paid customer mappers preserve Done status and 30-da
   assert.equal(parsedPaid.assignedAgentName, 'Tanjin');
 });
 
-test('Supabase Kawsar post mapper normalizes Facebook and Website links and detects schema errors', () => {
+test('Supabase Kawsar post mapper normalizes Facebook, Website, TikTok, Instagram, and Twitter links and detects schema errors', () => {
   const post: ContentPost = {
     id: 'PST-1',
     facebookLink: 'https://www.facebook.com/runbd/posts/991?ref=share',
     normalizedFacebookLink: '',
     websiteLink: 'https://runbd.com/offer/?utm_source=fb',
     normalizedWebsiteLink: '',
+    tiktokLink: 'https://www.tiktok.com/@runbd/video/740001?is_from_webapp=1',
+    normalizedTiktokLink: '',
+    instagramLink: 'https://www.instagram.com/p/C9xyz/?igsh=abc',
+    normalizedInstagramLink: '',
+    twitterLink: 'https://twitter.com/runbd/status/180001?s=20',
+    normalizedTwitterLink: '',
     note: 'Promo campaign',
     posterId: 'poster-kawsar',
     posterName: 'Kawsar',
@@ -116,10 +122,16 @@ test('Supabase Kawsar post mapper normalizes Facebook and Website links and dete
   const row = contentPostToSupabaseRow(post);
   assert.equal(row.facebook_normalized, 'facebook.com/runbd/posts/991');
   assert.equal(row.website_normalized, 'runbd.com/offer');
+  assert.equal(row.tiktok_normalized, 'tiktok.com/@runbd/video/740001');
+  assert.equal(row.instagram_normalized, 'instagram.com/p/c9xyz');
+  assert.equal(row.twitter_normalized, 'x.com/runbd/status/180001');
 
   const parsed = rowToContentPost(row);
   assert.equal(parsed.note, 'Promo campaign');
   assert.equal(parsed.normalizedWebsiteLink, 'runbd.com/offer');
+  assert.equal(parsed.normalizedTiktokLink, 'tiktok.com/@runbd/video/740001');
+  assert.equal(parsed.normalizedInstagramLink, 'instagram.com/p/c9xyz');
+  assert.equal(parsed.normalizedTwitterLink, 'x.com/runbd/status/180001');
 
   assert.equal(isSchemaMissingError({ code: '42P01', message: 'relation "public.leads" does not exist' }), true);
   assert.equal(isSchemaMissingError({ code: 'PGRST205', message: "Could not find the table 'public.leads' in the schema cache" }), true);

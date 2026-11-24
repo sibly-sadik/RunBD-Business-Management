@@ -78,9 +78,38 @@ export function normalizeFacebookUrlServer(raw: string | undefined | null): stri
   }
 }
 
+const SERVER_TRACKING_PARAMS = new Set([
+  'fbclid',
+  'gclid',
+  'ref',
+  'refsrc',
+  'ref_src',
+  'ref_url',
+  'rdid',
+  'share_url',
+  'sfnsn',
+  '__tn__',
+  'mibextid',
+  'igsh',
+  'igshid',
+  'is_from_webapp',
+  'sender_device',
+  'sender_web_id',
+  'tt_from',
+  'u_code',
+  'share_app_id',
+  '_r',
+  '_t',
+  'utm_source',
+  'utm_medium',
+  'utm_campaign',
+  'utm_term',
+  'utm_content',
+]);
+
 export function normalizePostUrlServer(raw: string | undefined | null): string {
   if (!raw) return '';
-  const trimmed = raw.trim().toLowerCase();
+  const trimmed = raw.trim();
   if (!trimmed) return '';
   let candidate = trimmed;
   if (!/^https?:\/\//i.test(candidate)) {
@@ -88,19 +117,43 @@ export function normalizePostUrlServer(raw: string | undefined | null): string {
   }
   try {
     const parsed = new URL(candidate);
-    const host = parsed.hostname.replace(/^(www\.|m\.|mbasic\.|mobile\.|web\.|l\.)+/i, '');
-    const pathname = parsed.pathname.replace(/\/+$/, '');
-    const keepParams = new URLSearchParams();
-    for (const key of ['id', 'story_fbid', 'v', 'p', 'fbid']) {
-      const val = parsed.searchParams.get(key);
-      if (val) keepParams.set(key, val);
+    let host = parsed.hostname
+      .toLowerCase()
+      .replace(/^(www\.|m\.|mbasic\.|mobile\.|web\.|touch\.|l\.)+/i, '');
+    if (host === 'fb.me' || host === 'fb.com') {
+      host = 'facebook.com';
+    } else if (host === 'twitter.com') {
+      host = 'x.com';
     }
-    const qs = keepParams.toString();
-    return qs ? `${host}${pathname}?${qs}` : `${host}${pathname}`;
+    const pathname = parsed.pathname.replace(/\/+$/, '').toLowerCase();
+    const keptParams: Array<[string, string]> = [];
+    parsed.searchParams.forEach((val, key) => {
+      const lowerKey = key.toLowerCase();
+      const isTwitterParam =
+        (host === 'x.com' || host === 'twitter.com') &&
+        (lowerKey === 's' || lowerKey === 't');
+      if (
+        !SERVER_TRACKING_PARAMS.has(lowerKey) &&
+        !lowerKey.startsWith('utm_') &&
+        !lowerKey.startsWith('__cft__') &&
+        !isTwitterParam
+      ) {
+        keptParams.push([lowerKey, val]);
+      }
+    });
+    keptParams.sort((a, b) => a[0].localeCompare(b[0]) || a[1].localeCompare(b[1]));
+    const qs =
+      keptParams.length > 0
+        ? `?${keptParams.map(([k, v]) => `${k}=${v}`).join('&')}`
+        : '';
+    return `${host}${pathname}${qs}`;
   } catch {
     return trimmed
+      .toLowerCase()
       .replace(/^https?:\/\//, '')
-      .replace(/^(www\.|m\.|mbasic\.|mobile\.|web\.|l\.)+/i, '')
+      .replace(/^(www\.|m\.|mbasic\.|mobile\.|web\.|touch\.|l\.)+/i, '')
+      .replace(/^twitter\.com\//, 'x.com/')
+      .split('#')[0]
       .replace(/\/+$/, '');
   }
 }

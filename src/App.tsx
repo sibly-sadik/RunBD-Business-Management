@@ -25,6 +25,7 @@ import {
   DuplicateAttempt,
   Lead,
   PaidCustomer,
+  PostLinkField,
   RenewalStatus,
   SyncStatus,
   ToastMessage,
@@ -722,7 +723,11 @@ export default function App() {
       const postsToSave = mergedPosts.filter(
         (post) =>
           !basePostIds.has(post.id) &&
-          (post.facebookLink.length > 0 || post.websiteLink.length > 0)
+          (post.facebookLink.length > 0 ||
+            post.websiteLink.length > 0 ||
+            (post.tiktokLink || '').length > 0 ||
+            (post.instagramLink || '').length > 0 ||
+            (post.twitterLink || '').length > 0)
       );
 
       const basePaidMap = new Map(basePaid.map((c) => [c.id, c]));
@@ -1604,37 +1609,59 @@ export default function App() {
   const handleAddContentPost = async (input: {
     facebookLink: string;
     websiteLink: string;
+    tiktokLink?: string;
+    instagramLink?: string;
+    twitterLink?: string;
     note: string;
   }): Promise<{
     ok: boolean;
     error?: string;
-    duplicate?: { post: ContentPost; matchedField: 'Facebook Link' | 'Website Link' };
+    duplicate?: { post: ContentPost; matchedField: PostLinkField };
   }> => {
     if (!currentUser) return { ok: false, error: 'Not authenticated' };
 
-    const trimmedFb = input.facebookLink.trim();
-    const trimmedWeb = input.websiteLink.trim();
+    const trimmedFb = (input.facebookLink || '').trim();
+    const trimmedWeb = (input.websiteLink || '').trim();
+    const trimmedTt = (input.tiktokLink || '').trim();
+    const trimmedIg = (input.instagramLink || '').trim();
+    const trimmedTw = (input.twitterLink || '').trim();
 
-    if (!trimmedFb && !trimmedWeb) {
+    if (!trimmedFb && !trimmedWeb && !trimmedTt && !trimmedIg && !trimmedTw) {
       return {
         ok: false,
-        error: 'Please enter at least one link (Facebook Post Link or Website Link).',
+        error:
+          'Please enter at least one link (Facebook, Website, TikTok, Instagram, or Twitter).',
       };
     }
 
     if (trimmedFb && !isValidPostUrl(trimmedFb)) {
       return { ok: false, error: 'Please enter a valid Facebook Post URL.' };
     }
-
     if (trimmedWeb && !isValidPostUrl(trimmedWeb)) {
       return { ok: false, error: 'Please enter a valid Website URL.' };
+    }
+    if (trimmedTt && !isValidPostUrl(trimmedTt)) {
+      return { ok: false, error: 'Please enter a valid TikTok URL.' };
+    }
+    if (trimmedIg && !isValidPostUrl(trimmedIg)) {
+      return { ok: false, error: 'Please enter a valid Instagram URL.' };
+    }
+    if (trimmedTw && !isValidPostUrl(trimmedTw)) {
+      return { ok: false, error: 'Please enter a valid Twitter URL.' };
     }
 
     const currentPosts = mergeRemoteContentPosts(
       contentPostsRef.current,
       storage.getContentPosts()
     );
-    const localDup = findDuplicatePost(currentPosts, trimmedFb, trimmedWeb);
+    const localDup = findDuplicatePost(
+      currentPosts,
+      trimmedFb,
+      trimmedWeb,
+      trimmedTt,
+      trimmedIg,
+      trimmedTw
+    );
     if (localDup) {
       addToast(
         'warning',
@@ -1653,7 +1680,13 @@ export default function App() {
     }
 
     // Instant indexed duplicate check against Supabase kawsar_posts
-    const dbPostDup = await checkPostDuplicateInSupabase(trimmedFb, trimmedWeb);
+    const dbPostDup = await checkPostDuplicateInSupabase(
+      trimmedFb,
+      trimmedWeb,
+      trimmedTt,
+      trimmedIg,
+      trimmedTw
+    );
     if (dbPostDup.ok && dbPostDup.isDuplicate && dbPostDup.existingPost) {
       const matchedField = dbPostDup.matchedField ?? 'Facebook Link';
       addToast(
@@ -1679,7 +1712,12 @@ export default function App() {
         webhookUrl,
         trimmedFb,
         trimmedWeb,
-        { timeoutMs: 15000 }
+        {
+          timeoutMs: 15000,
+          tiktokLink: trimmedTt,
+          instagramLink: trimmedIg,
+          twitterLink: trimmedTw,
+        }
       );
       if (!sheetPostDup.ok) {
         const errMsg =
@@ -1694,20 +1732,23 @@ export default function App() {
         };
       }
       if (sheetPostDup.isDuplicate && sheetPostDup.existingPost) {
+        const ep = sheetPostDup.existingPost;
         const existingPost: ContentPost = {
-          id: sheetPostDup.existingPost.id,
-          facebookLink: sheetPostDup.existingPost.facebookLink,
-          normalizedFacebookLink: sheetPostDup.existingPost.facebookLink
-            ? normalizePostUrl(sheetPostDup.existingPost.facebookLink)
-            : '',
-          websiteLink: sheetPostDup.existingPost.websiteLink,
-          normalizedWebsiteLink: sheetPostDup.existingPost.websiteLink
-            ? normalizePostUrl(sheetPostDup.existingPost.websiteLink)
-            : '',
-          note: sheetPostDup.existingPost.note,
+          id: ep.id,
+          facebookLink: ep.facebookLink,
+          normalizedFacebookLink: ep.facebookLink ? normalizePostUrl(ep.facebookLink) : '',
+          websiteLink: ep.websiteLink,
+          normalizedWebsiteLink: ep.websiteLink ? normalizePostUrl(ep.websiteLink) : '',
+          tiktokLink: ep.tiktokLink || '',
+          normalizedTiktokLink: ep.tiktokLink ? normalizePostUrl(ep.tiktokLink) : '',
+          instagramLink: ep.instagramLink || '',
+          normalizedInstagramLink: ep.instagramLink ? normalizePostUrl(ep.instagramLink) : '',
+          twitterLink: ep.twitterLink || '',
+          normalizedTwitterLink: ep.twitterLink ? normalizePostUrl(ep.twitterLink) : '',
+          note: ep.note,
           posterId: 'poster-kawsar',
-          posterName: sheetPostDup.existingPost.posterName,
-          createdAt: sheetPostDup.existingPost.createdAt,
+          posterName: ep.posterName,
+          createdAt: ep.createdAt,
         };
         const matchedField = sheetPostDup.matchedField ?? 'Facebook Link';
         addToast(
@@ -1728,16 +1769,14 @@ export default function App() {
       setSyncStatus('synced');
     }
 
-    const fbUrl = trimmedFb
-      ? /^https?:\/\//i.test(trimmedFb)
-        ? trimmedFb
-        : `https://${trimmedFb}`
-      : '';
-    const webUrl = trimmedWeb
-      ? /^https?:\/\//i.test(trimmedWeb)
-        ? trimmedWeb
-        : `https://${trimmedWeb}`
-      : '';
+    const withProtocol = (raw: string) =>
+      raw ? (/^https?:\/\//i.test(raw) ? raw : `https://${raw}`) : '';
+
+    const fbUrl = withProtocol(trimmedFb);
+    const webUrl = withProtocol(trimmedWeb);
+    const ttUrl = withProtocol(trimmedTt);
+    const igUrl = withProtocol(trimmedIg);
+    const twUrl = withProtocol(trimmedTw);
 
     const created: ContentPost = {
       id: makeId('PST'),
@@ -1745,6 +1784,12 @@ export default function App() {
       normalizedFacebookLink: fbUrl ? normalizePostUrl(fbUrl) : '',
       websiteLink: webUrl,
       normalizedWebsiteLink: webUrl ? normalizePostUrl(webUrl) : '',
+      tiktokLink: ttUrl,
+      normalizedTiktokLink: ttUrl ? normalizePostUrl(ttUrl) : '',
+      instagramLink: igUrl,
+      normalizedInstagramLink: igUrl ? normalizePostUrl(igUrl) : '',
+      twitterLink: twUrl,
+      normalizedTwitterLink: twUrl ? normalizePostUrl(twUrl) : '',
       note: input.note.trim(),
       posterId: currentUser.id,
       posterName: currentUser.name,
@@ -1768,6 +1813,9 @@ export default function App() {
     const linkSummary = [
       fbUrl ? `FB: ${fbUrl}` : '',
       webUrl ? `Web: ${webUrl}` : '',
+      ttUrl ? `TikTok: ${ttUrl}` : '',
+      igUrl ? `IG: ${igUrl}` : '',
+      twUrl ? `Twitter: ${twUrl}` : '',
     ]
       .filter(Boolean)
       .join(' | ');
@@ -2635,6 +2683,7 @@ export default function App() {
             agent={currentUser}
             leads={leads}
             callLogs={callLogs}
+            paidCustomers={paidCustomers}
             callScript={settings.callScript}
             dueRenewals={dueRenewals}
             onMarkPaidCustomerRenewed={handleMarkPaidCustomerRenewed}

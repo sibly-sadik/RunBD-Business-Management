@@ -7,10 +7,13 @@ import {
   FileText,
   Globe,
   Headphones,
+  Instagram,
   Link2,
   PhoneCall,
   Printer,
   Share2,
+  Twitter,
+  Video,
   X,
 } from 'lucide-react';
 import { CallLog, ContentPost, Lead, User } from '../types';
@@ -272,10 +275,16 @@ export function AdminFinalDailySummaryView({
             data-testid="final-summary-kawsar-links"
             className="mt-2.5 text-3xl font-bold font-mono tabular-nums text-violet-600 dark:text-violet-400 print:text-2xl print:mt-1"
           >
-            {summary.kawsar.facebookLinks + summary.kawsar.websiteLinks}
+            {summary.kawsar.facebookLinks +
+              summary.kawsar.websiteLinks +
+              summary.kawsar.tiktokLinks +
+              summary.kawsar.instagramLinks +
+              summary.kawsar.twitterLinks}
           </p>
           <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-            {summary.kawsar.facebookLinks} FB · {summary.kawsar.websiteLinks} Website
+            {summary.kawsar.facebookLinks} FB · {summary.kawsar.websiteLinks} Web ·{' '}
+            {summary.kawsar.tiktokLinks} TT · {summary.kawsar.instagramLinks} IG ·{' '}
+            {summary.kawsar.twitterLinks} TW
           </p>
         </div>
       </div>
@@ -462,36 +471,66 @@ export function AdminFinalDailySummaryView({
                   Content &amp; Link Poster (Kawsar)
                 </h2>
                 <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                  Facebook &amp; Website links submitted on {summary.date}
+                  Facebook, Website, TikTok, Instagram &amp; Twitter links submitted on {summary.date}
                 </p>
               </div>
             </div>
 
-            <div className="mt-5 grid grid-cols-1 sm:grid-cols-3 gap-3.5 print:grid-cols-3 print:mt-3 print:gap-2.5">
-              <div className="rounded-xl p-4 bg-slate-50 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800 print:p-2.5 print-card-surface">
+            <div className="mt-5 grid grid-cols-2 sm:grid-cols-3 gap-3 print:grid-cols-3 print:mt-3 print:gap-2">
+              <div className="rounded-xl p-3.5 bg-slate-50 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800 print:p-2.5 print-card-surface">
                 <span className="text-xs text-slate-500 dark:text-slate-400">Total Entries</span>
                 <p className="mt-1.5 text-2xl font-bold font-mono tabular-nums text-slate-900 dark:text-white print:text-xl">
                   {summary.kawsar.entriesCount}
                 </p>
               </div>
 
-              <div className="rounded-xl p-4 bg-sky-500/5 border border-sky-500/20 print:p-2.5 print-card-surface">
+              <div className="rounded-xl p-3.5 bg-sky-500/5 border border-sky-500/20 print:p-2.5 print-card-surface">
                 <div className="flex items-center gap-1.5 text-xs text-sky-700 dark:text-sky-300 font-medium">
                   <Share2 className="w-3.5 h-3.5 print:hidden" />
-                  <span>Facebook Links</span>
+                  <span>Facebook</span>
                 </div>
                 <p className="mt-1.5 text-2xl font-bold font-mono tabular-nums text-sky-600 dark:text-sky-400 print:text-xl">
                   {summary.kawsar.facebookLinks}
                 </p>
               </div>
 
-              <div className="rounded-xl p-4 bg-emerald-500/5 border border-emerald-500/20 print:p-2.5 print-card-surface">
+              <div className="rounded-xl p-3.5 bg-emerald-500/5 border border-emerald-500/20 print:p-2.5 print-card-surface">
                 <div className="flex items-center gap-1.5 text-xs text-emerald-700 dark:text-emerald-300 font-medium">
                   <Globe className="w-3.5 h-3.5 print:hidden" />
-                  <span>Website Links</span>
+                  <span>Website</span>
                 </div>
                 <p className="mt-1.5 text-2xl font-bold font-mono tabular-nums text-emerald-600 dark:text-emerald-400 print:text-xl">
                   {summary.kawsar.websiteLinks}
+                </p>
+              </div>
+
+              <div className="rounded-xl p-3.5 bg-rose-500/5 border border-rose-500/20 print:p-2.5 print-card-surface">
+                <div className="flex items-center gap-1.5 text-xs text-rose-700 dark:text-rose-300 font-medium">
+                  <Video className="w-3.5 h-3.5 print:hidden" />
+                  <span>TikTok</span>
+                </div>
+                <p className="mt-1.5 text-2xl font-bold font-mono tabular-nums text-rose-600 dark:text-rose-400 print:text-xl">
+                  {summary.kawsar.tiktokLinks}
+                </p>
+              </div>
+
+              <div className="rounded-xl p-3.5 bg-fuchsia-500/5 border border-fuchsia-500/20 print:p-2.5 print-card-surface">
+                <div className="flex items-center gap-1.5 text-xs text-fuchsia-700 dark:text-fuchsia-300 font-medium">
+                  <Instagram className="w-3.5 h-3.5 print:hidden" />
+                  <span>Instagram</span>
+                </div>
+                <p className="mt-1.5 text-2xl font-bold font-mono tabular-nums text-fuchsia-600 dark:text-fuchsia-400 print:text-xl">
+                  {summary.kawsar.instagramLinks}
+                </p>
+              </div>
+
+              <div className="rounded-xl p-3.5 bg-cyan-500/5 border border-cyan-500/20 print:p-2.5 print-card-surface">
+                <div className="flex items-center gap-1.5 text-xs text-cyan-700 dark:text-cyan-300 font-medium">
+                  <Twitter className="w-3.5 h-3.5 print:hidden" />
+                  <span>Twitter</span>
+                </div>
+                <p className="mt-1.5 text-2xl font-bold font-mono tabular-nums text-cyan-600 dark:text-cyan-400 print:text-xl">
+                  {summary.kawsar.twitterLinks}
                 </p>
               </div>
             </div>
@@ -644,6 +683,9 @@ export function AdminFinalDailySummaryView({
                       <th className="py-2 px-3 font-semibold">Title / Note</th>
                       <th className="py-2 px-3 font-semibold">Facebook Link</th>
                       <th className="py-2 px-3 font-semibold">Website Link</th>
+                      <th className="py-2 px-3 font-semibold">TikTok Link</th>
+                      <th className="py-2 px-3 font-semibold">Instagram Link</th>
+                      <th className="py-2 px-3 font-semibold">Twitter Link</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-200 dark:divide-slate-800">
@@ -655,11 +697,35 @@ export function AdminFinalDailySummaryView({
                         <td className="py-2 px-3 font-medium text-slate-900 dark:text-slate-100">
                           {post.note || 'Post Entry'}
                         </td>
-                        <td className="py-2 px-3 font-mono text-sky-600 dark:text-sky-400 break-all">
+                        <td
+                          title={post.facebookLink || ''}
+                          className="py-2 px-3 font-mono text-sky-600 dark:text-sky-400 max-w-[150px] truncate print:max-w-none print:whitespace-normal print:break-all"
+                        >
                           {post.facebookLink || '—'}
                         </td>
-                        <td className="py-2 px-3 font-mono text-emerald-600 dark:text-emerald-400 break-all">
+                        <td
+                          title={post.websiteLink || ''}
+                          className="py-2 px-3 font-mono text-emerald-600 dark:text-emerald-400 max-w-[150px] truncate print:max-w-none print:whitespace-normal print:break-all"
+                        >
                           {post.websiteLink || '—'}
+                        </td>
+                        <td
+                          title={post.tiktokLink || ''}
+                          className="py-2 px-3 font-mono text-rose-600 dark:text-rose-400 max-w-[140px] truncate print:max-w-none print:whitespace-normal print:break-all"
+                        >
+                          {post.tiktokLink || '—'}
+                        </td>
+                        <td
+                          title={post.instagramLink || ''}
+                          className="py-2 px-3 font-mono text-fuchsia-600 dark:text-fuchsia-400 max-w-[140px] truncate print:max-w-none print:whitespace-normal print:break-all"
+                        >
+                          {post.instagramLink || '—'}
+                        </td>
+                        <td
+                          title={post.twitterLink || ''}
+                          className="py-2 px-3 font-mono text-cyan-600 dark:text-cyan-400 max-w-[140px] truncate print:max-w-none print:whitespace-normal print:break-all"
+                        >
+                          {post.twitterLink || '—'}
                         </td>
                       </tr>
                     ))}
@@ -768,7 +834,11 @@ export function AdminFinalDailySummaryView({
                 <div className="rounded-lg border border-slate-300 p-3 bg-slate-50">
                   <p className="text-[11px] text-slate-600">Kawsar Links</p>
                   <p className="text-xl font-bold font-mono text-violet-700 mt-1">
-                    {summary.kawsar.facebookLinks + summary.kawsar.websiteLinks}
+                    {summary.kawsar.facebookLinks +
+                      summary.kawsar.websiteLinks +
+                      summary.kawsar.tiktokLinks +
+                      summary.kawsar.instagramLinks +
+                      summary.kawsar.twitterLinks}
                   </p>
                 </div>
               </div>
@@ -856,7 +926,7 @@ export function AdminFinalDailySummaryView({
                   <div className="bg-slate-100 px-3 py-2 text-xs font-bold text-slate-800 border-b border-slate-300">
                     Content &amp; Link Poster — Kawsar ({summary.date})
                   </div>
-                  <div className="p-3 grid grid-cols-3 gap-2 text-center">
+                  <div className="p-3 grid grid-cols-3 sm:grid-cols-6 gap-2 text-center">
                     <div className="border border-slate-200 rounded p-2">
                       <p className="text-[11px] text-slate-600">Entries</p>
                       <p className="text-base font-bold font-mono">{summary.kawsar.entriesCount}</p>
@@ -868,6 +938,18 @@ export function AdminFinalDailySummaryView({
                     <div className="border border-slate-200 rounded p-2">
                       <p className="text-[11px] text-slate-600">Website</p>
                       <p className="text-base font-bold font-mono">{summary.kawsar.websiteLinks}</p>
+                    </div>
+                    <div className="border border-slate-200 rounded p-2">
+                      <p className="text-[11px] text-slate-600">TikTok</p>
+                      <p className="text-base font-bold font-mono">{summary.kawsar.tiktokLinks}</p>
+                    </div>
+                    <div className="border border-slate-200 rounded p-2">
+                      <p className="text-[11px] text-slate-600">Instagram</p>
+                      <p className="text-base font-bold font-mono">{summary.kawsar.instagramLinks}</p>
+                    </div>
+                    <div className="border border-slate-200 rounded p-2">
+                      <p className="text-[11px] text-slate-600">Twitter</p>
+                      <p className="text-base font-bold font-mono">{summary.kawsar.twitterLinks}</p>
                     </div>
                   </div>
                 </div>
