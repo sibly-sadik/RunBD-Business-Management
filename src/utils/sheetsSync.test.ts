@@ -45,7 +45,7 @@ describe('Google Sheets default webhook URL resolution', () => {
   it('uses the updated RunBD Apps Script deployment URL as the hardcoded fallback', () => {
     assert.equal(
       FALLBACK_GOOGLE_SHEETS_WEBHOOK_URL,
-      'https://script.google.com/macros/s/AKfycbweLkUjHVnD5RsfuatSfFC00xDSTnEbbjxAgDdtTapYWV0oDbQO5wmtQkv6N-hrpkYP/exec'
+      'https://script.google.com/macros/s/AKfycbwkuMzc7UJktjeULCfwgvnSU_4jS9H1GvFb6Y_68E0HntOWPwWpsXkzU2Wa8BWfxIUH/exec'
     );
   });
 
