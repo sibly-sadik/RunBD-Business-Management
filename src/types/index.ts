@@ -21,14 +21,17 @@ export const CALL_STATUSES: CallStatus[] = [
   'Wrong Number',
 ];
 
-export type VehicleType = 'Car' | 'Bike' | 'Truck' | 'Bus' | 'Pickup Truck';
+export type VehicleType = 'Car' | 'Bike' | 'Truck' | 'Bus' | 'Pickup' | 'Workshop' | 'Accessories' | 'Rent a Car';
 
 export const VEHICLE_TYPES: VehicleType[] = [
   'Car',
   'Bike',
   'Truck',
   'Bus',
-  'Pickup Truck',
+  'Pickup'
+  'Workshop'
+  'Accessories'
+  'Rent a Car',
 ];
 
 export interface User {
