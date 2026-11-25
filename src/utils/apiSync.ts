@@ -695,10 +695,20 @@ export async function deleteLeadViaApi(leadId: string): Promise<void> {
   });
 }
 
-export async function deletePaidCustomerViaApi(customerId: string): Promise<void> {
-  await apiFetch(`/api/paid-customers/${encodeURIComponent(customerId)}`, {
-    method: 'DELETE',
-  });
+export async function deletePaidCustomerViaApi(
+  customerId: string,
+  match?: { leadId?: string; phone?: string }
+): Promise<void> {
+  const params = new URLSearchParams();
+  if (match?.leadId?.trim()) params.set('leadId', match.leadId.trim());
+  if (match?.phone?.trim()) params.set('phone', match.phone.trim());
+  const qs = params.toString();
+  await apiFetch(
+    `/api/paid-customers/${encodeURIComponent(customerId)}${qs ? `?${qs}` : ''}`,
+    {
+      method: 'DELETE',
+    }
+  );
 }
 
 export async function saveDuplicateAttemptInDb(

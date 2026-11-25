@@ -26,6 +26,7 @@ import {
   normalizePostUrl,
   normalizeVehicleType,
   parseDateToYmd,
+  sanitizePaidPackageName,
 } from './leadLogic';
 import { FALLBACK_GOOGLE_SHEETS_WEBHOOK_URL } from './sheetsSync';
 
@@ -310,7 +311,7 @@ export function rowToPaidCustomer(row: SupabasePaidCustomerRow): PaidCustomer {
   const agentName = row.assigned_agent_name?.trim() || null;
   return {
     id: row.id,
-    leadId: row.lead_id?.trim() || row.id.replace(/^PC-/, ''),
+    leadId: row.lead_id?.trim() || (row.id.startsWith('PC-MAN-') ? '' : row.id.replace(/^PC-/, '')),
     customerName: normalizeVehicleType(row.customer_name) || row.customer_name,
     phone: row.phone,
     assignedAgentId:
@@ -320,7 +321,7 @@ export function rowToPaidCustomer(row: SupabasePaidCustomerRow): PaidCustomer {
     renewalDate: row.renewal_date,
     renewalStatus: sanitizeRenewalStatus(row.renewal_status),
     lastRenewedAt: row.last_renewed_at ?? null,
-    packageName: row.package_name?.trim() || '',
+    packageName: sanitizePaidPackageName(row.package_name),
     notes: row.notes ?? '',
     createdAt: row.created_at || row.updated_at,
     updatedAt: row.updated_at,
@@ -343,7 +344,7 @@ export function paidCustomerToSupabaseRow(
     renewal_date: customer.renewalDate,
     renewal_status: sanitizeRenewalStatus(customer.renewalStatus),
     last_renewed_at: customer.lastRenewedAt ?? null,
-    package_name: (customer.packageName ?? '').trim(),
+    package_name: sanitizePaidPackageName(customer.packageName),
     notes: customer.notes ?? '',
     created_at: customer.createdAt,
     updated_at: customer.updatedAt,
@@ -1144,16 +1145,63 @@ export async function upsertPaidCustomerInSupabase(
 }
 
 export async function deletePaidCustomerInSupabase(
-  customerId: string
+  customerId: string,
+  match?: { leadId?: string; phone?: string }
 ): Promise<{ ok: boolean; error?: string }> {
   const cleanId = customerId.trim();
-  if (!cleanId) return { ok: false, error: 'Invalid paid customer ID.' };
+  const cleanLeadId = (match?.leadId ?? '').trim();
+  const corePhone = extractPhoneCoreKey(match?.phone ?? '');
+  if (!cleanId && !cleanLeadId && !corePhone) {
+    return { ok: false, error: 'Invalid paid customer ID.' };
+  }
   try {
-    const { error } = await supabase
-      .from('paid_customers')
-      .delete()
-      .eq('id', cleanId);
-    if (error) return { ok: false, error: error.message };
+    const idCandidates = Array.from(
+      new Set(
+        [
+          cleanId,
+          cleanLeadId ? `PC-${cleanLeadId}` : '',
+          corePhone ? `SHEET-PC-${corePhone}` : '',
+        ].filter(Boolean)
+      )
+    );
+    const leadIdCandidates = Array.from(
+      new Set(
+        [
+          cleanLeadId,
+          cleanId.startsWith('PC-') && !cleanId.startsWith('PC-MAN-')
+            ? cleanId.slice(3)
+            : '',
+        ].filter(Boolean)
+      )
+    );
+    const phoneVariants = corePhone
+      ? Array.from(
+          new Set(
+            [
+              normalizeBdPhone(match?.phone ?? ''),
+              `0${corePhone}`,
+              `+880${corePhone}`,
+              `880${corePhone}`,
+              (match?.phone ?? '').trim(),
+            ].filter(Boolean)
+          )
+        )
+      : [];
+
+    const ops: Array<PromiseLike<{ error: { message: string } | null }>> = [];
+    if (idCandidates.length > 0) {
+      ops.push(supabase.from('paid_customers').delete().in('id', idCandidates));
+    }
+    if (leadIdCandidates.length > 0) {
+      ops.push(supabase.from('paid_customers').delete().in('lead_id', leadIdCandidates));
+    }
+    if (phoneVariants.length > 0) {
+      ops.push(supabase.from('paid_customers').delete().in('phone', phoneVariants));
+    }
+
+    const results = await Promise.all(ops);
+    const firstErr = results.find((r) => r.error)?.error;
+    if (firstErr) return { ok: false, error: firstErr.message };
     return { ok: true };
   } catch (err) {
     return {

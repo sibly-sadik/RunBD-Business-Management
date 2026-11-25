@@ -2437,5 +2437,266 @@ describe('Kawsar_Posts_Log TikTok, Instagram, and Twitter links in sheetsSync an
     assert.equal(sheetsMap.get('Collector_Farhan')!._rows.length, 1);
     assert.equal(sheetsMap.get('Agent_Sakib')!._rows.length, 1);
   });
+
+  it('mergeRemotePaidCustomers filters SHEET-PC phone tombstones and strips timestamps from packageName', () => {
+    const localPaid: PaidCustomer[] = [
+      {
+        id: 'PC-MAN-1',
+        leadId: '',
+        customerName: 'Workshop',
+        phone: '01799887766',
+        assignedAgentId: 'agent-tanjin',
+        assignedAgentName: 'Tanjin',
+        confirmedDate: '2026-11-25',
+        renewalDate: '2026-12-25',
+        renewalStatus: 'Active',
+        lastRenewedAt: null,
+        packageName: '1-Month Premium',
+        notes: 'Keep me',
+        createdAt: '2026-11-25T09:00:00.000Z',
+        updatedAt: '2026-11-25T09:00:00.000Z',
+      },
+    ];
+
+    const merged = mergeRemotePaidCustomers(
+      localPaid,
+      [
+        {
+          id: 'PC-MAN-1',
+          customerName: 'Workshop',
+          phone: '01799887766',
+          packageName: '2026-11-25T09:00:00.000Z',
+          updatedAt: '2026-11-25T10:00:00.000Z',
+        },
+        {
+          id: 'SHEET-PC-ROW-9',
+          customerName: 'Car',
+          phone: '+880 1811-223344',
+          packageName: '1-Month Basic',
+          updatedAt: '2026-11-25T10:00:00.000Z',
+        },
+      ],
+      ['SHEET-PC-1811223344']
+    );
+
+    assert.equal(merged.length, 1);
+    assert.equal(merged[0].id, 'PC-MAN-1');
+    assert.equal(merged[0].packageName, '');
+  });
+
+  it('Code.gs upgrades legacy 11-col Paid_Customers headers without shifting Notes into Package and syncs manual Paid Customer add/edit/delete cleanly', () => {
+    function makeSheet(name: string, initialRows: unknown[][] = []) {
+      const _rows = initialRows.map((r) => [...r]);
+      return {
+        _rows,
+        getName: () => name,
+        getLastRow: () => _rows.length,
+        getLastColumn: () => (_rows[0] ? _rows[0].length : 0),
+        appendRow: (row: unknown[]) => {
+          _rows.push([...row]);
+        },
+        insertColumnsBefore: (colPos: number, numCols: number) => {
+          const idx = colPos - 1;
+          for (const row of _rows) {
+            row.splice(idx, 0, ...new Array(numCols).fill(''));
+          }
+        },
+        getRange: (row: number, col: number, numRows: number, numCols: number) => ({
+          getValues: () => {
+            const out: unknown[][] = [];
+            for (let r = 0; r < numRows; r++) {
+              const src = _rows[row - 1 + r] || [];
+              const sliced: unknown[] = [];
+              for (let c = 0; c < numCols; c++) {
+                sliced.push(src[col - 1 + c] ?? '');
+              }
+              out.push(sliced);
+            }
+            return out;
+          },
+          setValues: (vals: unknown[][]) => {
+            for (let r = 0; r < numRows; r++) {
+              const targetIdx = row - 1 + r;
+              while (_rows.length <= targetIdx) _rows.push([]);
+              for (let c = 0; c < numCols; c++) {
+                _rows[targetIdx][col - 1 + c] = vals[r][c];
+              }
+            }
+          },
+          setFontWeight: () => undefined,
+        }),
+        deleteRow: (rowNum: number) => {
+          _rows.splice(rowNum - 1, 1);
+        },
+        setFrozenRows: () => undefined,
+      };
+    }
+
+    // Legacy 11-column Paid_Customers tab where col 11 (idx 10) was Notes
+    const legacyPaidSheet = makeSheet('Paid_Customers', [
+      [
+        'Customer ID',
+        'Lead ID',
+        'Customer Name',
+        'Phone',
+        'Assigned Agent',
+        'Confirmed Date',
+        'Renewal Date',
+        'Days Remaining',
+        'Renewal Status',
+        'Updated At',
+        'Notes',
+      ],
+      [
+        'PC-OLD-1',
+        'OLD-1',
+        'Car',
+        "'01700112233",
+        'Tanjin',
+        "'2026-11-20",
+        "'2026-12-20",
+        25,
+        'Active',
+        '2026-11-20T09:00:00.000Z',
+        'Legacy note preserved',
+      ],
+    ]);
+    const sheetsMap = new Map<string, ReturnType<typeof makeSheet>>([
+      ['Paid_Customers', legacyPaidSheet],
+    ]);
+    const ss = {
+      getSheets: () => Array.from(sheetsMap.values()),
+      getSheetByName: (name: string) => sheetsMap.get(name) ?? null,
+      insertSheet: (name: string) => {
+        const created = makeSheet(name);
+        sheetsMap.set(name, created);
+        return created;
+      },
+    };
+    const context: Record<string, unknown> = {
+      SpreadsheetApp: { getActiveSpreadsheet: () => ss },
+      ContentService: {
+        MimeType: { JSON: 'application/json' },
+        createTextOutput: (txt: string) => ({
+          setMimeType: () => txt,
+        }),
+      },
+      Utilities: {
+        formatDate: (d: Date) =>
+          new Date(d.getTime() + 6 * 3600000).toISOString().slice(0, 10),
+      },
+      Date,
+      Map,
+      Set,
+      JSON,
+      String,
+      Number,
+      Array,
+      Math,
+    };
+    vm.createContext(context);
+    vm.runInContext(GOOGLE_APPS_SCRIPT_CODE, context);
+    const doPost = context.doPost as (e: { postData: { contents: string } }) => string;
+    const doGet = context.doGet as (e: { parameter: Record<string, string> }) => string;
+
+    // 1. Add manual Paid Customer for Tanjin
+    const addRes = JSON.parse(
+      doPost({
+        postData: {
+          contents: JSON.stringify({
+            event: 'PAID_CUSTOMER_UPSERT',
+            agentNames: ['Tanjin', 'Kathy'],
+            paidCustomer: {
+              id: 'PC-MAN-ABC1',
+              leadId: '',
+              customerName: 'Workshop',
+              phone: '01877665544',
+              assignedAgentName: 'Tanjin',
+              confirmedDate: '2026-11-25',
+              renewalDate: '2026-12-25',
+              renewalStatus: 'Active',
+              packageName: '3-Month Package',
+              notes: 'Manual VIP',
+              updatedAt: '2026-11-25T10:00:00.000Z',
+            },
+          }),
+        },
+      })
+    );
+    assert.equal(addRes.ok, true);
+
+    // Legacy row's Notes shifted cleanly to col 12 without entering Package (col 11)
+    assert.equal(legacyPaidSheet._rows[0][10], 'Package');
+    assert.equal(legacyPaidSheet._rows[0][11], 'Notes');
+    assert.equal(legacyPaidSheet._rows[1][10], '');
+    assert.equal(legacyPaidSheet._rows[1][11], 'Legacy note preserved');
+    assert.equal(legacyPaidSheet._rows[2][0], 'PC-MAN-ABC1');
+    assert.equal(legacyPaidSheet._rows[2][10], '3-Month Package');
+    assert.equal(sheetsMap.get('Paid_Tanjin')!._rows.length, 2);
+
+    // 2. Edit phone & reassign to Kathy -> updates Paid_Customers & moves Paid_Tanjin -> Paid_Kathy
+    const editRes = JSON.parse(
+      doPost({
+        postData: {
+          contents: JSON.stringify({
+            event: 'PAID_CUSTOMER_UPSERT',
+            agentNames: ['Tanjin', 'Kathy'],
+            previousPhone: '01877665544',
+            paidCustomer: {
+              id: 'PC-MAN-ABC1',
+              leadId: '',
+              customerName: 'Workshop',
+              phone: '01877665599',
+              assignedAgentName: 'Kathy',
+              confirmedDate: '2026-11-25',
+              renewalDate: '2026-12-25',
+              renewalStatus: 'Active',
+              packageName: '6-Month Package',
+              notes: 'Reassigned to Kathy',
+              updatedAt: '2026-11-25T11:00:00.000Z',
+            },
+          }),
+        },
+      })
+    );
+    assert.equal(editRes.ok, true);
+    assert.equal(legacyPaidSheet._rows.length, 3);
+    assert.equal(legacyPaidSheet._rows[2][3], "'01877665599");
+    assert.equal(legacyPaidSheet._rows[2][4], 'Kathy');
+    assert.equal(legacyPaidSheet._rows[2][10], '6-Month Package');
+    assert.equal(sheetsMap.get('Paid_Tanjin')!._rows.length, 1);
+    assert.equal(sheetsMap.get('Paid_Kathy')!._rows.length, 2);
+
+    // 3. doGet reads Package & Notes cleanly without timestamps
+    const pulled = JSON.parse(doGet({ parameter: { action: 'pull', scope: 'all' } }));
+    assert.equal(pulled.ok, true);
+    const oldRow = pulled.paidCustomers.find((c: { id: string }) => c.id === 'PC-OLD-1');
+    assert.equal(oldRow.packageName, '');
+    assert.equal(oldRow.notes, 'Legacy note preserved');
+    const manRow = pulled.paidCustomers.find((c: { id: string }) => c.id === 'PC-MAN-ABC1');
+    assert.equal(manRow.packageName, '6-Month Package');
+
+    // 4. Delete manual Paid Customer -> removed from Paid_Customers & Paid_Kathy
+    const delRes = JSON.parse(
+      doPost({
+        postData: {
+          contents: JSON.stringify({
+            event: 'PAID_CUSTOMER_DELETED',
+            agentNames: ['Tanjin', 'Kathy'],
+            deletedPaidCustomer: {
+              id: 'PC-MAN-ABC1',
+              leadId: '',
+              phone: '01877665599',
+              assignedAgentName: 'Kathy',
+            },
+            deletedPaidCustomerIds: ['PC-MAN-ABC1', 'SHEET-PC-1877665599'],
+          }),
+        },
+      })
+    );
+    assert.equal(delRes.ok, true);
+    assert.equal(legacyPaidSheet._rows.length, 2);
+    assert.equal(sheetsMap.get('Paid_Kathy')!._rows.length, 1);
+  });
 });
 

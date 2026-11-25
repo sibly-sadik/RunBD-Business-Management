@@ -1,4 +1,4 @@
-import { asc, desc, eq, or } from 'drizzle-orm';
+import { asc, desc, eq, inArray, or } from 'drizzle-orm';
 import { db } from './index.ts';
 import {
   appSettings,
@@ -775,9 +775,50 @@ export async function deleteLeadInDb(leadId: string): Promise<void> {
   }
 }
 
-export async function deletePaidCustomerInDb(customerId: string): Promise<void> {
+export async function deletePaidCustomerInDb(
+  customerId: string,
+  match?: { leadId?: string; phone?: string }
+): Promise<void> {
   try {
-    await db.delete(paidCustomers).where(eq(paidCustomers.id, customerId));
+    const cleanId = customerId.trim();
+    const cleanLeadId = (match?.leadId ?? '').trim();
+    const rawPhone = (match?.phone ?? '').trim();
+    const normPhone = (rawPhone ? normalizeBdPhoneServer(rawPhone) : '') ?? '';
+    const core = (normPhone || rawPhone).replace(/\D/g, '').slice(-10);
+    const conditions = [];
+    const idList = Array.from(
+      new Set(
+        [
+          cleanId,
+          cleanLeadId ? `PC-${cleanLeadId}` : '',
+          core ? `SHEET-PC-${core}` : '',
+        ].filter(Boolean)
+      )
+    );
+    if (idList.length > 0) conditions.push(inArray(paidCustomers.id, idList));
+    const leadIds = Array.from(
+      new Set(
+        [
+          cleanLeadId,
+          cleanId.startsWith('PC-') && !cleanId.startsWith('PC-MAN-')
+            ? cleanId.slice(3)
+            : '',
+        ].filter(Boolean)
+      )
+    );
+    if (leadIds.length > 0) conditions.push(inArray(paidCustomers.leadId, leadIds));
+    if (core) {
+      const phones = Array.from(
+        new Set(
+          [normPhone, `0${core}`, `+880${core}`, `880${core}`, rawPhone].filter(
+            (v): v is string => Boolean(v)
+          )
+        )
+      );
+      if (phones.length > 0) conditions.push(inArray(paidCustomers.phone, phones));
+    }
+    if (conditions.length === 0) return;
+    await db.delete(paidCustomers).where(conditions.length === 1 ? conditions[0] : or(...conditions));
   } catch (error) {
     console.error('Database query failed (deletePaidCustomerInDb):', error);
     throw new Error('Failed to delete paid customer from database.', { cause: error });

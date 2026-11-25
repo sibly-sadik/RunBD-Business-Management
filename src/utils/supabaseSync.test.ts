@@ -359,3 +359,47 @@ test('Supabase mappers normalize and preserve Workshop, Accessories, and Rent a 
     assert.equal(rowToPaidCustomer(paidRow).customerName, item.expected);
   }
 });
+
+test('Supabase Paid Customer mappers sanitize timestamp strings out of package_name', () => {
+  const row = rowToPaidCustomer({
+    id: 'PC-TS-1',
+    lead_id: '',
+    customer_name: 'Car',
+    phone: '01711223344',
+    assigned_agent_id: 'agent-tanjin',
+    assigned_agent_name: 'Tanjin',
+    confirmed_date: '2026-11-25',
+    renewal_date: '2026-12-25',
+    renewal_status: 'Active',
+    package_name: '2026-11-25T10:30:00.000Z',
+    notes: 'Should keep notes',
+    created_at: '2026-11-25T10:30:00.000Z',
+    updated_at: '2026-11-25T10:30:00.000Z',
+  });
+  assert.equal(row.packageName, '');
+  assert.equal(row.leadId, 'TS-1');
+
+  const manualRow = rowToPaidCustomer({
+    id: 'PC-MAN-XYZ',
+    lead_id: '',
+    customer_name: 'Workshop',
+    phone: '01811223344',
+    assigned_agent_id: 'agent-kathy',
+    assigned_agent_name: 'Kathy',
+    confirmed_date: '2026-11-25',
+    renewal_date: '2026-12-25',
+    renewal_status: 'Active',
+    package_name: '3-Month Package',
+    notes: '',
+    created_at: '2026-11-25T10:30:00.000Z',
+    updated_at: '2026-11-25T10:30:00.000Z',
+  });
+  assert.equal(manualRow.leadId, '');
+  assert.equal(manualRow.packageName, '3-Month Package');
+
+  const outRow = paidCustomerToSupabaseRow({
+    ...manualRow,
+    packageName: '2026-11-25T11:00:00.000Z',
+  });
+  assert.equal(outRow.package_name, '');
+});

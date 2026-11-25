@@ -18,7 +18,9 @@ import {
   computeEffectiveRenewalStatus,
   computeFinalDailySummary,
   computeKawsarPostStats,
+  createManualPaidCustomer,
   createPaidCustomerFromLead,
+  sanitizePaidPackageName,
   deduplicateSameDayCallLogs,
   detectDeviceClockAhead,
   filterAgentAssignedQueueLeads,
@@ -1702,4 +1704,92 @@ test('Lead Edit helpers: findDuplicateLead excludeLeadId and updateLeadDetails n
   assert.equal(updated.status, 'Interested');
   assert.equal(updated.notes, 'Fixed vehicle type and phone');
   assert.equal(updated.updatedAt, now.toISOString());
+});
+
+test('sanitizePaidPackageName strips ISO and JS Date timestamp strings while keeping real package names', () => {
+  assert.equal(sanitizePaidPackageName('1-Month Standard'), '1-Month Standard');
+  assert.equal(sanitizePaidPackageName('  3-Month Pro - 2500 BDT '), '3-Month Pro - 2500 BDT');
+  assert.equal(sanitizePaidPackageName('2026-11-24T12:00:00.000Z'), '');
+  assert.equal(sanitizePaidPackageName('Tue Nov 24 2026 12:00:00 GMT+0600 (Bangladesh Standard Time)'), '');
+  assert.equal(sanitizePaidPackageName(new Date('2026-11-24T12:00:00.000Z')), '');
+  assert.equal(sanitizePaidPackageName(null), '');
+});
+
+test('createManualPaidCustomer validates BD phone, blocks duplicates, and defaults renewalDate to +30 days', () => {
+  const now = new Date('2026-11-25T10:30:00+06:00');
+  const existing: PaidCustomer[] = [
+    {
+      id: 'PC-EXIST-1',
+      leadId: 'L-EXIST-1',
+      customerName: 'Car',
+      phone: '01711223344',
+      assignedAgentId: 'a1',
+      assignedAgentName: 'Tanjin',
+      confirmedDate: '2026-11-20',
+      renewalDate: '2026-12-20',
+      renewalStatus: 'Active',
+      lastRenewedAt: null,
+      packageName: '1-Month Basic',
+      notes: '',
+      createdAt: '2026-11-20T09:00:00.000Z',
+      updatedAt: '2026-11-20T09:00:00.000Z',
+    },
+  ];
+
+  // Duplicate phone rejected regardless of +880 formatting
+  const dupRes = createManualPaidCustomer(
+    {
+      customerName: 'Workshop',
+      phone: '+880 1711-223344',
+      assignedAgentId: 'a2',
+      assignedAgentName: 'Kathy',
+      packageName: '1-Month Premium',
+    },
+    existing,
+    now
+  );
+  assert.equal(dupRes.ok, false);
+  if (!dupRes.ok) {
+    assert.ok(dupRes.error.includes('already exists'));
+  }
+
+  // Invalid phone rejected
+  const badPhone = createManualPaidCustomer(
+    {
+      customerName: 'Car',
+      phone: '12345',
+      assignedAgentId: 'a1',
+      assignedAgentName: 'Tanjin',
+      packageName: '1-Month Standard',
+    },
+    existing,
+    now
+  );
+  assert.equal(badPhone.ok, false);
+
+  // Valid manual Paid Customer succeeds with normalized phone, vehicle type, and +30d renewal
+  const okRes = createManualPaidCustomer(
+    {
+      customerName: 'rent-a-car',
+      phone: '+880 1855-667788',
+      assignedAgentId: 'a2',
+      assignedAgentName: 'Kathy',
+      packageName: '3-Month Package',
+      notes: 'Cash paid',
+    },
+    existing,
+    now
+  );
+  assert.equal(okRes.ok, true);
+  if (okRes.ok) {
+    assert.ok(okRes.customer.id.startsWith('PC-MAN-'));
+    assert.equal(okRes.customer.leadId, '');
+    assert.equal(okRes.customer.customerName, 'Rent a Car');
+    assert.equal(okRes.customer.phone, '01855667788');
+    assert.equal(okRes.customer.assignedAgentName, 'Kathy');
+    assert.equal(okRes.customer.confirmedDate, '2026-11-25');
+    assert.equal(okRes.customer.renewalDate, '2026-12-25');
+    assert.equal(okRes.customer.packageName, '3-Month Package');
+    assert.equal(okRes.customer.renewalStatus, 'Active');
+  }
 });

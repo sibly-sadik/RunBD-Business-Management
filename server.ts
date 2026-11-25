@@ -603,11 +603,13 @@ app.delete('/api/paid-customers/:id', requireAuth, async (req: AuthRequest, res)
       return;
     }
     const customerId = String(req.params.id ?? '').trim();
+    const leadId = typeof req.query.leadId === 'string' ? req.query.leadId.trim() : '';
+    const phone = typeof req.query.phone === 'string' ? req.query.phone.trim() : '';
     if (!customerId) {
       res.status(400).json({ error: 'Valid paid customer ID is required.' });
       return;
     }
-    await deletePaidCustomerInDb(customerId);
+    await deletePaidCustomerInDb(customerId, { leadId, phone });
     res.json({ ok: true });
   } catch (error) {
     console.error('Failed to delete paid customer:', error);

@@ -37,6 +37,7 @@ import {
   computeDashboardMetrics,
   computeFinalDailySummary,
   computeKawsarPostStats,
+  createManualPaidCustomer,
   createPaidCustomerFromLead,
   extractPhoneCoreKey,
   filterCollectorTodayLeads,
@@ -60,6 +61,7 @@ import {
   normalizeFacebookUrl,
   normalizePostUrl,
   normalizeVehicleType,
+  PaidCustomerCreateInput,
   PaidCustomerEditInput,
   renewPaidCustomer,
   updateLeadDetails,
@@ -324,18 +326,15 @@ export default function App() {
     };
   }, []);
 
-  // Load role-scoped workspace data directly from Supabase PostgreSQL when signed in
-  useEffect(() => {
-    if (!currentUser) return;
-    let active = true;
-    const todayYmd = getLocalDateString();
-
-    void refreshTeamMembers(currentUser.role);
-
-    void fetchBootstrapFromSupabase(currentUser.role, todayYmd).then((res) => {
-      if (!active) return;
+  const applySupabaseBootstrapResult = useCallback(
+    (
+      user: User,
+      res: Awaited<ReturnType<typeof fetchBootstrapFromSupabase>>,
+      todayYmd: string,
+      options?: { isInitial?: boolean }
+    ) => {
       if (!res.ok) {
-        if (res.schemaMissing && currentUser.role === 'admin') {
+        if (options?.isInitial && res.schemaMissing && user.role === 'admin') {
           addToast(
             'warning',
             'Supabase Schema Setup Needed',
@@ -345,20 +344,27 @@ export default function App() {
         return;
       }
 
-      const isAdmin = currentUser.role === 'admin';
-      const isCollector = currentUser.role === 'collector';
+      const isAdmin = user.role === 'admin';
+      const isCollector = user.role === 'collector';
+      const recentCutoffMs = Date.now() - 8000;
+
       if (res.leads) {
+        const deletedLeadIds = storage.getDeletedLeadIds();
+        const remoteLeadIds = new Set(res.leads.map((l) => l.id));
         setLeads((prev) => {
-          const base = isAdmin
+          const roleBase = isAdmin
             ? prev
             : isCollector
             ? filterCollectorTodayLeads(prev)
             : filterTodayLeads(prev);
-          const merged = mergeRemoteLeads(
-            base,
-            res.leads!,
-            storage.getDeletedLeadIds()
-          );
+          // Reconcile authoritatively with Supabase so leads deleted by Admin disappear
+          // across all browsers/tabs, while preserving just-created (<8s) local items.
+          const preserved = roleBase.filter((l) => {
+            if (remoteLeadIds.has(l.id)) return true;
+            const createdMs = Date.parse(l.createdAt || '') || 0;
+            return createdMs >= recentCutoffMs;
+          });
+          const merged = mergeRemoteLeads(preserved, res.leads!, deletedLeadIds);
           leadsRef.current = merged;
           return merged;
         });
@@ -379,10 +385,18 @@ export default function App() {
           return merged;
         });
       }
-      if (res.paidCustomers) {
+      if (res.paidCustomers && (isAdmin || user.role === 'agent')) {
+        const deletedIds = storage.getDeletedPaidCustomerIds();
+        const remotePaidIds = new Set(res.paidCustomers.map((c) => c.id));
         setPaidCustomers((prev) => {
-          const deletedIds = storage.getDeletedPaidCustomerIds();
-          const merged = mergeRemotePaidCustomers(prev, res.paidCustomers!, deletedIds);
+          // Reconcile authoritatively with Supabase so Admin deletes/edits propagate
+          // cleanly into Agent browsers even when their localStorage had stale rows.
+          const preserved = prev.filter((c) => {
+            if (remotePaidIds.has(c.id)) return true;
+            const createdMs = Date.parse(c.createdAt || '') || 0;
+            return createdMs >= recentCutoffMs;
+          });
+          const merged = mergeRemotePaidCustomers(preserved, res.paidCustomers!, deletedIds);
           paidCustomersRef.current = merged;
           return merged;
         });
@@ -412,12 +426,92 @@ export default function App() {
                 ),
         }));
       }
+      void todayYmd;
+    },
+    [addToast]
+  );
+
+  // Hydrate workspace data from Supabase PostgreSQL on login / session restore
+  useEffect(() => {
+    if (!currentUser) return;
+    let active = true;
+    const todayYmd = getLocalDateString();
+
+    void refreshTeamMembers(currentUser.role);
+
+    void fetchBootstrapFromSupabase(currentUser.role, todayYmd).then((res) => {
+      if (!active) return;
+      applySupabaseBootstrapResult(currentUser, res, todayYmd, { isInitial: true });
     });
 
     return () => {
       active = false;
     };
-  }, [addToast, currentUser, refreshTeamMembers]);
+  }, [applySupabaseBootstrapResult, currentUser, refreshTeamMembers]);
+
+  // Keep Admin <-> Agent Paid Customers & Leads synchronized when switching tabs,
+  // regaining window focus, or across open browser tabs.
+  useEffect(() => {
+    if (!currentUser) return;
+    let active = true;
+    const refreshLive = () => {
+      const todayYmd = getLocalDateString();
+      void fetchBootstrapFromSupabase(currentUser.role, todayYmd).then((res) => {
+        if (!active) return;
+        applySupabaseBootstrapResult(currentUser, res, todayYmd);
+      });
+    };
+
+    if (
+      activeTab === 'paid-customers' ||
+      activeTab === 'agent-workspace' ||
+      activeTab === 'data-collection' ||
+      activeTab === 'admin-leads'
+    ) {
+      refreshLive();
+    }
+
+    const handleFocus = () => {
+      refreshLive();
+    };
+
+    const handleStorage = (e: StorageEvent) => {
+      if (
+        e.key === 'runbd_paid_customers_v1' ||
+        e.key === 'runbd_deleted_paid_ids_v1'
+      ) {
+        const deletedIds = storage.getDeletedPaidCustomerIds();
+        const storedPaid = storage.getPaidCustomers();
+        const reconciled = mergeRemotePaidCustomers([], storedPaid, deletedIds);
+        paidCustomersRef.current = reconciled;
+        setPaidCustomers(reconciled);
+      } else if (
+        e.key === 'runbd_leads_v2' ||
+        e.key === 'runbd_deleted_lead_ids_v1'
+      ) {
+        const deletedLeadIds = storage.getDeletedLeadIds();
+        const storedLeads = storage.getLeads();
+        const reconciled = mergeRemoteLeads([], storedLeads, deletedLeadIds);
+        leadsRef.current = reconciled;
+        setLeads(reconciled);
+      }
+    };
+
+    window.addEventListener('focus', handleFocus);
+    window.addEventListener('storage', handleStorage);
+    const intervalId = window.setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        refreshLive();
+      }
+    }, 25000);
+
+    return () => {
+      active = false;
+      window.removeEventListener('focus', handleFocus);
+      window.removeEventListener('storage', handleStorage);
+      window.clearInterval(intervalId);
+    };
+  }, [activeTab, applySupabaseBootstrapResult, currentUser]);
 
   const appendAudit = useCallback(
     (actor: User, action: AuditAction, details: string) => {
@@ -2216,10 +2310,66 @@ export default function App() {
 
     void triggerRealtimeSync(
       settings.googleSheetsWebhookUrl,
-      { event: 'PAID_CUSTOMER_UPSERT', paidCustomer: updated },
+      {
+        event: 'PAID_CUSTOMER_UPSERT',
+        paidCustomer: updated,
+        ...(target.phone !== updated.phone ? { previousPhone: target.phone } : {}),
+      },
       leadsRef.current,
       callLogsRef.current
     );
+  };
+
+  const handleAddPaidCustomer = (
+    input: PaidCustomerCreateInput
+  ): { ok: boolean; error?: string } => {
+    if (!currentUser || currentUser.role !== 'admin') {
+      return { ok: false, error: 'Only Admin / Supervisor can add Paid Customers.' };
+    }
+
+    const basePaid = mergeRemotePaidCustomers(
+      paidCustomersRef.current,
+      storage.getPaidCustomers(),
+      storage.getDeletedPaidCustomerIds()
+    );
+    const createdRes = createManualPaidCustomer(input, basePaid);
+    if (!createdRes.ok) {
+      return { ok: false, error: createdRes.error };
+    }
+
+    const created = createdRes.customer;
+    const corePhone = extractPhoneCoreKey(created.phone);
+    storage.removeDeletedPaidCustomerIds(
+      [created.id, corePhone ? `SHEET-PC-${corePhone}` : ''].filter(Boolean)
+    );
+
+    const nextPaid = [created, ...basePaid];
+    paidCustomersRef.current = nextPaid;
+    setPaidCustomers(nextPaid);
+
+    void upsertPaidCustomerInSupabase(created, '').catch(() => {});
+
+    const packageLabel = created.packageName?.trim() || 'Not Assigned';
+    appendAudit(
+      currentUser,
+      'PAID_CUSTOMER_ADDED',
+      `Added Paid Customer ${created.customerName} (${created.phone}) · Package: ${packageLabel} · Agent: ${created.assignedAgentName ?? 'Unassigned'} · Renewal: ${created.renewalDate}`
+    );
+
+    addToast(
+      'success',
+      'Paid Customer Added',
+      `${created.customerName} assigned to ${created.assignedAgentName ?? 'Unassigned'} (${packageLabel}) and synced.`
+    );
+
+    void triggerRealtimeSync(
+      settings.googleSheetsWebhookUrl,
+      { event: 'PAID_CUSTOMER_UPSERT', paidCustomer: created },
+      leadsRef.current,
+      callLogsRef.current
+    );
+
+    return { ok: true };
   };
 
   const handleDeletePaidCustomer = (customerId: string) => {
@@ -2232,6 +2382,7 @@ export default function App() {
     const target = basePaid.find((c) => c.id === customerId);
     if (!target) return;
 
+    const corePhone = extractPhoneCoreKey(target.phone);
     const nextPaid = basePaid.filter((c) => c.id !== customerId);
     paidCustomersRef.current = nextPaid;
     setPaidCustomers(nextPaid);
@@ -2240,11 +2391,43 @@ export default function App() {
       target.id,
       target.leadId ? `PC-${target.leadId}` : '',
       target.leadId,
+      corePhone ? `SHEET-PC-${corePhone}` : '',
     ].filter(Boolean);
     const nextDeletedIds = storage.addDeletedPaidCustomerIds(tombstoneIds);
 
-    void deletePaidCustomerInSupabase(customerId).catch(() => {});
-    void deletePaidCustomerViaApi(customerId).catch(() => {});
+    void deletePaidCustomerInSupabase(customerId, {
+      leadId: target.leadId,
+      phone: target.phone,
+    }).catch(() => {});
+    void deletePaidCustomerViaApi(customerId, {
+      leadId: target.leadId,
+      phone: target.phone,
+    }).catch(() => {});
+
+    // Keep linked "Order Confirmed" lead status & Agent KPI consistent and prevent
+    // FULL_SYNC on other browsers from resurrecting this deleted Paid Customer.
+    let nextLeads = leadsRef.current;
+    let downgradedLead: Lead | null = null;
+    const matchedLead = leadsRef.current.find((l) => {
+      if (l.status !== 'Order Confirmed') return false;
+      if (target.leadId && l.id === target.leadId) return true;
+      if (target.id === `PC-${l.id}`) return true;
+      const leadCore = extractPhoneCoreKey(l.phone || l.rawPhone);
+      return Boolean(corePhone && leadCore && leadCore === corePhone);
+    });
+    if (matchedLead) {
+      downgradedLead = {
+        ...matchedLead,
+        status: 'Done',
+        updatedAt: new Date().toISOString(),
+      };
+      nextLeads = leadsRef.current.map((l) =>
+        l.id === matchedLead.id ? downgradedLead! : l
+      );
+      leadsRef.current = nextLeads;
+      setLeads(nextLeads);
+      void updateLeadInSupabase(downgradedLead).catch(() => {});
+    }
 
     appendAudit(
       currentUser,
@@ -2255,7 +2438,7 @@ export default function App() {
     addToast(
       'info',
       'Paid Customer Deleted',
-      `${target.customerName} removed from Paid Customers, Supabase, and Google Sheets.`
+      `${target.customerName} removed from Paid Customers, Agent view, Supabase, and Google Sheets.`
     );
 
     void triggerRealtimeSync(
@@ -2270,9 +2453,18 @@ export default function App() {
         },
         deletedPaidCustomerIds: nextDeletedIds,
       },
-      leadsRef.current,
+      nextLeads,
       callLogsRef.current
-    );
+    ).then(() => {
+      if (downgradedLead) {
+        void triggerRealtimeSync(
+          settings.googleSheetsWebhookUrl,
+          { event: 'LEAD_UPDATED', lead: downgradedLead },
+          nextLeads,
+          callLogsRef.current
+        );
+      }
+    });
   };
 
   const handleUpdateCallScript = (script: string) => {
@@ -2998,6 +3190,9 @@ export default function App() {
               currentUser={currentUser}
               agents={callCenterAgents}
               paidCustomers={paidCustomers}
+              onAddPaidCustomer={
+                currentUser.role === 'admin' ? handleAddPaidCustomer : undefined
+              }
               onMarkRenewed={
                 currentUser.role === 'admin' ? handleMarkPaidCustomerRenewed : undefined
               }

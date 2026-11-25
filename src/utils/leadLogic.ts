@@ -343,10 +343,7 @@ export function normalizeVehicleType(raw: string | null | undefined): string {
     key === 'pickup track' ||
     key === 'pickuptrack'
   ) {
-    return 'Pickup';
-if (key === 'workshop' || key === 'Workshops') return 'Workshop';
-if (key === 'accessories' || key === 'Accessories') return 'Accessories';
-if (key === 'rent a car' || key === 'Rent a Car') return 'Rent a Car';   
+    return 'Pickup Truck';
   }
   if (
     key === 'workshop' ||
@@ -1963,6 +1960,22 @@ export const PAID_PACKAGE_PRESETS = [
   '1-Year Package',
 ] as const;
 
+export function sanitizePaidPackageName(raw: unknown): string {
+  if (raw === null || raw === undefined || raw instanceof Date) return '';
+  const trimmed = String(raw).trim();
+  if (!trimmed) return '';
+  if (
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(trimmed) ||
+    /^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}/.test(trimmed) ||
+    /GMT[+-]\d{4}|\((?:[A-Za-z]+\s+)+(?:Standard|Daylight|Summer)\s+Time\)|Coordinated Universal Time/i.test(
+      trimmed
+    )
+  ) {
+    return '';
+  }
+  return trimmed;
+}
+
 export interface PaidCustomerEditInput {
   customerName: string;
   phone: string;
@@ -2003,9 +2016,95 @@ export function updatePaidCustomerDetails(
       nextStatus === 'Renewed' && (customer.renewalStatus !== 'Renewed' || !customer.lastRenewedAt)
         ? nowIso
         : customer.lastRenewedAt,
-    packageName: updates.packageName.trim(),
+    packageName: sanitizePaidPackageName(updates.packageName),
     notes: updates.notes.trim(),
     updatedAt: nowIso,
+  };
+}
+
+export interface PaidCustomerCreateInput {
+  customerName: string;
+  phone: string;
+  assignedAgentId: string | null;
+  assignedAgentName: string | null;
+  packageName: string;
+  confirmedDate?: string;
+  renewalDate?: string;
+  notes?: string;
+}
+
+/**
+ * Creates a standalone Paid Customer record added directly by an Admin / Supervisor,
+ * validating BD phone format, preventing duplicate phone numbers in Paid Customers,
+ * and defaulting Renewal Date to Confirmed Date + 30 days.
+ */
+export function createManualPaidCustomer(
+  input: PaidCustomerCreateInput,
+  existingCustomers: PaidCustomer[],
+  now: Date = new Date()
+):
+  | { ok: true; customer: PaidCustomer }
+  | { ok: false; error: string; existingCustomer?: PaidCustomer } {
+  const rawName = input.customerName.trim();
+  const customerName = normalizeVehicleType(rawName) || rawName;
+  if (!customerName) {
+    return { ok: false, error: 'Customer or vehicle name is required.' };
+  }
+
+  const normalizedPhone = normalizeBdPhone(input.phone);
+  if (!normalizedPhone) {
+    return {
+      ok: false,
+      error:
+        'Enter a valid Bangladeshi phone number (e.g. 01712345678, 8801712345678, or +8801712345678).',
+    };
+  }
+
+  const newCore = extractPhoneCoreKey(normalizedPhone);
+  const existingDup = existingCustomers.find((c) => {
+    const cCore = extractPhoneCoreKey(c.phone);
+    return Boolean(newCore && cCore && cCore === newCore);
+  });
+  if (existingDup) {
+    return {
+      ok: false,
+      error: `A Paid Customer with phone ${formatBdPhoneDisplay(normalizedPhone)} already exists (${existingDup.customerName}).`,
+      existingCustomer: existingDup,
+    };
+  }
+
+  const confirmedDate = toYmdString(input.confirmedDate, now);
+  const renewalDate =
+    input.renewalDate && input.renewalDate.trim()
+      ? toYmdString(input.renewalDate, now)
+      : addDaysToYmd(confirmedDate, 30);
+  const nowIso = now.toISOString();
+  const suffix = Math.random().toString(36).slice(2, 6).toUpperCase();
+  const id = `PC-MAN-${Date.now().toString(36).toUpperCase()}-${suffix}`;
+  const cleanAgentName =
+    input.assignedAgentName &&
+    input.assignedAgentName.trim().toLowerCase() !== 'unassigned'
+      ? input.assignedAgentName.trim()
+      : null;
+
+  return {
+    ok: true,
+    customer: {
+      id,
+      leadId: '',
+      customerName,
+      phone: normalizedPhone,
+      assignedAgentId: cleanAgentName ? input.assignedAgentId ?? null : null,
+      assignedAgentName: cleanAgentName,
+      confirmedDate,
+      renewalDate,
+      renewalStatus: 'Active',
+      lastRenewedAt: null,
+      packageName: sanitizePaidPackageName(input.packageName),
+      notes: (input.notes ?? '').trim(),
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    },
   };
 }
 

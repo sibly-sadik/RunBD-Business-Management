@@ -9,23 +9,32 @@ import {
   Package,
   Pencil,
   PhoneCall,
+  Plus,
   RefreshCw,
   Search,
   Trash2,
   X,
 } from 'lucide-react';
-import { PaidCustomer, RENEWAL_STATUSES, RenewalStatus, User } from '../types';
+import {
+  PaidCustomer,
+  RENEWAL_STATUSES,
+  RenewalStatus,
+  User,
+  VEHICLE_TYPES,
+} from '../types';
 import {
   addDaysToYmd,
   buildTelUrl,
   computeDaysRemaining,
   computeEffectiveRenewalStatus,
+  extractPhoneCoreKey,
   formatBdPhoneDisplay,
   generatePaidCustomersCsv,
   getDhakaDateString,
   normalizeBdPhone,
   openWhatsAppChat,
   PAID_PACKAGE_PRESETS,
+  PaidCustomerCreateInput,
   PaidCustomerEditInput,
 } from '../utils/leadLogic';
 import { CopyPhoneButton } from './CopyPhoneButton';
@@ -34,6 +43,9 @@ interface PaidCustomersViewProps {
   currentUser: User;
   agents: User[];
   paidCustomers: PaidCustomer[];
+  onAddPaidCustomer?: (
+    input: PaidCustomerCreateInput
+  ) => { ok: boolean; error?: string };
   onMarkRenewed?: (customerId: string) => void;
   onUpdateRenewalStatus?: (customerId: string, status: RenewalStatus) => void;
   onUpdatePaidCustomer?: (customerId: string, updates: PaidCustomerEditInput) => void;
@@ -104,6 +116,7 @@ export function PaidCustomersView({
   currentUser,
   agents,
   paidCustomers,
+  onAddPaidCustomer,
   onMarkRenewed,
   onUpdateRenewalStatus,
   onUpdatePaidCustomer,
@@ -114,6 +127,20 @@ export function PaidCustomersView({
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<FilterMode>('ALL');
   const [agentFilter, setAgentFilter] = useState<string>('ALL');
+
+  // Admin Add Paid Customer modal state
+  const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+  const [addName, setAddName] = useState('');
+  const [addPhone, setAddPhone] = useState('');
+  const [addAgentId, setAddAgentId] = useState('');
+  const [addPackage, setAddPackage] = useState('');
+  const [addConfirmedDate, setAddConfirmedDate] = useState(() => getDhakaDateString());
+  const [addRenewalDate, setAddRenewalDate] = useState(() =>
+    addDaysToYmd(getDhakaDateString(), 30)
+  );
+  const [addRenewalTouched, setAddRenewalTouched] = useState(false);
+  const [addNotes, setAddNotes] = useState('');
+  const [addError, setAddError] = useState<string | null>(null);
 
   // Admin Edit / Set Package modal state
   const [editingCustomer, setEditingCustomer] = useState<PaidCustomer | null>(null);
@@ -133,16 +160,27 @@ export function PaidCustomersView({
   const isAdmin = currentUser.role === 'admin';
 
   useEffect(() => {
-    if (!editingCustomer && !deletingCustomer) return;
+    if (!isAddModalOpen && !editingCustomer && !deletingCustomer) return;
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        setIsAddModalOpen(false);
         setEditingCustomer(null);
         setDeletingCustomer(null);
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [editingCustomer, deletingCustomer]);
+  }, [isAddModalOpen, editingCustomer, deletingCustomer]);
+
+  const liveAddDuplicate = useMemo(() => {
+    if (!isAddModalOpen) return null;
+    const norm = normalizeBdPhone(addPhone);
+    const core = extractPhoneCoreKey(norm || addPhone);
+    if (!core || core.length < 10) return null;
+    return (
+      paidCustomers.find((c) => extractPhoneCoreKey(c.phone) === core) ?? null
+    );
+  }, [isAddModalOpen, addPhone, paidCustomers]);
 
   // Scope Paid Customers to the logged-in Agent, or show all for Admin
   const scopedCustomers = useMemo(() => {
@@ -275,6 +313,61 @@ export function PaidCustomersView({
     setEditingCustomer(null);
   };
 
+  const openAddModal = () => {
+    if (!isAdmin) return;
+    const todayYmd = getDhakaDateString();
+    setAddName('');
+    setAddPhone('');
+    setAddAgentId('');
+    setAddPackage('');
+    setAddConfirmedDate(todayYmd);
+    setAddRenewalDate(addDaysToYmd(todayYmd, 30));
+    setAddRenewalTouched(false);
+    setAddNotes('');
+    setAddError(null);
+    setIsAddModalOpen(true);
+  };
+
+  const handleSaveAdd = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!isAdmin || !onAddPaidCustomer) return;
+
+    const cleanName = addName.trim();
+    if (!cleanName) {
+      setAddError('Customer or vehicle name is required.');
+      return;
+    }
+
+    const normalizedPhone = normalizeBdPhone(addPhone);
+    if (!normalizedPhone) {
+      setAddError('Enter a valid Bangladeshi phone number (e.g. 01712345678).');
+      return;
+    }
+
+    const matchedAgent = addAgentId
+      ? agents.find((a) => a.id === addAgentId) ?? null
+      : null;
+
+    const result = onAddPaidCustomer({
+      customerName: cleanName,
+      phone: normalizedPhone,
+      assignedAgentId: matchedAgent?.id ?? (addAgentId ? addAgentId : null),
+      assignedAgentName: matchedAgent?.name ?? null,
+      packageName: addPackage.trim(),
+      confirmedDate: addConfirmedDate || getDhakaDateString(),
+      renewalDate:
+        addRenewalDate || addDaysToYmd(addConfirmedDate || getDhakaDateString(), 30),
+      notes: addNotes.trim(),
+    });
+
+    if (!result.ok) {
+      setAddError(result.error ?? 'Unable to add Paid Customer.');
+      return;
+    }
+
+    setIsAddModalOpen(false);
+  };
+
   const handleConfirmDelete = () => {
     if (!isAdmin || !deletingCustomer || !onDeletePaidCustomer) return;
     onDeletePaidCustomer(deletingCustomer.id);
@@ -296,15 +389,28 @@ export function PaidCustomersView({
           </p>
         </div>
 
-        <button
-          type="button"
-          onClick={handleDownloadCsv}
-          disabled={filteredItems.length === 0}
-          className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-semibold transition-colors whitespace-nowrap self-start cursor-pointer"
-        >
-          <Download className="w-4 h-4" />
-          <span>Export Paid Customers CSV</span>
-        </button>
+        <div className="flex flex-wrap sm:flex-nowrap items-center gap-2.5 self-start shrink-0">
+          {isAdmin && onAddPaidCustomer && (
+            <button
+              type="button"
+              data-testid="open-add-paid-modal-btn"
+              onClick={openAddModal}
+              className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-lg bg-slate-900 dark:bg-sky-600 hover:bg-slate-800 dark:hover:bg-sky-500 text-white text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer"
+            >
+              <Plus className="w-4 h-4" />
+              <span>Add Paid Customer</span>
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={handleDownloadCsv}
+            disabled={filteredItems.length === 0}
+            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer"
+          >
+            <Download className="w-4 h-4" />
+            <span>Export Paid Customers CSV</span>
+          </button>
+        </div>
       </div>
 
       {/* KPI Strip */}
@@ -437,18 +543,18 @@ export function PaidCustomersView({
           <>
             {/* Desktop Table */}
             <div className="hidden md:block overflow-x-auto">
-              <table className="w-full text-left border-collapse text-sm">
+              <table className="w-full text-left border-collapse text-xs sm:text-sm">
                 <thead>
-                  <tr className="bg-slate-50 dark:bg-slate-900/60 text-xs text-slate-500 dark:text-slate-400 border-b border-slate-200 dark:border-slate-800">
-                    <th className="py-3 px-2.5 font-semibold">Customer</th>
-                    <th className="py-3 px-2 font-semibold">Phone</th>
-                    <th className="py-3 px-2 font-semibold">Agent</th>
-                    <th className="py-3 px-2 font-semibold">Package</th>
-                    <th className="py-3 px-2 font-semibold">Renewal / Confirmed</th>
-                    <th className="py-3 px-2 font-semibold whitespace-nowrap">Days Left</th>
-                    <th className="py-3 px-2 font-semibold whitespace-nowrap">Status</th>
+                  <tr className="bg-slate-50 dark:bg-slate-900/60 text-[11px] text-slate-500 dark:text-slate-400 border-b border-slate-200 dark:border-slate-800">
+                    <th className="py-2.5 px-2 font-semibold">Customer</th>
+                    <th className="py-2.5 px-1.5 font-semibold">Phone</th>
+                    <th className="py-2.5 px-1.5 font-semibold">Agent</th>
+                    <th className="py-2.5 px-1.5 font-semibold">Package</th>
+                    <th className="py-2.5 px-1.5 font-semibold whitespace-nowrap">Renewal / Conf.</th>
+                    <th className="py-2.5 px-1.5 font-semibold whitespace-nowrap">Days Left</th>
+                    <th className="py-2.5 px-1.5 font-semibold whitespace-nowrap">Status</th>
                     {isAdmin && (
-                      <th className="py-3 px-2.5 font-semibold text-right">Action</th>
+                      <th className="py-2.5 px-2 font-semibold text-right">Action</th>
                     )}
                   </tr>
                 </thead>
@@ -465,18 +571,18 @@ export function PaidCustomersView({
                             : 'hover:bg-slate-50/80 dark:hover:bg-slate-800/40'
                         }`}
                       >
-                        <td className="py-3 px-2.5 max-w-[155px]">
-                          <div className="font-semibold text-slate-900 dark:text-slate-100 leading-snug truncate">
+                        <td className="py-2.5 px-2 max-w-[135px]">
+                          <div className="font-semibold text-xs text-slate-900 dark:text-slate-100 leading-snug truncate">
                             {customer.customerName}
                           </div>
                           {customer.notes && (
-                            <p className="text-xs text-slate-500 dark:text-slate-400 truncate mt-0.5">
+                            <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate mt-0.5">
                               {customer.notes}
                             </p>
                           )}
                         </td>
-                        <td className="py-3 px-2">
-                          <div className="flex items-center gap-1">
+                        <td className="py-2.5 px-1.5">
+                          <div className="flex items-center gap-0.5">
                             <span className="font-mono text-xs tabular-nums text-slate-700 dark:text-slate-300 whitespace-nowrap">
                               {formatBdPhoneDisplay(customer.phone)}
                             </span>
@@ -502,26 +608,26 @@ export function PaidCustomersView({
                             </button>
                           </div>
                         </td>
-                        <td className="py-3 px-2 text-xs font-medium text-slate-700 dark:text-slate-300 whitespace-nowrap">
+                        <td className="py-2.5 px-1.5 text-xs font-medium text-slate-700 dark:text-slate-300 whitespace-nowrap">
                           {customer.assignedAgentName ?? 'Unassigned'}
                         </td>
-                        <td className="py-3 px-2">
+                        <td className="py-2.5 px-1.5">
                           <PackageBadge
                             packageName={customer.packageName}
                             testId={`paid-package-${customer.id}`}
                           />
                         </td>
-                        <td className="py-3 px-2 font-mono text-xs tabular-nums whitespace-nowrap">
+                        <td className="py-2.5 px-1.5 font-mono text-[11px] tabular-nums whitespace-nowrap">
                           <div className="font-semibold text-slate-900 dark:text-slate-100">
                             {customer.renewalDate}
                           </div>
-                          <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                          <div className="text-[10px] text-slate-500 dark:text-slate-400">
                             Conf: {customer.confirmedDate}
                           </div>
                         </td>
-                        <td className="py-3 px-2 whitespace-nowrap">
+                        <td className="py-2.5 px-1.5 whitespace-nowrap">
                           <span
-                            className={`font-mono text-xs font-semibold tabular-nums ${
+                            className={`font-mono text-[11px] font-semibold tabular-nums ${
                               daysRemaining < 0
                                 ? 'text-rose-600 dark:text-rose-400'
                                 : daysRemaining <= 2
@@ -532,7 +638,7 @@ export function PaidCustomersView({
                             {formatDaysRemainingLabel(daysRemaining)}
                           </span>
                         </td>
-                        <td className="py-3 px-2">
+                        <td className="py-2.5 px-1.5">
                           {isAdmin && onUpdateRenewalStatus ? (
                             <select
                               aria-label={`Renewal status for ${customer.customerName}`}
@@ -543,7 +649,7 @@ export function PaidCustomersView({
                                   e.target.value as RenewalStatus
                                 )
                               }
-                              className="px-1.5 py-1 text-xs font-medium rounded-md bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 text-slate-900 dark:text-slate-100"
+                              className="px-1.5 py-1 text-[11px] font-medium rounded-md bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 text-slate-900 dark:text-slate-100"
                             >
                               {RENEWAL_STATUSES.map((st) => (
                                 <option key={st} value={st}>
@@ -556,9 +662,9 @@ export function PaidCustomersView({
                           )}
                         </td>
                         {isAdmin && (
-                          <td className="py-3 px-2.5 text-right">
-                            <div className="flex flex-col items-end gap-1.5">
-                              <div className="inline-flex items-center gap-1.5">
+                          <td className="py-2.5 px-2 text-right">
+                            <div className="flex flex-col items-end gap-1">
+                              <div className="inline-flex items-center gap-1">
                                 {onUpdatePaidCustomer && (
                                   <button
                                     type="button"
@@ -568,7 +674,7 @@ export function PaidCustomersView({
                                     className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-[11px] font-semibold transition-colors whitespace-nowrap cursor-pointer"
                                   >
                                     <Pencil className="w-3 h-3" />
-                                    <span>Edit / Package</span>
+                                    <span>Edit / Pkg</span>
                                   </button>
                                 )}
                                 {onDeletePaidCustomer && (
@@ -593,7 +699,7 @@ export function PaidCustomersView({
                                   className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-semibold transition-colors whitespace-nowrap cursor-pointer"
                                 >
                                   <CheckCircle2 className="w-3 h-3" />
-                                  <span>Mark as Renewed (+1 Month)</span>
+                                  <span>Renew (+1 Month)</span>
                                 </button>
                               )}
                             </div>
@@ -992,6 +1098,287 @@ export function PaidCustomersView({
                   className="px-5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition-colors cursor-pointer"
                 >
                   Save Changes
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Admin-Only Add Paid Customer Modal */}
+      {isAdmin && isAddModalOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="add-paid-modal-title"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setIsAddModalOpen(false);
+          }}
+        >
+          <div className="w-full max-w-xl max-h-[92vh] overflow-y-auto rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xl">
+            <div className="px-6 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
+              <div>
+                <h2
+                  id="add-paid-modal-title"
+                  className="text-base font-semibold text-slate-900 dark:text-white"
+                >
+                  Add Paid Customer
+                </h2>
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                  Assign directly to an agent and sync to Agent Paid Customers, Supabase, and Google Sheets.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsAddModalOpen(false)}
+                aria-label="Close add paid customer modal"
+                className="p-1.5 rounded-lg text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-700 dark:hover:text-slate-200 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveAdd} className="p-6 space-y-4">
+              {addError && (
+                <div
+                  role="alert"
+                  className="rounded-lg px-3.5 py-2.5 text-xs font-medium bg-rose-50 dark:bg-rose-500/10 border border-rose-200 dark:border-rose-500/30 text-rose-700 dark:text-rose-300"
+                >
+                  {addError}
+                </div>
+              )}
+
+              <div className="space-y-2">
+                <label
+                  htmlFor="add-paid-name"
+                  className="block text-xs font-medium text-slate-700 dark:text-slate-300"
+                >
+                  Customer / Vehicle Name *
+                </label>
+                <input
+                  id="add-paid-name"
+                  data-testid="add-paid-name-input"
+                  type="text"
+                  required
+                  value={addName}
+                  onChange={(e) => {
+                    setAddName(e.target.value);
+                    if (addError) setAddError(null);
+                  }}
+                  placeholder="Enter customer name or select vehicle type (e.g., Car, Workshop)"
+                  className="w-full px-3 py-2 text-xs rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
+                />
+                <div className="flex flex-wrap gap-1.5">
+                  {VEHICLE_TYPES.map((vt) => (
+                    <button
+                      key={vt}
+                      type="button"
+                      onClick={() => setAddName(vt)}
+                      className={`px-2 py-0.5 rounded text-[11px] font-medium border transition-colors cursor-pointer ${
+                        addName.trim() === vt
+                          ? 'bg-emerald-600 text-white border-emerald-600'
+                          : 'bg-slate-50 dark:bg-slate-950 text-slate-600 dark:text-slate-300 border-slate-300 dark:border-slate-700 hover:border-emerald-500'
+                      }`}
+                    >
+                      {vt}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                <div>
+                  <label
+                    htmlFor="add-paid-phone"
+                    className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1"
+                  >
+                    Phone Number (BD) *
+                  </label>
+                  <input
+                    id="add-paid-phone"
+                    data-testid="add-paid-phone-input"
+                    type="tel"
+                    required
+                    value={addPhone}
+                    onChange={(e) => {
+                      setAddPhone(e.target.value);
+                      if (addError) setAddError(null);
+                    }}
+                    placeholder="01712345678"
+                    className="w-full px-3 py-2 text-xs font-mono rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
+                  />
+                  {liveAddDuplicate && (
+                    <p
+                      data-testid="add-paid-duplicate-warning"
+                      className="mt-1 text-[11px] font-medium text-amber-700 dark:text-amber-300"
+                    >
+                      Already in Paid Customers: {liveAddDuplicate.customerName} (
+                      {liveAddDuplicate.assignedAgentName ?? 'Unassigned'})
+                    </p>
+                  )}
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="add-paid-agent"
+                    className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1"
+                  >
+                    Assigned Agent
+                  </label>
+                  <select
+                    id="add-paid-agent"
+                    data-testid="add-paid-agent-select"
+                    value={addAgentId}
+                    onChange={(e) => setAddAgentId(e.target.value)}
+                    className="w-full px-3 py-2 text-xs rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 text-slate-900 dark:text-slate-100"
+                  >
+                    <option value="">Unassigned</option>
+                    {agents.map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {a.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="add-paid-confirmed-date"
+                    className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1"
+                  >
+                    Confirmed Date
+                  </label>
+                  <input
+                    id="add-paid-confirmed-date"
+                    type="date"
+                    value={addConfirmedDate}
+                    onChange={(e) => {
+                      const nextConf = e.target.value;
+                      setAddConfirmedDate(nextConf);
+                      if (!addRenewalTouched && nextConf) {
+                        setAddRenewalDate(addDaysToYmd(nextConf, 30));
+                      }
+                    }}
+                    className="w-full px-3 py-2 text-xs font-mono rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 text-slate-900 dark:text-slate-100"
+                  />
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label
+                      htmlFor="add-paid-renewal-date"
+                      className="text-xs font-medium text-slate-700 dark:text-slate-300"
+                    >
+                      Renewal Date
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAddRenewalDate(
+                          addDaysToYmd(addConfirmedDate || getDhakaDateString(), 30)
+                        );
+                        setAddRenewalTouched(false);
+                      }}
+                      className="text-[11px] font-semibold text-emerald-600 dark:text-emerald-400 hover:underline cursor-pointer"
+                    >
+                      +30d from Confirmed
+                    </button>
+                  </div>
+                  <input
+                    id="add-paid-renewal-date"
+                    type="date"
+                    value={addRenewalDate}
+                    onChange={(e) => {
+                      setAddRenewalDate(e.target.value);
+                      setAddRenewalTouched(true);
+                    }}
+                    className="w-full px-3 py-2 text-xs font-mono rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 text-slate-900 dark:text-slate-100"
+                  />
+                </div>
+              </div>
+
+              <div className="rounded-xl p-3.5 bg-slate-50 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800 space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <label
+                    htmlFor="add-paid-package"
+                    className="text-xs font-semibold text-slate-800 dark:text-slate-200"
+                  >
+                    Package
+                  </label>
+                  {addPackage && (
+                    <button
+                      type="button"
+                      onClick={() => setAddPackage('')}
+                      className="text-[11px] font-medium text-slate-500 hover:text-rose-600 dark:hover:text-rose-400 cursor-pointer"
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
+
+                <div className="flex flex-wrap gap-1.5">
+                  {PAID_PACKAGE_PRESETS.map((preset) => {
+                    const active = addPackage.trim() === preset;
+                    return (
+                      <button
+                        key={preset}
+                        type="button"
+                        onClick={() => setAddPackage(preset)}
+                        className={`px-2.5 py-1 rounded-md text-xs font-medium border transition-colors cursor-pointer ${
+                          active
+                            ? 'bg-emerald-600 text-white border-emerald-600'
+                            : 'bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 border-slate-300 dark:border-slate-700 hover:border-emerald-500'
+                        }`}
+                      >
+                        {preset}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <input
+                  id="add-paid-package"
+                  data-testid="add-paid-package-input"
+                  type="text"
+                  value={addPackage}
+                  onChange={(e) => setAddPackage(e.target.value)}
+                  placeholder="Or type custom package / price tier (e.g., 1-Month Pro - 1500 BDT)"
+                  className="w-full px-3 py-2 text-xs rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
+                />
+              </div>
+
+              <div>
+                <label
+                  htmlFor="add-paid-notes"
+                  className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1"
+                >
+                  Notes (Optional)
+                </label>
+                <textarea
+                  id="add-paid-notes"
+                  rows={2}
+                  value={addNotes}
+                  onChange={(e) => setAddNotes(e.target.value)}
+                  placeholder="Optional payment reference or package notes..."
+                  className="w-full px-3 py-2 text-xs rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2.5 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setIsAddModalOpen(false)}
+                  className="px-4 py-2 rounded-lg border border-slate-300 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  data-testid="submit-add-paid-btn"
+                  className="px-5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition-colors cursor-pointer"
+                >
+                  Add Paid Customer
                 </button>
               </div>
             </form>

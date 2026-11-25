@@ -21,6 +21,7 @@ import {
   normalizePostUrl,
   normalizeVehicleType,
   parseDateToYmd,
+  sanitizePaidPackageName,
   toYmdString,
 } from './leadLogic';
 
@@ -31,6 +32,7 @@ export const FALLBACK_GOOGLE_SHEETS_WEBHOOK_URL =
 
 export const LEGACY_GOOGLE_SHEETS_WEBHOOK_URLS: ReadonlySet<string> = new Set([
   'https://script.google.com/macros/s/AKfycbwqMl23Bi200Idn267ySCDpKBY30b1FdYC8OWPOPK90neBvSPwWyn7Eq-VqV8ublfUD/exec',
+  'https://script.google.com/macros/s/AKfycbxRNhBGGML3PspDMwunGObPsdI45y6UU1uU1QTxtzg98yRQeFrtqrcAeXbywE1ZWJ4P/exec',
 ]);
 
 export function isLegacyWebhookUrl(value?: string | null): boolean {
@@ -1096,9 +1098,31 @@ function buildDeterministicPaidCustomerId(
   return `SHEET-PC-ROW-${index + 2}`;
 }
 
+function isPaidDeletedBySet(
+  record: { id?: string; leadId?: string; phone?: unknown },
+  deletedSet: ReadonlySet<string>
+): boolean {
+  if (deletedSet.size === 0) return false;
+  const id = typeof record.id === 'string' ? record.id.trim() : '';
+  if (id && deletedSet.has(id)) return true;
+  const leadId = typeof record.leadId === 'string' ? record.leadId.trim() : '';
+  const resolvedLeadId = leadId || (id.startsWith('PC-') ? id.slice(3) : '');
+  if (
+    resolvedLeadId &&
+    (deletedSet.has(resolvedLeadId) || deletedSet.has(`PC-${resolvedLeadId}`))
+  ) {
+    return true;
+  }
+  const corePhone = extractPhoneCoreKey(safePhoneString(record.phone));
+  if (corePhone && deletedSet.has(`SHEET-PC-${corePhone}`)) {
+    return true;
+  }
+  return false;
+}
+
 /**
  * Two-way merge of Paid Customers pulled from Google Sheets (`Paid_Customers` tab)
- * or Firestore into local state. Supports manual edits in Google Sheets (e.g., changing
+ * or Supabase into local state. Supports manual edits in Google Sheets (e.g., changing
  * Renewal Status or Renewal Date directly in the sheet) while preserving newer local updates.
  */
 export function mergeRemotePaidCustomers(
@@ -1113,13 +1137,20 @@ export function mergeRemotePaidCustomers(
   if (!remoteCustomers.length) {
     return deletedSet.size === 0
       ? localCustomers
-      : localCustomers.filter((c) => !deletedSet.has(c.id));
+      : localCustomers.filter((c) => !isPaidDeletedBySet(c, deletedSet));
   }
 
   const byId = new Map<string, PaidCustomer>();
+  const idByPhoneCore = new Map<string, string>();
+  const idByLeadId = new Map<string, string>();
   for (const c of localCustomers) {
-    if (!deletedSet.has(c.id)) {
+    if (!isPaidDeletedBySet(c, deletedSet)) {
       byId.set(c.id, c);
+      if (c.leadId) idByLeadId.set(c.leadId, c.id);
+      const core = extractPhoneCoreKey(c.phone);
+      if (core && !idByPhoneCore.has(core)) {
+        idByPhoneCore.set(core, c.id);
+      }
     }
   }
 
@@ -1138,14 +1169,18 @@ export function mergeRemotePaidCustomers(
 
     if (!explicitId && !phone && !customerName) return;
 
-    const id = explicitId || buildDeterministicPaidCustomerId(r, idx);
-    if (
-      deletedSet.has(id) ||
-      (leadId && (deletedSet.has(leadId) || deletedSet.has(`PC-${leadId}`)))
-    ) {
+    const candidateId = explicitId || buildDeterministicPaidCustomerId(r, idx);
+    if (isPaidDeletedBySet({ id: candidateId, leadId, phone }, deletedSet)) {
       return;
     }
 
+    const phoneCore = extractPhoneCoreKey(phone);
+    const fallbackMatchedId =
+      (!byId.has(candidateId) && leadId ? idByLeadId.get(leadId) : undefined) ||
+      (!byId.has(candidateId) && candidateId.startsWith('SHEET-PC-') && phoneCore
+        ? idByPhoneCore.get(phoneCore)
+        : undefined);
+    const id = fallbackMatchedId ?? candidateId;
     const existing = byId.get(id);
 
     const hasExplicitRemoteUpdatedAt = Boolean(
@@ -1189,9 +1224,12 @@ export function mergeRemotePaidCustomers(
       : existing?.renewalStatus ?? 'Active';
 
     const hasRemotePackage = typeof r.packageName === 'string';
+    const sanitizedRemotePackage = hasRemotePackage
+      ? sanitizePaidPackageName(r.packageName)
+      : '';
     const remotePackage = hasRemotePackage
-      ? r.packageName!.trim()
-      : existing?.packageName ?? '';
+      ? sanitizedRemotePackage
+      : sanitizePaidPackageName(existing?.packageName);
     const hasRemoteNotes = typeof r.notes === 'string';
     const remoteNotes = hasRemoteNotes ? r.notes! : existing?.notes ?? '';
 
@@ -1205,7 +1243,7 @@ export function mergeRemotePaidCustomers(
         confirmedDateRaw !== existing.confirmedDate ||
         renewalDateRaw !== existing.renewalDate ||
         remoteStatus !== existing.renewalStatus ||
-        (hasRemotePackage && remotePackage !== (existing.packageName ?? '')) ||
+        (hasRemotePackage && remotePackage !== sanitizePaidPackageName(existing.packageName)) ||
         (hasRemoteNotes && remoteNotes !== (existing.notes ?? ''));
 
       // Apply remote update if remote timestamp is strictly newer, OR if remote is not older
@@ -1245,9 +1283,9 @@ export function mergeRemotePaidCustomers(
         });
       }
     } else {
-      byId.set(id, {
+      const created: PaidCustomer = {
         id,
-        leadId: leadId || id.replace(/^PC-/, ''),
+        leadId: leadId || (id.startsWith('PC-MAN-') ? '' : id.replace(/^PC-/, '')),
         customerName: customerName || 'Paid Customer',
         phone,
         assignedAgentId: remoteAgentId,
@@ -1259,11 +1297,16 @@ export function mergeRemotePaidCustomers(
           typeof r.lastRenewedAt === 'string' && r.lastRenewedAt.trim()
             ? r.lastRenewedAt
             : null,
-        packageName: typeof r.packageName === 'string' ? r.packageName.trim() : '',
+        packageName: sanitizedRemotePackage,
         notes: typeof r.notes === 'string' ? r.notes : '',
         createdAt,
         updatedAt,
-      });
+      };
+      byId.set(id, created);
+      if (created.leadId) idByLeadId.set(created.leadId, id);
+      if (phoneCore && !idByPhoneCore.has(phoneCore)) {
+        idByPhoneCore.set(phoneCore, id);
+      }
     }
   });
 

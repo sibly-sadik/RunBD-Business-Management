@@ -365,6 +365,20 @@ function ensureKawsarPostHeaders_(kawsarSheet) {
   }
 }
 
+function sanitizePaidPackageName_(val) {
+  if (val === null || val === undefined || val instanceof Date) return '';
+  var trimmed = String(val).trim();
+  if (!trimmed) return '';
+  if (
+    /^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}/.test(trimmed) ||
+    /^\\d{4}-\\d{2}-\\d{2}\\s+\\d{2}:\\d{2}:\\d{2}/.test(trimmed) ||
+    /GMT[+-]\\d{4}|\\((?:[A-Za-z]+\\s+)+(?:Standard|Daylight|Summer)\\s+Time\\)|Coordinated Universal Time/i.test(trimmed)
+  ) {
+    return '';
+  }
+  return trimmed;
+}
+
 function ensurePaidCustomerHeaders_(paidSheet) {
   if (!paidSheet) return;
   if (paidSheet.getLastRow() < 1) {
@@ -373,7 +387,18 @@ function ensurePaidCustomerHeaders_(paidSheet) {
     return;
   }
   var lastCol = Math.max(10, paidSheet.getLastColumn());
-  if (lastCol < PAID_CUSTOMER_HEADERS.length) {
+  var hdr = paidSheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  var col11 = String(hdr[10] || '').trim().toLowerCase();
+  if (col11 === 'notes' && typeof paidSheet.insertColumnsBefore === 'function') {
+    paidSheet.insertColumnsBefore(11, 1);
+    lastCol = Math.max(lastCol + 1, PAID_CUSTOMER_HEADERS.length);
+    hdr = paidSheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  }
+  if (
+    col11 === 'notes' ||
+    lastCol < PAID_CUSTOMER_HEADERS.length ||
+    String(hdr[10] || '').trim().toLowerCase() !== 'package'
+  ) {
     paidSheet.getRange(1, 1, 1, PAID_CUSTOMER_HEADERS.length).setValues([PAID_CUSTOMER_HEADERS]);
     paidSheet.getRange(1, 1, 1, PAID_CUSTOMER_HEADERS.length).setFontWeight('bold');
   }
@@ -610,38 +635,63 @@ function doGet(e) {
     if (paidSheet && paidSheet.getLastRow() > 1) {
       var pcCols = Math.max(10, paidSheet.getLastColumn());
       var pcHeaderRow = paidSheet.getRange(1, 1, 1, pcCols).getValues()[0];
-      var pkgColIdx = -1;
-      var notesColIdx = -1;
+      var pcMap = {
+        id: 0,
+        leadId: 1,
+        name: 2,
+        phone: 3,
+        agent: 4,
+        confirmedDate: 5,
+        renewalDate: 6,
+        renewalStatus: 8,
+        updatedAt: 9,
+        pkg: -1,
+        notes: -1
+      };
       for (var phIdx = 0; phIdx < pcHeaderRow.length; phIdx++) {
         var phName = String(pcHeaderRow[phIdx] || '').trim().toLowerCase();
-        if (phName === 'package' || phName === 'amount / package') pkgColIdx = phIdx;
-        if (phName === 'notes') notesColIdx = phIdx;
+        if (phName === 'customer id' || phName === 'id') pcMap.id = phIdx;
+        else if (phName === 'lead id') pcMap.leadId = phIdx;
+        else if (phName === 'customer name' || phName === 'customer') pcMap.name = phIdx;
+        else if (phName === 'phone') pcMap.phone = phIdx;
+        else if (phName === 'assigned agent' || phName === 'agent') pcMap.agent = phIdx;
+        else if (phName === 'confirmed date') pcMap.confirmedDate = phIdx;
+        else if (phName === 'renewal date') pcMap.renewalDate = phIdx;
+        else if (phName === 'renewal status' || phName === 'status') pcMap.renewalStatus = phIdx;
+        else if (phName === 'updated at') pcMap.updatedAt = phIdx;
+        else if (phName === 'package' || phName === 'amount / package') pcMap.pkg = phIdx;
+        else if (phName === 'notes') pcMap.notes = phIdx;
       }
       var pcRows = paidSheet.getRange(2, 1, paidSheet.getLastRow() - 1, pcCols).getValues();
       for (var pcIdx = 0; pcIdx < pcRows.length; pcIdx++) {
         var pr = pcRows[pcIdx];
-        var pcPhone = String(pr[3] || '').replace(/^'+/, '').trim();
-        var pcName = String(pr[2] || '').trim();
-        if (!pr[0] && !pcPhone && !pcName) continue;
-        var pcId = pr[0] ? String(pr[0]).trim() : ('SHEET-PC-ROW-' + (pcIdx + 2));
-        var confYmd = toYmd_(String(pr[5] || '').replace(/^'+/, '')) || targetDate;
-        var renYmd = toYmd_(String(pr[6] || '').replace(/^'+/, ''));
+        var rawPcId = String(pr[pcMap.id] || '').trim();
+        var pcPhone = String(pr[pcMap.phone] || '').replace(/^'+/, '').trim();
+        var pcName = String(pr[pcMap.name] || '').trim();
+        if (!rawPcId && !pcPhone && !pcName) continue;
+        var pcId = rawPcId || ('SHEET-PC-ROW-' + (pcIdx + 2));
+        var confYmd = toYmd_(String(pr[pcMap.confirmedDate] || '').replace(/^'+/, '')) || targetDate;
+        var renYmd = toYmd_(String(pr[pcMap.renewalDate] || '').replace(/^'+/, ''));
+        var rawUpd = pr[pcMap.updatedAt];
+        var updDateObj = rawUpd ? new Date(rawUpd) : null;
+        var updIso = (updDateObj && !isNaN(updDateObj.getTime())) ? updDateObj.toISOString() : '';
+        var rawAgentStr = String(pr[pcMap.agent] || '').trim();
         var pcItem = {
           id: pcId,
-          leadId: String(pr[1] || '').trim(),
+          leadId: String(pr[pcMap.leadId] || '').trim(),
           customerName: pcName,
           phone: pcPhone,
-          assignedAgentName: String(pr[4] || '') === 'Unassigned' ? null : String(pr[4] || '').trim(),
+          assignedAgentName: (!rawAgentStr || rawAgentStr.toLowerCase() === 'unassigned') ? null : rawAgentStr,
           confirmedDate: confYmd,
           renewalDate: renYmd,
-          renewalStatus: String(pr[8] || 'Active').trim(),
-          updatedAt: pr[9] ? new Date(pr[9]).toISOString() : ''
+          renewalStatus: String(pr[pcMap.renewalStatus] || 'Active').trim(),
+          updatedAt: updIso
         };
-        if (pkgColIdx >= 0) {
-          pcItem.packageName = String(pr[pkgColIdx] || '').trim();
+        if (pcMap.pkg >= 0) {
+          pcItem.packageName = sanitizePaidPackageName_(pr[pcMap.pkg]);
         }
-        if (notesColIdx >= 0) {
-          pcItem.notes = String(pr[notesColIdx] || '').trim();
+        if (pcMap.notes >= 0) {
+          pcItem.notes = String(pr[pcMap.notes] || '').trim();
         }
         paidCustomers.push(pcItem);
       }
@@ -876,7 +926,7 @@ function doPost(e) {
         var olIdStr = String(ol.id || '').trim();
         var olPhoneKey = ol.phone ? ('PH:' + normalizePhoneKey_(ol.phone)) : '';
         if (
-          !isPaidRecordDeleted_({ id: 'PC-' + olIdStr, leadId: olIdStr }, deletedPaidSet) &&
+          !isPaidRecordDeleted_({ id: 'PC-' + olIdStr, leadId: olIdStr, phone: ol.phone || ol.rawPhone }, deletedPaidSet) &&
           !syncedPaidLeadKeys.has(olIdStr) &&
           (!olPhoneKey || !syncedPaidLeadKeys.has(olPhoneKey))
         ) {
@@ -884,7 +934,7 @@ function doPost(e) {
         }
       }
 
-      var paidSession = getSheetSession_(sessionCache, paidSheet, PAID_CUSTOMER_HEADERS.length, 'id');
+      var paidSession = getSheetSession_(sessionCache, paidSheet, PAID_CUSTOMER_HEADERS.length, 'paid');
       if (deletedPaidSet.size > 0) {
         deletePaidCustomerAcrossAllSheets_(ss, sheetsByName, sessionCache, paidSheet, null, deletedPaidSet);
       }
@@ -913,8 +963,8 @@ function doPost(e) {
         syncLeadAcrossCollectorTabsSession_(ss, sheetsByName, sessionCache, collectorSheets, payload.lead, prevLeadPhoneKey);
         var leadPaid = payload.paidCustomer || (payload.lead.status === 'Order Confirmed' ? buildPaidCustomerFromLead_(payload.lead) : null);
         if (leadPaid && !isPaidRecordDeleted_(leadPaid, deletedPaidSet)) {
-          var paidSessionL = getSheetSession_(sessionCache, paidSheet, PAID_CUSTOMER_HEADERS.length, 'id');
-          syncPaidBatchAcrossPaidTabs_(ss, sheetsByName, sessionCache, paidSessionL, paidAgentSheets, [leadPaid], leadLookup);
+          var paidSessionL = getSheetSession_(sessionCache, paidSheet, PAID_CUSTOMER_HEADERS.length, 'paid');
+          syncPaidBatchAcrossPaidTabs_(ss, sheetsByName, sessionCache, paidSessionL, paidAgentSheets, [leadPaid], leadLookup, prevLeadPhoneKey);
         }
       }
     } else if (payload.event === 'LEAD_DELETED') {
@@ -936,7 +986,7 @@ function doPost(e) {
       upsertCallLogInSession_(logsSessionSingle, payload.callLog);
       var callPaid = payload.paidCustomer || (payload.lead && payload.lead.status === 'Order Confirmed' ? buildPaidCustomerFromLead_(payload.lead) : null);
       if (callPaid && !isPaidRecordDeleted_(callPaid, deletedPaidSet)) {
-        var paidSessionC = getSheetSession_(sessionCache, paidSheet, PAID_CUSTOMER_HEADERS.length, 'id');
+        var paidSessionC = getSheetSession_(sessionCache, paidSheet, PAID_CUSTOMER_HEADERS.length, 'paid');
         syncPaidBatchAcrossPaidTabs_(ss, sheetsByName, sessionCache, paidSessionC, paidAgentSheets, [callPaid], leadLookup);
       }
     } else if (payload.event === 'KAWSAR_POST_LOGGED' && payload.post) {
@@ -944,8 +994,9 @@ function doPost(e) {
       var kawsarSessionSingle = getSheetSession_(sessionCache, kawsarSheet, KAWSAR_POST_HEADERS.length, 'id');
       upsertSessionRowById_(kawsarSessionSingle, String(p.id || '').trim(), formatKawsarPostRow_(p), '');
     } else if (payload.event === 'PAID_CUSTOMER_UPSERT' && payload.paidCustomer) {
-      var paidSessionP = getSheetSession_(sessionCache, paidSheet, PAID_CUSTOMER_HEADERS.length, 'id');
-      syncPaidBatchAcrossPaidTabs_(ss, sheetsByName, sessionCache, paidSessionP, paidAgentSheets, [payload.paidCustomer], leadLookup);
+      var paidSessionP = getSheetSession_(sessionCache, paidSheet, PAID_CUSTOMER_HEADERS.length, 'paid');
+      var prevPaidPhoneKey = payload.previousPhone ? normalizePhoneKey_(payload.previousPhone) : '';
+      syncPaidBatchAcrossPaidTabs_(ss, sheetsByName, sessionCache, paidSessionP, paidAgentSheets, [payload.paidCustomer], leadLookup, prevPaidPhoneKey);
     } else if (payload.event === 'PAID_CUSTOMER_DELETED') {
       deletePaidCustomerAcrossAllSheets_(
         ss,
@@ -1091,7 +1142,7 @@ function indexSessionRow_(session, idx, r) {
   if (session.indexMode === 'lead') {
     var pkLead = normalizePhoneKey_(r[2]);
     if (pkLead) pushToMapArray_(session.phoneIndex, pkLead, idx);
-  } else if (session.indexMode === 'paidAgent') {
+  } else if (session.indexMode === 'paidAgent' || session.indexMode === 'paid') {
     var pkPaid = normalizePhoneKey_(r[3]);
     if (pkPaid) pushToMapArray_(session.phoneIndex, pkPaid, idx);
   } else if (session.indexMode === 'callLog') {
@@ -1408,7 +1459,7 @@ function formatPaidCustomerRow(pc) {
     daysRemaining,
     pc.renewalStatus || 'Active',
     pc.updatedAt || new Date().toISOString(),
-    pc.packageName !== undefined ? String(pc.packageName || '').trim() : String(pc.amountOrPackage || '').trim(),
+    sanitizePaidPackageName_(pc.packageName !== undefined ? pc.packageName : pc.amountOrPackage),
     pc.notes || ''
   ];
 }
@@ -1428,12 +1479,8 @@ function formatPaidAgentRow_(pc, leadLookup) {
   var collector = String(pc.collectorName || (matchedLead && matchedLead.collectorName) || 'Unknown').trim();
   var agent = String(pc.assignedAgentName || (matchedLead && matchedLead.assignedAgentName) || 'Unassigned').trim();
   var cleanRenewal = String(pc.renewalDate || '').replace(/^'+/, '').trim();
-  var pkgVal = String(
-    pc.packageName ||
-    pc.amountOrPackage ||
-    pc.amount ||
-    (cleanRenewal ? ('1-Month Package (Renewal: ' + cleanRenewal + ')') : '1-Month Package')
-  ).trim();
+  var explicitPkg = sanitizePaidPackageName_(pc.packageName !== undefined ? pc.packageName : (pc.amountOrPackage || pc.amount));
+  var pkgVal = explicitPkg || (cleanRenewal ? ('1-Month Package (Renewal: ' + cleanRenewal + ')') : '1-Month Package');
   var notesVal = String(pc.notes || (matchedLead && (matchedLead.lastCallNotes || matchedLead.notes)) || '').trim();
   var updatedVal = pc.updatedAt || new Date().toISOString();
   return [
@@ -1453,7 +1500,9 @@ function formatPaidAgentRow_(pc, leadLookup) {
 function buildPaidKeys_(pc) {
   var targetId = String(pc.id || '').trim();
   var targetLeadId = String(pc.leadId || '').trim();
-  if (!targetLeadId && targetId.indexOf('PC-') === 0) targetLeadId = targetId.slice(3);
+  if (!targetLeadId && targetId.indexOf('PC-') === 0 && targetId.indexOf('PC-MAN-') !== 0) {
+    targetLeadId = targetId.slice(3);
+  }
   var keys = [];
   if (targetId) keys.push(targetId);
   if (targetLeadId) {
@@ -1464,7 +1513,7 @@ function buildPaidKeys_(pc) {
   return { keys: keys, phoneKey: targetPhoneKey };
 }
 
-function upsertPaidAgentSessionRow_(session, pc, rowData) {
+function upsertPaidAgentSessionRow_(session, pc, rowData, prevPhoneKey) {
   var info = buildPaidKeys_(pc);
   var matchIdx = -1;
   for (var i = 0; i < info.keys.length; i++) {
@@ -1473,6 +1522,9 @@ function upsertPaidAgentSessionRow_(session, pc, rowData) {
   }
   if (matchIdx === -1 && info.phoneKey) {
     matchIdx = findLiveIndex_(session.phoneIndex, info.phoneKey, session.deletedIndices);
+  }
+  if (matchIdx === -1 && prevPhoneKey) {
+    matchIdx = findLiveIndex_(session.phoneIndex, prevPhoneKey, session.deletedIndices);
   }
   if (matchIdx !== -1) {
     session.rows[matchIdx] = rowData;
@@ -1487,13 +1539,14 @@ function upsertPaidAgentSessionRow_(session, pc, rowData) {
   indexSessionRow_(session, newIdx, rowData);
 }
 
-function syncPaidBatchAcrossPaidTabs_(ss, sheetsByName, sessionCache, paidSession, paidAgentSheets, paidItems, leadLookup) {
+function syncPaidBatchAcrossPaidTabs_(ss, sheetsByName, sessionCache, paidSession, paidAgentSheets, paidItems, leadLookup, prevPhoneKey) {
   var itemsByTab = new Map();
   var descriptors = [];
   for (var i = 0; i < paidItems.length; i++) {
     var pc = paidItems[i];
     if (!pc) continue;
-    upsertSessionRowById_(paidSession, String(pc.id || '').trim(), formatPaidCustomerRow(pc), '');
+    var itemPhoneKey = normalizePhoneKey_(pc.phone) || prevPhoneKey || '';
+    upsertSessionRowById_(paidSession, String(pc.id || '').trim(), formatPaidCustomerRow(pc), prevPhoneKey || itemPhoneKey);
     var matchedLead = findMatchingLeadForPaid_(pc, leadLookup);
     var rawAgent = String(pc.assignedAgentName || (matchedLead && matchedLead.assignedAgentName) || '').trim();
     var targetAgent = (rawAgent && rawAgent.toLowerCase() !== 'unassigned') ? rawAgent : '';
@@ -1508,7 +1561,8 @@ function syncPaidBatchAcrossPaidTabs_(ss, sheetsByName, sessionCache, paidSessio
     }
     descriptors.push({
       keysInfo: buildPaidKeys_(pc),
-      targetTabName: targetTabName
+      targetTabName: targetTabName,
+      prevPhoneKey: prevPhoneKey || ''
     });
   }
 
@@ -1517,12 +1571,15 @@ function syncPaidBatchAcrossPaidTabs_(ss, sheetsByName, sessionCache, paidSessio
     var pSession = getSheetSession_(sessionCache, sheet, PAID_AGENT_TAB_HEADERS.length, 'paidAgent');
     var targetList = itemsByTab.get(sheetName) || [];
     for (var ti = 0; ti < targetList.length; ti++) {
-      upsertPaidAgentSessionRow_(pSession, targetList[ti].pc, targetList[ti].rowData);
+      upsertPaidAgentSessionRow_(pSession, targetList[ti].pc, targetList[ti].rowData, prevPhoneKey);
     }
     for (var di = 0; di < descriptors.length; di++) {
       var desc = descriptors[di];
       if (desc.targetTabName !== sheetName) {
         deleteSessionRowsByKeys_(pSession, desc.keysInfo.keys, desc.keysInfo.phoneKey);
+        if (desc.prevPhoneKey) {
+          deleteSessionRowsByKeys_(pSession, [], desc.prevPhoneKey);
+        }
       }
     }
   });
@@ -1617,6 +1674,10 @@ function buildDeletedPaidSet_(payload) {
       set.add(lId);
       set.add('PC-' + lId);
     }
+    if (dc.phone) {
+      var dcPhone = normalizePhoneKey_(dc.phone);
+      if (dcPhone) set.add('SHEET-PC-' + dcPhone);
+    }
   }
   return set;
 }
@@ -1625,24 +1686,38 @@ function isPaidRecordDeleted_(pc, deletedSet) {
   if (!pc || !deletedSet || deletedSet.size === 0) return false;
   var idStr = String(pc.id || '').trim();
   var leadIdStr = String(pc.leadId || '').trim();
-  if (!leadIdStr && idStr.indexOf('PC-') === 0) leadIdStr = idStr.slice(3);
+  if (!leadIdStr && idStr.indexOf('PC-') === 0 && idStr.indexOf('PC-MAN-') !== 0) {
+    leadIdStr = idStr.slice(3);
+  }
   if (idStr && deletedSet.has(idStr)) return true;
   if (leadIdStr && (deletedSet.has(leadIdStr) || deletedSet.has('PC-' + leadIdStr))) return true;
+  var pk = normalizePhoneKey_(pc.phone);
+  if (pk && deletedSet.has('SHEET-PC-' + pk)) return true;
   return false;
 }
 
 function deletePaidCustomerAcrossAllSheets_(ss, sheetsByName, sessionCache, paidSheet, deletedInfo, deletedSet) {
   var keysMap = new Map();
+  var phoneKeysMap = new Map();
   if (deletedSet && typeof deletedSet.forEach === 'function') {
     deletedSet.forEach(function(k) {
-      if (k) keysMap.set(k, true);
+      if (!k) return;
+      keysMap.set(k, true);
+      if (k.indexOf('SHEET-PC-') === 0) {
+        var extracted = k.slice(9);
+        if (/^\\d{8,15}$/.test(extracted)) {
+          phoneKeysMap.set(extracted, true);
+        }
+      }
     });
   }
   var phoneKey = '';
   if (deletedInfo) {
     var dId = String(deletedInfo.id || '').trim();
     var dLeadId = String(deletedInfo.leadId || '').trim();
-    if (!dLeadId && dId.indexOf('PC-') === 0) dLeadId = dId.slice(3);
+    if (!dLeadId && dId.indexOf('PC-') === 0 && dId.indexOf('PC-MAN-') !== 0) {
+      dLeadId = dId.slice(3);
+    }
     if (dId) keysMap.set(dId, true);
     if (dLeadId) {
       keysMap.set(dLeadId, true);
@@ -1650,14 +1725,16 @@ function deletePaidCustomerAcrossAllSheets_(ss, sheetsByName, sessionCache, paid
     }
     if (deletedInfo.phone) {
       phoneKey = normalizePhoneKey_(deletedInfo.phone);
+      if (phoneKey) phoneKeysMap.set(phoneKey, true);
     }
   }
   var keyList = Array.from(keysMap.keys());
-  if (keyList.length === 0 && !phoneKey) return;
+  var phoneKeyList = Array.from(phoneKeysMap.keys());
+  if (keyList.length === 0 && phoneKeyList.length === 0) return;
 
-  var paidSession = getSheetSession_(sessionCache, paidSheet, PAID_CUSTOMER_HEADERS.length, 'id');
+  var paidSession = getSheetSession_(sessionCache, paidSheet, PAID_CUSTOMER_HEADERS.length, 'paid');
   deleteSessionRowsByKeys_(paidSession, keyList, '');
-  // Also match Paid_Customers rows by Lead ID (col 1) or Phone (col 3) when deletedInfo is present
+  // Also match Paid_Customers rows by Lead ID (col 1) or Phone (col 3) when deletedInfo/tombstone is present
   for (var prIdx = 0; prIdx < paidSession.rows.length; prIdx++) {
     if (paidSession.deletedIndices.has(prIdx)) continue;
     var prow = paidSession.rows[prIdx];
@@ -1667,7 +1744,7 @@ function deletePaidCustomerAcrossAllSheets_(ss, sheetsByName, sessionCache, paid
     if (
       keysMap.has(rowCustId) ||
       (rowLeadId && (keysMap.has(rowLeadId) || keysMap.has('PC-' + rowLeadId))) ||
-      (phoneKey && rowPhoneKey && phoneKey === rowPhoneKey)
+      (rowPhoneKey && (phoneKeysMap.has(rowPhoneKey) || keysMap.has('SHEET-PC-' + rowPhoneKey)))
     ) {
       paidSession.deletedIndices.add(prIdx);
       paidSession.dirtyIndices.delete(prIdx);
@@ -1678,6 +1755,11 @@ function deletePaidCustomerAcrossAllSheets_(ss, sheetsByName, sessionCache, paid
     if (!isPaidAgentTabName_(sheetName)) return;
     var pSession = getSheetSession_(sessionCache, sheet, PAID_AGENT_TAB_HEADERS.length, 'paidAgent');
     deleteSessionRowsByKeys_(pSession, keyList, phoneKey);
+    for (var pkIdx = 0; pkIdx < phoneKeyList.length; pkIdx++) {
+      if (phoneKeyList[pkIdx] !== phoneKey) {
+        deleteSessionRowsByKeys_(pSession, [], phoneKeyList[pkIdx]);
+      }
+    }
   });
 }
 
@@ -1693,7 +1775,7 @@ function backfillPaidAgentTabsFromPaidSession_(ss, sheetsByName, sessionCache, p
     var pcPhone = String(pr[3] || '').replace(/^'+/, '').trim();
     var pcAgent = String(pr[4] || '').trim();
     if ((!pcId && !pcPhone) || !pcAgent || pcAgent.toLowerCase() === 'unassigned') continue;
-    if (isPaidRecordDeleted_({ id: pcId, leadId: pcLeadId }, deletedPaidSet)) continue;
+    if (isPaidRecordDeleted_({ id: pcId, leadId: pcLeadId, phone: pcPhone }, deletedPaidSet)) continue;
     var tabName = getPaidAgentTabName_(pcAgent);
     if (!paidAgentSheets[tabName]) {
       paidAgentSheets[tabName] = getOrCreateSheetCached_(ss, sheetsByName, tabName, PAID_AGENT_TAB_HEADERS);
@@ -1708,7 +1790,7 @@ function backfillPaidAgentTabsFromPaidSession_(ss, sheetsByName, sessionCache, p
       renewalDate: String(pr[6] || '').replace(/^'+/, '').trim(),
       renewalStatus: String(pr[8] || 'Active').trim(),
       updatedAt: pr[9] || '',
-      packageName: String(pr[10] || '').trim(),
+      packageName: sanitizePaidPackageName_(pr[10]),
       notes: String(pr[11] || '').trim()
     };
     if (!grouped.has(tabName)) grouped.set(tabName, []);
