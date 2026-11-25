@@ -85,6 +85,7 @@ function rowToPaidCustomer(row: typeof paidCustomers.$inferSelect): PaidCustomer
     renewalDate: row.renewalDate,
     renewalStatus: sanitizeRenewalStatus(row.renewalStatus),
     lastRenewedAt: row.lastRenewedAt,
+    packageName: row.packageName ?? '',
     notes: row.notes,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -189,6 +190,7 @@ function buildPaidInsertValues(
     renewalDate: customer.renewalDate,
     renewalStatus: sanitizeRenewalStatus(customer.renewalStatus),
     lastRenewedAt: customer.lastRenewedAt ?? null,
+    packageName: (customer.packageName ?? '').trim(),
     notes: customer.notes ?? '',
     createdAt: customer.createdAt,
     updatedAt: customer.updatedAt,
@@ -753,6 +755,7 @@ export async function upsertPaidCustomerInDb(
           renewalDate: values.renewalDate,
           renewalStatus: values.renewalStatus,
           lastRenewedAt: values.lastRenewedAt,
+          packageName: values.packageName,
           notes: values.notes,
           updatedAt: values.updatedAt,
         },
@@ -760,6 +763,24 @@ export async function upsertPaidCustomerInDb(
   } catch (error) {
     console.error('Database query failed (upsertPaidCustomerInDb):', error);
     throw new Error('Failed to save paid customer to database.', { cause: error });
+  }
+}
+
+export async function deleteLeadInDb(leadId: string): Promise<void> {
+  try {
+    await db.delete(leads).where(eq(leads.id, leadId));
+  } catch (error) {
+    console.error('Database query failed (deleteLeadInDb):', error);
+    throw new Error('Failed to delete lead from database.', { cause: error });
+  }
+}
+
+export async function deletePaidCustomerInDb(customerId: string): Promise<void> {
+  try {
+    await db.delete(paidCustomers).where(eq(paidCustomers.id, customerId));
+  } catch (error) {
+    console.error('Database query failed (deletePaidCustomerInDb):', error);
+    throw new Error('Failed to delete paid customer from database.', { cause: error });
   }
 }
 
@@ -785,6 +806,7 @@ export async function upsertPaidCustomersBatchInDb(
               renewalDate: values.renewalDate,
               renewalStatus: values.renewalStatus,
               lastRenewedAt: values.lastRenewedAt,
+              packageName: values.packageName,
               notes: values.notes,
               updatedAt: values.updatedAt,
             },
@@ -1013,6 +1035,7 @@ export async function syncPulledRecordsToDb(input: {
                 renewalDate: values.renewalDate,
                 renewalStatus: values.renewalStatus,
                 lastRenewedAt: values.lastRenewedAt,
+                packageName: values.packageName,
                 notes: values.notes,
                 updatedAt: values.updatedAt,
               },

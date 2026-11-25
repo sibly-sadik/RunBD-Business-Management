@@ -142,7 +142,9 @@ export function enrichPaidCustomersForSheetSync(
       existingExtra.facebookLink?.trim() || matchedLead?.facebookLink || '';
     const collectorName =
       existingExtra.collectorName?.trim() || matchedLead?.collectorName || 'Unknown';
+    const explicitPackage = customer.packageName?.trim() || '';
     const amountOrPackage =
+      explicitPackage ||
       existingExtra.amountOrPackage?.trim() ||
       (customer.renewalDate
         ? `1-Month Package (Renewal: ${customer.renewalDate})`
@@ -150,6 +152,7 @@ export function enrichPaidCustomersForSheetSync(
 
     return {
       ...customer,
+      packageName: explicitPackage,
       facebookLink,
       collectorName,
       amountOrPackage,
@@ -769,19 +772,43 @@ function buildDeterministicPostId(r: Partial<ContentPost>, index: number): strin
   return `SHEET-PST-ROW-${index + 2}`;
 }
 
+function isLeadDeletedBySet(
+  lead: { id?: string | null; phone?: string | null; rawPhone?: string | null },
+  deletedSet: ReadonlySet<string>
+): boolean {
+  if (deletedSet.size === 0) return false;
+  const id = String(lead.id || '').trim();
+  if (id && deletedSet.has(id)) return true;
+  const core = extractPhoneCoreKey(safePhoneString(lead.rawPhone ?? lead.phone));
+  if (core && deletedSet.has(`SHEET-PH-${core}`)) return true;
+  return false;
+}
+
 /**
  * Merges remote leads pulled from Google Sheets into local leads,
- * deduplicating cleanly by unique `id` and normalizing phone & Facebook fields.
+ * deduplicating cleanly by unique `id` and normalizing phone & Facebook fields,
+ * while respecting deleted lead tombstone IDs so deleted leads never resurrect.
  */
 export function mergeRemoteLeads(
   localLeads: Lead[],
-  remoteLeads: Partial<Lead>[]
+  remoteLeads: Partial<Lead>[],
+  deletedIds: string[] = []
 ): Lead[] {
-  if (!remoteLeads.length) return localLeads;
+  const deletedSet = new Set(
+    deletedIds.map((id) => String(id || '').trim()).filter(Boolean)
+  );
+
+  if (!remoteLeads.length) {
+    return deletedSet.size === 0
+      ? localLeads
+      : localLeads.filter((l) => !isLeadDeletedBySet(l, deletedSet));
+  }
 
   const byId = new Map<string, Lead>();
   for (const lead of localLeads) {
-    byId.set(lead.id, lead);
+    if (!isLeadDeletedBySet(lead, deletedSet)) {
+      byId.set(lead.id, lead);
+    }
   }
 
   remoteLeads.forEach((r, idx) => {
@@ -795,6 +822,9 @@ export function mergeRemoteLeads(
     if (!explicitId && !phone && !facebookLink && !customerName) return;
 
     const id = explicitId || buildDeterministicLeadId(r, idx);
+    if (deletedSet.has(id) || isLeadDeletedBySet({ id, phone, rawPhone }, deletedSet)) {
+      return;
+    }
     const normalizedFacebookLink =
       r.normalizedFacebookLink?.trim() || normalizeFacebookUrl(facebookLink);
     const existing = byId.get(id);
@@ -927,7 +957,7 @@ export function mergeRemoteCallLogs(
           leadId: typeof r.leadId === 'string' && r.leadId.trim() ? r.leadId.trim() : existing.leadId,
           customerName:
             typeof r.customerName === 'string' && r.customerName.trim()
-              ? r.customerName.trim()
+              ? normalizeVehicleType(r.customerName) || r.customerName.trim()
               : existing.customerName,
           phone: safePhoneString(r.phone) || existing.phone,
           agentId:
@@ -953,7 +983,10 @@ export function mergeRemoteCallLogs(
     byId.set(id, {
       id,
       leadId: typeof r.leadId === 'string' ? r.leadId.trim() : '',
-      customerName: typeof r.customerName === 'string' ? r.customerName.trim() : '',
+      customerName:
+        typeof r.customerName === 'string'
+          ? normalizeVehicleType(r.customerName) || r.customerName.trim()
+          : '',
       phone: safePhoneString(r.phone),
       agentId:
         typeof r.agentId === 'string' && r.agentId.trim()
@@ -1070,13 +1103,24 @@ function buildDeterministicPaidCustomerId(
  */
 export function mergeRemotePaidCustomers(
   localCustomers: PaidCustomer[],
-  remoteCustomers: Partial<PaidCustomer>[]
+  remoteCustomers: Partial<PaidCustomer>[],
+  deletedIds: string[] = []
 ): PaidCustomer[] {
-  if (!remoteCustomers.length) return localCustomers;
+  const deletedSet = new Set(
+    deletedIds.map((id) => String(id || '').trim()).filter(Boolean)
+  );
+
+  if (!remoteCustomers.length) {
+    return deletedSet.size === 0
+      ? localCustomers
+      : localCustomers.filter((c) => !deletedSet.has(c.id));
+  }
 
   const byId = new Map<string, PaidCustomer>();
   for (const c of localCustomers) {
-    byId.set(c.id, c);
+    if (!deletedSet.has(c.id)) {
+      byId.set(c.id, c);
+    }
   }
 
   const now = new Date();
@@ -1085,13 +1129,23 @@ export function mergeRemotePaidCustomers(
   remoteCustomers.forEach((r, idx) => {
     const rawPhone = safePhoneString(r.phone);
     const phone = normalizeBdPhone(rawPhone) || rawPhone;
-    const customerName = typeof r.customerName === 'string' ? r.customerName.trim() : '';
+    const customerName =
+      typeof r.customerName === 'string'
+        ? normalizeVehicleType(r.customerName) || r.customerName.trim()
+        : '';
     const explicitId = typeof r.id === 'string' ? r.id.trim() : '';
     const leadId = typeof r.leadId === 'string' ? r.leadId.trim() : '';
 
     if (!explicitId && !phone && !customerName) return;
 
     const id = explicitId || buildDeterministicPaidCustomerId(r, idx);
+    if (
+      deletedSet.has(id) ||
+      (leadId && (deletedSet.has(leadId) || deletedSet.has(`PC-${leadId}`)))
+    ) {
+      return;
+    }
+
     const existing = byId.get(id);
 
     const hasExplicitRemoteUpdatedAt = Boolean(
@@ -1134,6 +1188,13 @@ export function mergeRemotePaidCustomers(
       ? normalizeRenewalStatus(r.renewalStatus)
       : existing?.renewalStatus ?? 'Active';
 
+    const hasRemotePackage = typeof r.packageName === 'string';
+    const remotePackage = hasRemotePackage
+      ? r.packageName!.trim()
+      : existing?.packageName ?? '';
+    const hasRemoteNotes = typeof r.notes === 'string';
+    const remoteNotes = hasRemoteNotes ? r.notes! : existing?.notes ?? '';
+
     if (existing) {
       const existingTime = Date.parse(existing.updatedAt || existing.createdAt) || 0;
       const remoteTime = Date.parse(updatedAt) || 0;
@@ -1143,7 +1204,9 @@ export function mergeRemotePaidCustomers(
         remoteAgentRaw !== existing.assignedAgentName ||
         confirmedDateRaw !== existing.confirmedDate ||
         renewalDateRaw !== existing.renewalDate ||
-        remoteStatus !== existing.renewalStatus;
+        remoteStatus !== existing.renewalStatus ||
+        (hasRemotePackage && remotePackage !== (existing.packageName ?? '')) ||
+        (hasRemoteNotes && remoteNotes !== (existing.notes ?? ''));
 
       // Apply remote update if remote timestamp is strictly newer, OR if remote is not older
       // (same timestamp / manual sheet edit without touching Updated At) and sheet fields changed.
@@ -1176,7 +1239,8 @@ export function mergeRemotePaidCustomers(
               : remoteStatus === 'Renewed' && existing.renewalStatus !== 'Renewed'
               ? effectiveUpdatedAt
               : existing.lastRenewedAt,
-          notes: typeof r.notes === 'string' ? r.notes : existing.notes,
+          packageName: remotePackage,
+          notes: remoteNotes,
           updatedAt: effectiveUpdatedAt,
         });
       }
@@ -1195,6 +1259,7 @@ export function mergeRemotePaidCustomers(
           typeof r.lastRenewedAt === 'string' && r.lastRenewedAt.trim()
             ? r.lastRenewedAt
             : null,
+        packageName: typeof r.packageName === 'string' ? r.packageName.trim() : '',
         notes: typeof r.notes === 'string' ? r.notes : '',
         createdAt,
         updatedAt,

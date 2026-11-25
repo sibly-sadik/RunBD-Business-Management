@@ -51,6 +51,8 @@ const STORAGE_KEYS = {
   DUPLICATES: 'runbd_duplicates_v2',
   CONTENT_POSTS: 'runbd_content_posts_v2',
   PAID_CUSTOMERS: 'runbd_paid_customers_v1',
+  DELETED_PAID_IDS: 'runbd_deleted_paid_ids_v1',
+  DELETED_LEAD_IDS: 'runbd_deleted_lead_ids_v1',
   SETTINGS: 'runbd_settings_v2',
   WEBHOOK_VERSION: 'runbd_webhook_version_v1',
   SESSION_USER_ID: 'runbd_session_user_v2',
@@ -110,6 +112,76 @@ export const storage = {
     safeRead<PaidCustomer[]>(STORAGE_KEYS.PAID_CUSTOMERS, createSeedPaidCustomers),
   savePaidCustomers: (customers: PaidCustomer[]) =>
     safeWrite(STORAGE_KEYS.PAID_CUSTOMERS, customers),
+
+  getDeletedPaidCustomerIds: (): string[] =>
+    safeRead<string[]>(STORAGE_KEYS.DELETED_PAID_IDS, () => []),
+  saveDeletedPaidCustomerIds: (ids: string[]) =>
+    safeWrite(
+      STORAGE_KEYS.DELETED_PAID_IDS,
+      Array.from(
+        new Set(
+          ids
+            .map((id) => String(id || '').trim())
+            .filter(Boolean)
+        )
+      )
+    ),
+  addDeletedPaidCustomerIds: (ids: string[]) => {
+    const existing = safeRead<string[]>(STORAGE_KEYS.DELETED_PAID_IDS, () => []);
+    const merged = Array.from(
+      new Set(
+        [...existing, ...ids]
+          .map((id) => String(id || '').trim())
+          .filter(Boolean)
+      )
+    );
+    safeWrite(STORAGE_KEYS.DELETED_PAID_IDS, merged);
+    return merged;
+  },
+  removeDeletedPaidCustomerIds: (ids: string[]) => {
+    const toRemove = new Set(
+      ids.map((id) => String(id || '').trim()).filter(Boolean)
+    );
+    const existing = safeRead<string[]>(STORAGE_KEYS.DELETED_PAID_IDS, () => []);
+    const next = existing.filter((id) => !toRemove.has(id));
+    safeWrite(STORAGE_KEYS.DELETED_PAID_IDS, next);
+    return next;
+  },
+
+  getDeletedLeadIds: (): string[] =>
+    safeRead<string[]>(STORAGE_KEYS.DELETED_LEAD_IDS, () => []),
+  saveDeletedLeadIds: (ids: string[]) =>
+    safeWrite(
+      STORAGE_KEYS.DELETED_LEAD_IDS,
+      Array.from(
+        new Set(
+          ids
+            .map((id) => String(id || '').trim())
+            .filter(Boolean)
+        )
+      )
+    ),
+  addDeletedLeadIds: (ids: string[]) => {
+    const existing = safeRead<string[]>(STORAGE_KEYS.DELETED_LEAD_IDS, () => []);
+    const merged = Array.from(
+      new Set(
+        [...existing, ...ids]
+          .map((id) => String(id || '').trim())
+          .filter(Boolean)
+      )
+    );
+    safeWrite(STORAGE_KEYS.DELETED_LEAD_IDS, merged);
+    return merged;
+  },
+  removeDeletedLeadIds: (ids: string[]) => {
+    const toRemove = new Set(
+      ids.map((id) => String(id || '').trim()).filter(Boolean)
+    );
+    const existing = safeRead<string[]>(STORAGE_KEYS.DELETED_LEAD_IDS, () => []);
+    const next = existing.filter((id) => !toRemove.has(id));
+    safeWrite(STORAGE_KEYS.DELETED_LEAD_IDS, next);
+    return next;
+  },
 
   getTeamMembers: (): User[] =>
     safeRead<User[]>(STORAGE_KEYS.TEAM_MEMBERS, () => DEMO_USERS.map(stripUserPassword)).map(
@@ -227,13 +299,26 @@ export interface SheetsSyncPayload {
     | 'TEST_SYNC'
     | 'FULL_SYNC'
     | 'LEAD_UPSERT'
+    | 'LEAD_UPDATED'
+    | 'LEAD_DELETED'
     | 'LEADS_BATCH_UPSERT'
     | 'CALL_LOGGED'
     | 'KAWSAR_POST_LOGGED'
     | 'PAID_CUSTOMER_UPSERT'
+    | 'PAID_CUSTOMER_DELETED'
     | 'CONNECT_CHECK';
   lead?: Lead;
   leads?: Lead[];
+  previousAgentName?: string | null;
+  previousCollectorName?: string | null;
+  previousPhone?: string;
+  deletedLead?: {
+    id: string;
+    phone?: string;
+    collectorName?: string | null;
+    assignedAgentName?: string | null;
+  };
+  deletedLeadIds?: string[];
   callLog?: CallLog;
   callLogs?: CallLog[];
   post?: ContentPost;
@@ -250,6 +335,13 @@ export interface SheetsSyncPayload {
       amountOrPackage?: string;
     }
   >;
+  deletedPaidCustomer?: {
+    id: string;
+    leadId?: string;
+    phone?: string;
+    assignedAgentName?: string | null;
+  };
+  deletedPaidCustomerIds?: string[];
   collectorNames?: string[];
   agentNames?: string[];
   skipBackfill?: boolean;
@@ -462,6 +554,8 @@ export async function pushChunkedSheetsSync(
     callLogs?: CallLog[];
     contentPosts?: ContentPost[];
     paidCustomers?: SyncPaidCustomerPayload[];
+    deletedPaidCustomerIds?: string[];
+    deletedLeadIds?: string[];
     collectorNames?: string[];
     agentNames?: string[];
     dailySummary?: SheetsSyncPayload['dailySummary'];
@@ -527,6 +621,12 @@ export async function pushChunkedSheetsSync(
         ? {
             agentNames: input.agentNames,
             collectorNames: input.collectorNames,
+            ...(input.deletedPaidCustomerIds && input.deletedPaidCustomerIds.length > 0
+              ? { deletedPaidCustomerIds: input.deletedPaidCustomerIds }
+              : {}),
+            ...(input.deletedLeadIds && input.deletedLeadIds.length > 0
+              ? { deletedLeadIds: input.deletedLeadIds }
+              : {}),
           }
         : {}),
       skipBackfill: chunk.skipBackfill,

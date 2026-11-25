@@ -21,16 +21,24 @@ export const CALL_STATUSES: CallStatus[] = [
   'Wrong Number',
 ];
 
-export type VehicleType = 'Car' | 'Bike' | 'Truck' | 'Bus' | 'Pickup' | 'Workshop' | 'Accessories' | 'Rent a Car';
+export type VehicleType =
+  | 'Car'
+  | 'Bike'
+  | 'Truck'
+  | 'Bus'
+  | 'Pickup Truck'
+  | 'Workshop'
+  | 'Accessories'
+  | 'Rent a Car';
 
 export const VEHICLE_TYPES: VehicleType[] = [
   'Car',
   'Bike',
   'Truck',
   'Bus',
-  'Pickup'
-  'Workshop'
-  'Accessories'
+  'Pickup Truck',
+  'Workshop',
+  'Accessories',
   'Rent a Car',
 ];
 
@@ -85,6 +93,8 @@ export type AuditAction =
   | 'LOGIN'
   | 'LOGOUT'
   | 'LEAD_CREATED'
+  | 'LEAD_UPDATED'
+  | 'LEAD_DELETED'
   | 'BULK_IMPORT'
   | 'STATUS_UPDATED'
   | 'LEAD_REASSIGNED'
@@ -93,6 +103,8 @@ export type AuditAction =
   | 'POST_LINK_LOGGED'
   | 'PAID_CUSTOMER_ADDED'
   | 'PAID_CUSTOMER_RENEWED'
+  | 'PAID_CUSTOMER_UPDATED'
+  | 'PAID_CUSTOMER_DELETED'
   | 'TEAM_MEMBER_ADDED'
   | 'TEAM_MEMBER_UPDATED'
   | 'TEAM_MEMBER_PASSWORD_RESET'
@@ -217,6 +229,7 @@ export interface PaidCustomer {
   renewalDate: string; // YYYY-MM-DD (Confirmed Date + 30 days)
   renewalStatus: RenewalStatus;
   lastRenewedAt: string | null;
+  packageName?: string; // Assigned subscription/service package tier
   notes: string;
   createdAt: string; // ISO string
   updatedAt: string; // ISO string

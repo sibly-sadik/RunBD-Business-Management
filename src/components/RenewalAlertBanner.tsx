@@ -4,7 +4,7 @@ import { DueRenewalItem, formatBdPhoneDisplay } from '../utils/leadLogic';
 interface RenewalAlertBannerProps {
   dueItems: DueRenewalItem[];
   audience: 'admin' | 'agent';
-  onMarkRenewed: (customerId: string) => void;
+  onMarkRenewed?: (customerId: string) => void;
   onViewAllPaidCustomers: () => void;
 }
 
@@ -49,7 +49,7 @@ export function RenewalAlertBanner({
             <p className="text-xs text-amber-900/80 dark:text-amber-200/80 mt-0.5">
               {audience === 'admin'
                 ? 'Active paid customers within 2 days of completing their 1-month subscription cycle.'
-                : 'Your assigned paid customers within 2 days of their 1-month renewal date. Contact them to renew.'}
+                : 'Your assigned paid customers within 2 days of their 1-month renewal date. Contact them and notify Admin to confirm renewal.'}
             </p>
           </div>
         </div>
@@ -80,6 +80,11 @@ export function RenewalAlertBanner({
                   <PhoneCall className="w-3 h-3 text-emerald-600 dark:text-emerald-400 shrink-0" />
                   <span>{formatBdPhoneDisplay(customer.phone)}</span>
                 </p>
+                {customer.packageName?.trim() && (
+                  <p className="mt-1 inline-flex items-center px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 text-[11px] font-medium">
+                    {customer.packageName.trim()}
+                  </p>
+                )}
               </div>
               <span
                 className={`text-[11px] font-mono font-semibold tabular-nums px-2 py-0.5 rounded whitespace-nowrap shrink-0 ${
@@ -103,15 +108,17 @@ export function RenewalAlertBanner({
               )}
             </div>
 
-            <button
-              type="button"
-              data-testid={`banner-renew-${customer.id}`}
-              onClick={() => onMarkRenewed(customer.id)}
-              className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition-colors cursor-pointer"
-            >
-              <CheckCircle2 className="w-3.5 h-3.5" />
-              <span>Mark as Renewed (+1 Month)</span>
-            </button>
+            {audience === 'admin' && onMarkRenewed && (
+              <button
+                type="button"
+                data-testid={`banner-renew-${customer.id}`}
+                onClick={() => onMarkRenewed(customer.id)}
+                className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition-colors cursor-pointer"
+              >
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                <span>Mark as Renewed (+1 Month)</span>
+              </button>
+            )}
           </div>
         ))}
       </div>

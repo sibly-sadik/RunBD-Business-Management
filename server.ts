@@ -4,6 +4,8 @@ import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
 import express from 'express';
 import {
+  deleteLeadInDb,
+  deletePaidCustomerInDb,
   findLeadDuplicateInDb,
   findPostDuplicateInDb,
   getBootstrapForRole,
@@ -444,6 +446,27 @@ app.patch('/api/leads/:id', requireAuth, async (req: AuthRequest, res) => {
   }
 });
 
+// Delete lead (Admin / Supervisor only)
+app.delete('/api/leads/:id', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const user = req.authUser!;
+    if (user.role !== 'admin') {
+      res.status(403).json({ error: 'Only Admin / Supervisor can delete leads.' });
+      return;
+    }
+    const leadId = String(req.params.id ?? '').trim();
+    if (!leadId) {
+      res.status(400).json({ error: 'Valid lead ID is required.' });
+      return;
+    }
+    await deleteLeadInDb(leadId);
+    res.json({ ok: true });
+  } catch (error) {
+    console.error('Failed to delete lead:', error);
+    res.status(500).json({ error: 'Failed to delete lead from database.' });
+  }
+});
+
 // Log call + update lead + upsert Paid Customer atomically
 app.post('/api/call-logs', requireAuth, async (req: AuthRequest, res) => {
   try {
@@ -568,6 +591,27 @@ app.post('/api/paid-customers/upsert', requireAuth, async (req: AuthRequest, res
   } catch (error) {
     console.error('Failed to save paid customer:', error);
     res.status(500).json({ error: 'Failed to save paid customer to database.' });
+  }
+});
+
+// Delete Paid Customer (Admin / Supervisor only)
+app.delete('/api/paid-customers/:id', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const user = req.authUser!;
+    if (user.role !== 'admin') {
+      res.status(403).json({ error: 'Only Admin / Supervisor can delete paid customers.' });
+      return;
+    }
+    const customerId = String(req.params.id ?? '').trim();
+    if (!customerId) {
+      res.status(400).json({ error: 'Valid paid customer ID is required.' });
+      return;
+    }
+    await deletePaidCustomerInDb(customerId);
+    res.json({ ok: true });
+  } catch (error) {
+    console.error('Failed to delete paid customer:', error);
+    res.status(500).json({ error: 'Failed to delete paid customer from database.' });
   }
 });
 

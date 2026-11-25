@@ -292,12 +292,15 @@ export function normalizeFacebookUrl(raw: string): string {
 export function findDuplicateLead(
   existingLeads: Lead[],
   rawPhone: string,
-  facebookLink: string
+  facebookLink: string,
+  options?: { excludeLeadId?: string }
 ): { lead: Lead; matchedBy: 'phone' | 'facebook' } | null {
   const corePhone = extractPhoneCoreKey(rawPhone);
   const normFb = normalizeFacebookUrl(facebookLink);
+  const excludeId = options?.excludeLeadId?.trim();
 
   for (const lead of existingLeads) {
+    if (excludeId && lead.id === excludeId) continue;
     const existingCore = extractPhoneCoreKey(lead.phone || lead.rawPhone);
     if (corePhone && existingCore && corePhone === existingCore) {
       return { lead, matchedBy: 'phone' };
@@ -344,6 +347,33 @@ export function normalizeVehicleType(raw: string | null | undefined): string {
 if (key === 'workshop' || key === 'Workshops') return 'Workshop';
 if (key === 'accessories' || key === 'Accessories') return 'Accessories';
 if (key === 'rent a car' || key === 'Rent a Car') return 'Rent a Car';   
+  }
+  if (
+    key === 'workshop' ||
+    key === 'workshops' ||
+    key === 'work shop' ||
+    key === 'work-shop'
+  ) {
+    return 'Workshop';
+  }
+  if (
+    key === 'accessories' ||
+    key === 'accessory' ||
+    key === 'accesories' ||
+    key === 'acessories' ||
+    key === 'accesory'
+  ) {
+    return 'Accessories';
+  }
+  if (
+    key === 'rent a car' ||
+    key === 'rent-a-car' ||
+    key === 'rentacar' ||
+    key === 'rent a cars' ||
+    key === 'rent-a-cars' ||
+    key === 'rental car'
+  ) {
+    return 'Rent a Car';
   }
 
   return cleaned;
@@ -1924,6 +1954,120 @@ export function computeEffectiveRenewalStatus(
   return customer.renewalStatus === 'Renewed' ? 'Renewed' : 'Active';
 }
 
+export const PAID_PACKAGE_PRESETS = [
+  '1-Month Basic',
+  '1-Month Standard',
+  '1-Month Premium',
+  '3-Month Package',
+  '6-Month Package',
+  '1-Year Package',
+] as const;
+
+export interface PaidCustomerEditInput {
+  customerName: string;
+  phone: string;
+  assignedAgentId: string | null;
+  assignedAgentName: string | null;
+  confirmedDate: string;
+  renewalDate: string;
+  renewalStatus: RenewalStatus;
+  packageName: string;
+  notes: string;
+}
+
+/**
+ * Updates editable Paid Customer fields (including assigned Package tier) cleanly,
+ * normalizing BD phone numbers and YYYY-MM-DD dates while refreshing `updatedAt`.
+ */
+export function updatePaidCustomerDetails(
+  customer: PaidCustomer,
+  updates: PaidCustomerEditInput,
+  now: Date = new Date()
+): PaidCustomer {
+  const nowIso = now.toISOString();
+  const normalizedPhone = normalizeBdPhone(updates.phone) || updates.phone.trim() || customer.phone;
+  const confirmedDate = toYmdString(updates.confirmedDate, now);
+  const renewalDate = toYmdString(updates.renewalDate, now);
+  const nextStatus = updates.renewalStatus;
+
+  return {
+    ...customer,
+    customerName: updates.customerName.trim() || customer.customerName,
+    phone: normalizedPhone,
+    assignedAgentId: updates.assignedAgentId ?? null,
+    assignedAgentName: updates.assignedAgentName?.trim() || null,
+    confirmedDate,
+    renewalDate,
+    renewalStatus: nextStatus,
+    lastRenewedAt:
+      nextStatus === 'Renewed' && (customer.renewalStatus !== 'Renewed' || !customer.lastRenewedAt)
+        ? nowIso
+        : customer.lastRenewedAt,
+    packageName: updates.packageName.trim(),
+    notes: updates.notes.trim(),
+    updatedAt: nowIso,
+  };
+}
+
+export interface LeadEditInput {
+  customerName: string;
+  phone: string;
+  facebookLink: string;
+  assignedAgentId: string | null;
+  assignedAgentName: string | null;
+  status: CallStatus;
+  notes: string;
+}
+
+/**
+ * Applies Admin edits to an existing collected Lead (normalizing vehicle type,
+ * Bangladeshi phone number, Facebook URL, assigned agent, status, and notes).
+ */
+export function updateLeadDetails(
+  lead: Lead,
+  updates: LeadEditInput,
+  now: Date = new Date()
+): Lead {
+  const nowIso = now.toISOString();
+  const trimmedName = updates.customerName.trim();
+  const normalizedName =
+    normalizeVehicleType(trimmedName) || trimmedName || lead.customerName;
+  const normalizedPhone =
+    normalizeBdPhone(updates.phone) || updates.phone.trim() || lead.phone;
+  const trimmedFb = updates.facebookLink.trim();
+  const normalizedFb = trimmedFb ? normalizeFacebookUrl(trimmedFb) : '';
+  const trimmedNotes = updates.notes.trim();
+  const trimmedAgentName =
+    updates.assignedAgentName &&
+    updates.assignedAgentName.trim().toLowerCase() !== 'unassigned'
+      ? updates.assignedAgentName.trim()
+      : null;
+
+  const previousNotes = lead.notes.trim();
+  const previousLastCallNotes = lead.lastCallNotes.trim();
+  const nextLastCallNotes =
+    previousLastCallNotes && previousLastCallNotes !== previousNotes
+      ? lead.lastCallNotes
+      : previousLastCallNotes
+      ? trimmedNotes
+      : '';
+
+  return {
+    ...lead,
+    customerName: normalizedName,
+    phone: normalizedPhone,
+    rawPhone: updates.phone.trim() || normalizedPhone,
+    facebookLink: trimmedFb,
+    normalizedFacebookLink: normalizedFb,
+    assignedAgentId: trimmedAgentName ? updates.assignedAgentId : null,
+    assignedAgentName: trimmedAgentName,
+    status: updates.status,
+    notes: trimmedNotes,
+    lastCallNotes: nextLastCallNotes,
+    updatedAt: nowIso,
+  };
+}
+
 /**
  * Creates a deterministic PaidCustomer record from an Order Confirmed Lead,
  * setting Confirmed Date = Today (YYYY-MM-DD) and Renewal Date = Confirmed Date + 30 days.
@@ -1950,6 +2094,7 @@ export function createPaidCustomerFromLead(
     renewalDate,
     renewalStatus: 'Active',
     lastRenewedAt: null,
+    packageName: '',
     notes: lead.lastCallNotes || lead.notes || '',
     createdAt: nowIso,
     updatedAt: nowIso,
@@ -2023,10 +2168,12 @@ export function generatePaidCustomersCsv(
     'Customer Name',
     'Phone',
     'Assigned Agent',
+    'Package',
     'Confirmed Date',
     'Renewal Date',
     'Days Remaining',
     'Renewal Status',
+    'Notes',
   ];
 
   const escape = (val: string | number | null | undefined) => {
@@ -2046,10 +2193,12 @@ export function generatePaidCustomersCsv(
       c.customerName,
       c.phone,
       c.assignedAgentName ?? 'Unassigned',
+      c.packageName?.trim() || 'Not Assigned',
       c.confirmedDate,
       c.renewalDate,
       daysRemaining,
       effectiveStatus,
+      c.notes || '',
     ]
       .map(escape)
       .join(',');

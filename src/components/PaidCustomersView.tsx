@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   BadgeCheck,
   BellRing,
@@ -6,19 +6,27 @@ import {
   CheckCircle2,
   Download,
   MessageCircle,
+  Package,
+  Pencil,
   PhoneCall,
   RefreshCw,
   Search,
+  Trash2,
+  X,
 } from 'lucide-react';
 import { PaidCustomer, RENEWAL_STATUSES, RenewalStatus, User } from '../types';
 import {
+  addDaysToYmd,
   buildTelUrl,
   computeDaysRemaining,
   computeEffectiveRenewalStatus,
   formatBdPhoneDisplay,
   generatePaidCustomersCsv,
   getDhakaDateString,
+  normalizeBdPhone,
   openWhatsAppChat,
+  PAID_PACKAGE_PRESETS,
+  PaidCustomerEditInput,
 } from '../utils/leadLogic';
 import { CopyPhoneButton } from './CopyPhoneButton';
 
@@ -26,8 +34,10 @@ interface PaidCustomersViewProps {
   currentUser: User;
   agents: User[];
   paidCustomers: PaidCustomer[];
-  onMarkRenewed: (customerId: string) => void;
+  onMarkRenewed?: (customerId: string) => void;
   onUpdateRenewalStatus?: (customerId: string, status: RenewalStatus) => void;
+  onUpdatePaidCustomer?: (customerId: string, updates: PaidCustomerEditInput) => void;
+  onDeletePaidCustomer?: (customerId: string) => void;
   onExportCsv?: () => void;
   onPhoneCopied?: (cleanPhone: string) => void;
 }
@@ -51,6 +61,35 @@ function RenewalStatusBadge({ status }: { status: RenewalStatus }) {
   );
 }
 
+function PackageBadge({
+  packageName,
+  testId,
+}: {
+  packageName?: string;
+  testId?: string;
+}) {
+  const trimmed = (packageName ?? '').trim();
+  if (!trimmed) {
+    return (
+      <span
+        data-testid={testId}
+        className="inline-flex items-center px-2 py-0.5 rounded-md border border-slate-200 dark:border-slate-700 bg-slate-100/80 dark:bg-slate-800/70 text-[11px] font-medium text-slate-500 dark:text-slate-400 whitespace-nowrap"
+      >
+        Not Assigned
+      </span>
+    );
+  }
+  return (
+    <span
+      data-testid={testId}
+      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-emerald-500/30 bg-emerald-500/12 text-[11px] font-semibold text-emerald-700 dark:text-emerald-300 whitespace-nowrap"
+    >
+      <Package className="w-3 h-3 shrink-0" />
+      <span>{trimmed}</span>
+    </span>
+  );
+}
+
 function formatDaysRemainingLabel(daysRemaining: number): string {
   if (daysRemaining < 0) {
     const overdue = Math.abs(daysRemaining);
@@ -67,6 +106,8 @@ export function PaidCustomersView({
   paidCustomers,
   onMarkRenewed,
   onUpdateRenewalStatus,
+  onUpdatePaidCustomer,
+  onDeletePaidCustomer,
   onExportCsv,
   onPhoneCopied,
 }: PaidCustomersViewProps) {
@@ -74,7 +115,34 @@ export function PaidCustomersView({
   const [statusFilter, setStatusFilter] = useState<FilterMode>('ALL');
   const [agentFilter, setAgentFilter] = useState<string>('ALL');
 
+  // Admin Edit / Set Package modal state
+  const [editingCustomer, setEditingCustomer] = useState<PaidCustomer | null>(null);
+  const [editName, setEditName] = useState('');
+  const [editPhone, setEditPhone] = useState('');
+  const [editAgentId, setEditAgentId] = useState('');
+  const [editPackage, setEditPackage] = useState('');
+  const [editConfirmedDate, setEditConfirmedDate] = useState('');
+  const [editRenewalDate, setEditRenewalDate] = useState('');
+  const [editStatus, setEditStatus] = useState<RenewalStatus>('Active');
+  const [editNotes, setEditNotes] = useState('');
+  const [editError, setEditError] = useState<string | null>(null);
+
+  // Admin Delete confirmation modal state
+  const [deletingCustomer, setDeletingCustomer] = useState<PaidCustomer | null>(null);
+
   const isAdmin = currentUser.role === 'admin';
+
+  useEffect(() => {
+    if (!editingCustomer && !deletingCustomer) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setEditingCustomer(null);
+        setDeletingCustomer(null);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [editingCustomer, deletingCustomer]);
 
   // Scope Paid Customers to the logged-in Agent, or show all for Admin
   const scopedCustomers = useMemo(() => {
@@ -130,7 +198,9 @@ export function PaidCustomersView({
         return (
           customer.customerName.toLowerCase().includes(q) ||
           customer.phone.includes(q) ||
-          (customer.assignedAgentName ?? '').toLowerCase().includes(q)
+          (customer.packageName ?? '').toLowerCase().includes(q) ||
+          (customer.assignedAgentName ?? '').toLowerCase().includes(q) ||
+          (customer.notes ?? '').toLowerCase().includes(q)
         );
       })
       .sort(
@@ -152,6 +222,65 @@ export function PaidCustomersView({
     onExportCsv?.();
   };
 
+  const openEditModal = (customer: PaidCustomer) => {
+    if (!isAdmin) return;
+    setEditingCustomer(customer);
+    setEditName(customer.customerName);
+    setEditPhone(customer.phone);
+    setEditAgentId(customer.assignedAgentId ?? '');
+    setEditPackage(customer.packageName ?? '');
+    setEditConfirmedDate(customer.confirmedDate);
+    setEditRenewalDate(customer.renewalDate);
+    setEditStatus(customer.renewalStatus);
+    setEditNotes(customer.notes ?? '');
+    setEditError(null);
+  };
+
+  const handleSaveEdit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!isAdmin || !editingCustomer || !onUpdatePaidCustomer) return;
+
+    const cleanName = editName.trim();
+    if (!cleanName) {
+      setEditError('Customer name is required.');
+      return;
+    }
+
+    const normalizedPhone = normalizeBdPhone(editPhone);
+    if (!normalizedPhone) {
+      setEditError('Enter a valid Bangladeshi phone number (e.g. 01712345678).');
+      return;
+    }
+
+    const matchedAgent = editAgentId
+      ? agents.find((a) => a.id === editAgentId) ?? null
+      : null;
+
+    const assignedAgentId = editAgentId ? matchedAgent?.id ?? editAgentId : null;
+    const assignedAgentName = editAgentId
+      ? matchedAgent?.name ?? editingCustomer.assignedAgentName ?? null
+      : null;
+
+    onUpdatePaidCustomer(editingCustomer.id, {
+      customerName: cleanName,
+      phone: normalizedPhone,
+      assignedAgentId,
+      assignedAgentName,
+      confirmedDate: editConfirmedDate || editingCustomer.confirmedDate,
+      renewalDate: editRenewalDate || editingCustomer.renewalDate,
+      renewalStatus: editStatus,
+      packageName: editPackage.trim(),
+      notes: editNotes.trim(),
+    });
+    setEditingCustomer(null);
+  };
+
+  const handleConfirmDelete = () => {
+    if (!isAdmin || !deletingCustomer || !onDeletePaidCustomer) return;
+    onDeletePaidCustomer(deletingCustomer.id);
+    setDeletingCustomer(null);
+  };
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -161,8 +290,9 @@ export function PaidCustomersView({
             Paid Customers &amp; 1-Month Renewals
           </h1>
           <p className="text-sm text-slate-500 dark:text-slate-400 mt-0.5">
-            Auto-created whenever an Order is Confirmed (+30 days renewal cycle) · Two-way synced with Google Sheets{' '}
-            <code className="font-mono text-xs">Paid_Customers</code>.
+            {isAdmin
+              ? 'Manage assigned packages, renewals, and customer details · Synced across Agent view, Supabase, and Google Sheets.'
+              : 'Read-only view of your confirmed Paid Customers, assigned packages, and 1-month renewal schedule.'}
           </p>
         </div>
 
@@ -251,7 +381,7 @@ export function PaidCustomersView({
             <input
               type="search"
               aria-label="Search paid customers"
-              placeholder="Search customer, phone, or agent..."
+              placeholder="Search customer, phone, package, or agent..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               className="w-full pl-9 pr-3 py-2 text-xs rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
@@ -310,14 +440,16 @@ export function PaidCustomersView({
               <table className="w-full text-left border-collapse text-sm">
                 <thead>
                   <tr className="bg-slate-50 dark:bg-slate-900/60 text-xs text-slate-500 dark:text-slate-400 border-b border-slate-200 dark:border-slate-800">
-                    <th className="py-3 px-4 font-semibold">Customer Name</th>
-                    <th className="py-3 px-4 font-semibold">Phone</th>
-                    <th className="py-3 px-4 font-semibold">Assigned Agent</th>
-                    <th className="py-3 px-4 font-semibold">Confirmed Date</th>
-                    <th className="py-3 px-4 font-semibold">Renewal Date</th>
-                    <th className="py-3 px-4 font-semibold">Days Remaining</th>
-                    <th className="py-3 px-4 font-semibold">Renewal Status</th>
-                    <th className="py-3 px-4 font-semibold text-right">Action</th>
+                    <th className="py-3 px-2.5 font-semibold">Customer</th>
+                    <th className="py-3 px-2 font-semibold">Phone</th>
+                    <th className="py-3 px-2 font-semibold">Agent</th>
+                    <th className="py-3 px-2 font-semibold">Package</th>
+                    <th className="py-3 px-2 font-semibold">Renewal / Confirmed</th>
+                    <th className="py-3 px-2 font-semibold whitespace-nowrap">Days Left</th>
+                    <th className="py-3 px-2 font-semibold whitespace-nowrap">Status</th>
+                    {isAdmin && (
+                      <th className="py-3 px-2.5 font-semibold text-right">Action</th>
+                    )}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200 dark:divide-slate-800">
@@ -333,18 +465,18 @@ export function PaidCustomersView({
                             : 'hover:bg-slate-50/80 dark:hover:bg-slate-800/40'
                         }`}
                       >
-                        <td className="py-3.5 px-4">
-                          <div className="font-semibold text-slate-900 dark:text-slate-100">
+                        <td className="py-3 px-2.5 max-w-[155px]">
+                          <div className="font-semibold text-slate-900 dark:text-slate-100 leading-snug truncate">
                             {customer.customerName}
                           </div>
                           {customer.notes && (
-                            <p className="text-xs text-slate-500 dark:text-slate-400 truncate max-w-[200px] mt-0.5">
+                            <p className="text-xs text-slate-500 dark:text-slate-400 truncate mt-0.5">
                               {customer.notes}
                             </p>
                           )}
                         </td>
-                        <td className="py-3.5 px-4">
-                          <div className="flex items-center gap-2">
+                        <td className="py-3 px-2">
+                          <div className="flex items-center gap-1">
                             <span className="font-mono text-xs tabular-nums text-slate-700 dark:text-slate-300 whitespace-nowrap">
                               {formatBdPhoneDisplay(customer.phone)}
                             </span>
@@ -370,16 +502,24 @@ export function PaidCustomersView({
                             </button>
                           </div>
                         </td>
-                        <td className="py-3.5 px-4 text-xs font-medium text-slate-700 dark:text-slate-300 whitespace-nowrap">
+                        <td className="py-3 px-2 text-xs font-medium text-slate-700 dark:text-slate-300 whitespace-nowrap">
                           {customer.assignedAgentName ?? 'Unassigned'}
                         </td>
-                        <td className="py-3.5 px-4 font-mono text-xs tabular-nums text-slate-600 dark:text-slate-300 whitespace-nowrap">
-                          {customer.confirmedDate}
+                        <td className="py-3 px-2">
+                          <PackageBadge
+                            packageName={customer.packageName}
+                            testId={`paid-package-${customer.id}`}
+                          />
                         </td>
-                        <td className="py-3.5 px-4 font-mono text-xs tabular-nums font-semibold text-slate-900 dark:text-slate-100 whitespace-nowrap">
-                          {customer.renewalDate}
+                        <td className="py-3 px-2 font-mono text-xs tabular-nums whitespace-nowrap">
+                          <div className="font-semibold text-slate-900 dark:text-slate-100">
+                            {customer.renewalDate}
+                          </div>
+                          <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                            Conf: {customer.confirmedDate}
+                          </div>
                         </td>
-                        <td className="py-3.5 px-4 whitespace-nowrap">
+                        <td className="py-3 px-2 whitespace-nowrap">
                           <span
                             className={`font-mono text-xs font-semibold tabular-nums ${
                               daysRemaining < 0
@@ -392,7 +532,7 @@ export function PaidCustomersView({
                             {formatDaysRemainingLabel(daysRemaining)}
                           </span>
                         </td>
-                        <td className="py-3.5 px-4">
+                        <td className="py-3 px-2">
                           {isAdmin && onUpdateRenewalStatus ? (
                             <select
                               aria-label={`Renewal status for ${customer.customerName}`}
@@ -403,7 +543,7 @@ export function PaidCustomersView({
                                   e.target.value as RenewalStatus
                                 )
                               }
-                              className="px-2 py-1 text-xs font-medium rounded-md bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 text-slate-900 dark:text-slate-100"
+                              className="px-1.5 py-1 text-xs font-medium rounded-md bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 text-slate-900 dark:text-slate-100"
                             >
                               {RENEWAL_STATUSES.map((st) => (
                                 <option key={st} value={st}>
@@ -415,17 +555,50 @@ export function PaidCustomersView({
                             <RenewalStatusBadge status={effectiveStatus} />
                           )}
                         </td>
-                        <td className="py-3.5 px-4 text-right whitespace-nowrap">
-                          <button
-                            type="button"
-                            data-testid={`renew-btn-${customer.id}`}
-                            onClick={() => onMarkRenewed(customer.id)}
-                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition-colors cursor-pointer"
-                          >
-                            <CheckCircle2 className="w-3.5 h-3.5" />
-                            <span>Mark as Renewed (+1 Month)</span>
-                          </button>
-                        </td>
+                        {isAdmin && (
+                          <td className="py-3 px-2.5 text-right">
+                            <div className="flex flex-col items-end gap-1.5">
+                              <div className="inline-flex items-center gap-1.5">
+                                {onUpdatePaidCustomer && (
+                                  <button
+                                    type="button"
+                                    data-testid={`edit-paid-btn-${customer.id}`}
+                                    aria-label={`Edit and set package for ${customer.customerName}`}
+                                    onClick={() => openEditModal(customer)}
+                                    className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-[11px] font-semibold transition-colors whitespace-nowrap cursor-pointer"
+                                  >
+                                    <Pencil className="w-3 h-3" />
+                                    <span>Edit / Package</span>
+                                  </button>
+                                )}
+                                {onDeletePaidCustomer && (
+                                  <button
+                                    type="button"
+                                    data-testid={`delete-paid-btn-${customer.id}`}
+                                    aria-label={`Delete ${customer.customerName}`}
+                                    onClick={() => setDeletingCustomer(customer)}
+                                    className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-rose-300/80 dark:border-rose-500/40 bg-rose-50/70 dark:bg-rose-500/10 hover:bg-rose-600 hover:text-white dark:hover:bg-rose-600 text-rose-700 dark:text-rose-300 text-[11px] font-semibold transition-colors whitespace-nowrap cursor-pointer"
+                                  >
+                                    <Trash2 className="w-3 h-3" />
+                                    <span>Delete</span>
+                                  </button>
+                                )}
+                              </div>
+                              {onMarkRenewed && (
+                                <button
+                                  type="button"
+                                  data-testid={`renew-btn-${customer.id}`}
+                                  aria-label={`Mark ${customer.customerName} as renewed (+1 Month)`}
+                                  onClick={() => onMarkRenewed(customer.id)}
+                                  className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-semibold transition-colors whitespace-nowrap cursor-pointer"
+                                >
+                                  <CheckCircle2 className="w-3 h-3" />
+                                  <span>Mark as Renewed (+1 Month)</span>
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                        )}
                       </tr>
                     );
                   })}
@@ -436,7 +609,11 @@ export function PaidCustomersView({
             {/* Mobile Cards */}
             <div className="md:hidden divide-y divide-slate-200 dark:divide-slate-800">
               {filteredItems.map(({ customer, daysRemaining, effectiveStatus }) => (
-                <div key={customer.id} className="p-4 space-y-3">
+                <div
+                  key={customer.id}
+                  data-testid={`paid-card-${customer.id}`}
+                  className="p-4 space-y-3"
+                >
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">
                       <p className="text-sm font-semibold text-slate-900 dark:text-white truncate">
@@ -483,6 +660,18 @@ export function PaidCustomersView({
                       <span className="text-[11px] text-slate-400 block">Renewal Date</span>
                       <span className="font-mono font-semibold">{customer.renewalDate}</span>
                     </div>
+                    <div className="col-span-2 pt-1 border-t border-slate-200/80 dark:border-slate-800 flex items-center justify-between gap-2">
+                      <span className="text-[11px] text-slate-400">Package</span>
+                      <PackageBadge
+                        packageName={customer.packageName}
+                        testId={`mobile-paid-package-${customer.id}`}
+                      />
+                    </div>
+                    {customer.notes && (
+                      <div className="col-span-2 text-[11px] text-slate-500 dark:text-slate-400">
+                        {customer.notes}
+                      </div>
+                    )}
                   </div>
 
                   <div className="grid grid-cols-2 gap-2">
@@ -505,20 +694,377 @@ export function PaidCustomersView({
                     </button>
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={() => onMarkRenewed(customer.id)}
-                    className="w-full inline-flex items-center justify-center gap-1.5 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold cursor-pointer"
-                  >
-                    <CheckCircle2 className="w-3.5 h-3.5" />
-                    <span>Mark as Renewed (+1 Month)</span>
-                  </button>
+                  {isAdmin && (
+                    <div className="space-y-2 pt-1">
+                      <div className="grid grid-cols-2 gap-2">
+                        {onUpdatePaidCustomer && (
+                          <button
+                            type="button"
+                            data-testid={`mobile-edit-paid-btn-${customer.id}`}
+                            onClick={() => openEditModal(customer)}
+                            className="inline-flex items-center justify-center gap-1.5 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100 text-xs font-semibold cursor-pointer"
+                          >
+                            <Pencil className="w-3.5 h-3.5" />
+                            <span>Edit / Set Package</span>
+                          </button>
+                        )}
+                        {onDeletePaidCustomer && (
+                          <button
+                            type="button"
+                            data-testid={`mobile-delete-paid-btn-${customer.id}`}
+                            onClick={() => setDeletingCustomer(customer)}
+                            className="inline-flex items-center justify-center gap-1.5 py-2 rounded-lg border border-rose-300 dark:border-rose-500/40 bg-rose-50/70 dark:bg-rose-500/10 text-rose-700 dark:text-rose-300 text-xs font-semibold cursor-pointer"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            <span>Delete</span>
+                          </button>
+                        )}
+                      </div>
+                      {onMarkRenewed && (
+                        <button
+                          type="button"
+                          data-testid={`mobile-renew-btn-${customer.id}`}
+                          onClick={() => onMarkRenewed(customer.id)}
+                          className="w-full inline-flex items-center justify-center gap-1.5 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold cursor-pointer"
+                        >
+                          <CheckCircle2 className="w-3.5 h-3.5" />
+                          <span>Mark as Renewed (+1 Month)</span>
+                        </button>
+                      )}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
           </>
         )}
       </section>
+
+      {/* Admin-Only Edit / Set Package Modal */}
+      {isAdmin && editingCustomer && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="edit-paid-modal-title"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setEditingCustomer(null);
+          }}
+        >
+          <div className="w-full max-w-xl max-h-[92vh] overflow-y-auto rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xl">
+            <div className="px-6 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
+              <div>
+                <h2
+                  id="edit-paid-modal-title"
+                  className="text-base font-semibold text-slate-900 dark:text-white"
+                >
+                  Edit &amp; Set Package — {editingCustomer.customerName}
+                </h2>
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                  Updates sync immediately to Agent Paid Customers, Supabase, and Google Sheets.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingCustomer(null)}
+                aria-label="Close edit paid customer modal"
+                className="p-1.5 rounded-lg text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-700 dark:hover:text-slate-200 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveEdit} className="p-6 space-y-4">
+              {editError && (
+                <div
+                  role="alert"
+                  className="rounded-lg px-3.5 py-2.5 text-xs font-medium bg-rose-50 dark:bg-rose-500/10 border border-rose-200 dark:border-rose-500/30 text-rose-700 dark:text-rose-300"
+                >
+                  {editError}
+                </div>
+              )}
+
+              {/* Package Preset Selector + Custom Input */}
+              <div className="rounded-xl p-3.5 bg-slate-50 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800 space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <label
+                    htmlFor="edit-paid-package"
+                    className="text-xs font-semibold text-slate-800 dark:text-slate-200"
+                  >
+                    Assigned Package
+                  </label>
+                  {editPackage && (
+                    <button
+                      type="button"
+                      onClick={() => setEditPackage('')}
+                      className="text-[11px] font-medium text-slate-500 hover:text-rose-600 dark:hover:text-rose-400 cursor-pointer"
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
+
+                <div className="flex flex-wrap gap-1.5">
+                  {PAID_PACKAGE_PRESETS.map((preset) => {
+                    const active = editPackage.trim() === preset;
+                    return (
+                      <button
+                        key={preset}
+                        type="button"
+                        onClick={() => setEditPackage(preset)}
+                        className={`px-2.5 py-1 rounded-md text-xs font-medium border transition-colors cursor-pointer ${
+                          active
+                            ? 'bg-emerald-600 text-white border-emerald-600'
+                            : 'bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 border-slate-300 dark:border-slate-700 hover:border-emerald-500'
+                        }`}
+                      >
+                        {preset}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <input
+                  id="edit-paid-package"
+                  type="text"
+                  value={editPackage}
+                  onChange={(e) => setEditPackage(e.target.value)}
+                  placeholder="Or type custom package / price tier (e.g., 1-Month Pro - 1500 BDT)"
+                  className="w-full px-3 py-2 text-xs rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                <div>
+                  <label
+                    htmlFor="edit-paid-name"
+                    className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1"
+                  >
+                    Customer Name *
+                  </label>
+                  <input
+                    id="edit-paid-name"
+                    type="text"
+                    required
+                    value={editName}
+                    onChange={(e) => setEditName(e.target.value)}
+                    className="w-full px-3 py-2 text-xs rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
+                  />
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="edit-paid-phone"
+                    className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1"
+                  >
+                    Phone *
+                  </label>
+                  <input
+                    id="edit-paid-phone"
+                    type="tel"
+                    required
+                    value={editPhone}
+                    onChange={(e) => setEditPhone(e.target.value)}
+                    className="w-full px-3 py-2 text-xs font-mono rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
+                  />
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="edit-paid-agent"
+                    className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1"
+                  >
+                    Assigned Agent
+                  </label>
+                  <select
+                    id="edit-paid-agent"
+                    value={editAgentId}
+                    onChange={(e) => setEditAgentId(e.target.value)}
+                    className="w-full px-3 py-2 text-xs rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 text-slate-900 dark:text-slate-100"
+                  >
+                    <option value="">Unassigned</option>
+                    {agents.map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {a.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="edit-paid-status"
+                    className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1"
+                  >
+                    Renewal Status
+                  </label>
+                  <select
+                    id="edit-paid-status"
+                    value={editStatus}
+                    onChange={(e) => setEditStatus(e.target.value as RenewalStatus)}
+                    className="w-full px-3 py-2 text-xs rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 text-slate-900 dark:text-slate-100"
+                  >
+                    {RENEWAL_STATUSES.map((st) => (
+                      <option key={st} value={st}>
+                        {st}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="edit-paid-confirmed-date"
+                    className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1"
+                  >
+                    Confirmed Date
+                  </label>
+                  <input
+                    id="edit-paid-confirmed-date"
+                    type="date"
+                    value={editConfirmedDate}
+                    onChange={(e) => setEditConfirmedDate(e.target.value)}
+                    className="w-full px-3 py-2 text-xs font-mono rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 text-slate-900 dark:text-slate-100"
+                  />
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label
+                      htmlFor="edit-paid-renewal-date"
+                      className="text-xs font-medium text-slate-700 dark:text-slate-300"
+                    >
+                      Renewal Date
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setEditRenewalDate(
+                          addDaysToYmd(
+                            editConfirmedDate || editingCustomer.confirmedDate,
+                            30
+                          )
+                        )
+                      }
+                      className="text-[11px] font-semibold text-emerald-600 dark:text-emerald-400 hover:underline cursor-pointer"
+                    >
+                      +30d from Confirmed
+                    </button>
+                  </div>
+                  <input
+                    id="edit-paid-renewal-date"
+                    type="date"
+                    value={editRenewalDate}
+                    onChange={(e) => setEditRenewalDate(e.target.value)}
+                    className="w-full px-3 py-2 text-xs font-mono rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 text-slate-900 dark:text-slate-100"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label
+                  htmlFor="edit-paid-notes"
+                  className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1"
+                >
+                  Notes
+                </label>
+                <textarea
+                  id="edit-paid-notes"
+                  rows={2}
+                  value={editNotes}
+                  onChange={(e) => setEditNotes(e.target.value)}
+                  placeholder="Optional payment or package notes..."
+                  className="w-full px-3 py-2 text-xs rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2.5 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setEditingCustomer(null)}
+                  className="px-4 py-2 rounded-lg border border-slate-300 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  data-testid="save-paid-edit-btn"
+                  className="px-5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition-colors cursor-pointer"
+                >
+                  Save Changes
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Admin-Only Delete Confirmation Modal */}
+      {isAdmin && deletingCustomer && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="delete-paid-modal-title"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setDeletingCustomer(null);
+          }}
+        >
+          <div className="w-full max-w-md rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden">
+            <div className="px-6 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
+              <h2
+                id="delete-paid-modal-title"
+                className="text-base font-semibold text-slate-900 dark:text-white"
+              >
+                Delete Paid Customer
+              </h2>
+              <button
+                type="button"
+                onClick={() => setDeletingCustomer(null)}
+                aria-label="Close delete confirmation modal"
+                className="p-1.5 rounded-lg text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-4">
+              <p className="text-sm text-slate-700 dark:text-slate-300">
+                Remove{' '}
+                <strong className="text-slate-900 dark:text-white">
+                  {deletingCustomer.customerName}
+                </strong>{' '}
+                (<span className="font-mono">{formatBdPhoneDisplay(deletingCustomer.phone)}</span>)
+                from Paid Customers?
+              </p>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                This deletes the entry from Admin &amp; Agent Paid Customers, Supabase, and Google
+                Sheets (<code className="font-mono">Paid_Customers</code> and{' '}
+                <code className="font-mono">Paid_&lt;Agent&gt;</code>) so it will not reappear on
+                sync.
+              </p>
+
+              <div className="flex items-center justify-end gap-2.5 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setDeletingCustomer(null)}
+                  className="px-4 py-2 rounded-lg border border-slate-300 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  data-testid="confirm-delete-paid-btn"
+                  onClick={handleConfirmDelete}
+                  className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold transition-colors cursor-pointer"
+                >
+                  Delete Paid Customer
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

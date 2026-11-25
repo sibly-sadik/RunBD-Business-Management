@@ -689,6 +689,18 @@ export async function upsertPaidCustomerInDb(
   });
 }
 
+export async function deleteLeadViaApi(leadId: string): Promise<void> {
+  await apiFetch(`/api/leads/${encodeURIComponent(leadId)}`, {
+    method: 'DELETE',
+  });
+}
+
+export async function deletePaidCustomerViaApi(customerId: string): Promise<void> {
+  await apiFetch(`/api/paid-customers/${encodeURIComponent(customerId)}`, {
+    method: 'DELETE',
+  });
+}
+
 export async function saveDuplicateAttemptInDb(
   attempt: DuplicateAttempt,
   existingLeadId = ''

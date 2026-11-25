@@ -42,7 +42,7 @@ interface AgentWorkspaceViewProps {
   paidCustomers: PaidCustomer[];
   callScript: string;
   dueRenewals: DueRenewalItem[];
-  onMarkPaidCustomerRenewed: (customerId: string) => void;
+  onMarkPaidCustomerRenewed?: (customerId: string) => void;
   onOpenPaidCustomers: () => void;
   onOpenTodayCalls?: () => void;
   onUpdateCallScript: (script: string) => void;
@@ -62,7 +62,7 @@ export function AgentWorkspaceView({
   paidCustomers,
   callScript,
   dueRenewals,
-  onMarkPaidCustomerRenewed,
+  onMarkPaidCustomerRenewed: _onMarkPaidCustomerRenewed,
   onOpenPaidCustomers,
   onOpenTodayCalls,
   onUpdateCallScript,
@@ -194,7 +194,6 @@ export function AgentWorkspaceView({
       <RenewalAlertBanner
         dueItems={dueRenewals}
         audience="agent"
-        onMarkRenewed={onMarkPaidCustomerRenewed}
         onViewAllPaidCustomers={onOpenPaidCustomers}
       />
 

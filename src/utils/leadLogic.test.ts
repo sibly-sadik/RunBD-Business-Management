@@ -51,9 +51,12 @@ import {
   normalizeFacebookUrl,
   normalizePostUrl,
   normalizeVehicleType,
+  PAID_PACKAGE_PRESETS,
   parseCsvLeads,
   parseDateToYmd,
   renewPaidCustomer,
+  updateLeadDetails,
+  updatePaidCustomerDetails,
   upsertTodayCallLogInList,
 } from './leadLogic';
 import { DATA_COLLECTORS, DEMO_USERS } from '../data/seedData';
@@ -920,8 +923,16 @@ test('Paid Customers: createPaidCustomerFromLead sets Today and +30 days, renewP
 
   const csv = generatePaidCustomersCsv([due2Days, renewed], now);
   assert.ok(csv.startsWith('\uFEFF'));
-  assert.ok(csv.includes('Customer Name,Phone,Assigned Agent,Confirmed Date,Renewal Date,Days Remaining,Renewal Status'));
-  assert.ok(csv.includes('Due In 2 Days,01812345678,Tanjin,2026-11-20,2026-11-22,2,Active'));
+  assert.ok(
+    csv.includes(
+      'Customer Name,Phone,Assigned Agent,Package,Confirmed Date,Renewal Date,Days Remaining,Renewal Status,Notes'
+    )
+  );
+  assert.ok(
+    csv.includes(
+      'Due In 2 Days,01812345678,Tanjin,Not Assigned,2026-11-20,2026-11-22,2,Active,1 month subscription confirmed'
+    )
+  );
 });
 
 test('filterTodayLeads strictly checks collectedDate/date/createdAt (including bare YYYY-MM-DD) and never falls back to updatedAt or missing date', () => {
@@ -1387,7 +1398,16 @@ test('Asia/Dhaka (UTC+6) date formatting, zero double-shift on bare YYYY-MM-DD, 
 });
 
 test('VEHICLE_TYPES, normalizeVehicleType (Track -> Truck), and Bulk CSV Vehicle_Type header parsing work seamlessly', () => {
-  assert.deepEqual(VEHICLE_TYPES, ['Car', 'Bike', 'Truck', 'Bus', 'Pickup Truck']);
+  assert.deepEqual(VEHICLE_TYPES, [
+    'Car',
+    'Bike',
+    'Truck',
+    'Bus',
+    'Pickup Truck',
+    'Workshop',
+    'Accessories',
+    'Rent a Car',
+  ]);
 
   assert.equal(normalizeVehicleType('car'), 'Car');
   assert.equal(normalizeVehicleType('  BIKE '), 'Bike');
@@ -1397,6 +1417,13 @@ test('VEHICLE_TYPES, normalizeVehicleType (Track -> Truck), and Bulk CSV Vehicle
   assert.equal(normalizeVehicleType('bus'), 'Bus');
   assert.equal(normalizeVehicleType('pickup'), 'Pickup Truck');
   assert.equal(normalizeVehicleType('Pick up   truck'), 'Pickup Truck');
+  assert.equal(normalizeVehicleType('workshop'), 'Workshop');
+  assert.equal(normalizeVehicleType('Work Shop'), 'Workshop');
+  assert.equal(normalizeVehicleType('accessories'), 'Accessories');
+  assert.equal(normalizeVehicleType('Accessory'), 'Accessories');
+  assert.equal(normalizeVehicleType('rent a car'), 'Rent a Car');
+  assert.equal(normalizeVehicleType('rent-a-car'), 'Rent a Car');
+  assert.equal(normalizeVehicleType('rentacar'), 'Rent a Car');
   assert.equal(normalizeVehicleType('Rafiqul Islam'), 'Rafiqul Islam');
   assert.equal(normalizeVehicleType('   '), '');
 
@@ -1405,18 +1432,27 @@ test('VEHICLE_TYPES, normalizeVehicleType (Track -> Truck), and Bulk CSV Vehicle
     'car,+8801812345678,https://facebook.com/car.owner',
     'Track,01912345678,https://facebook.com/truck.owner',
     'pickup truck,01612345678,https://facebook.com/pickup.owner',
+    'workshop,01512345678,https://facebook.com/workshop.owner',
+    'accessories,01412345678,https://facebook.com/accessories.owner',
+    'rent-a-car,01312345678,https://facebook.com/rentacar.owner',
     ',01799887766,https://facebook.com/missing.vehicle',
   ].join('\n');
 
   const preview = parseCsvLeads(csv, existingLeads);
-  assert.equal(preview.length, 4);
+  assert.equal(preview.length, 7);
   assert.equal(preview[0].status, 'valid');
   assert.equal(preview[0].customerName, 'Car');
   assert.equal(preview[1].status, 'valid');
   assert.equal(preview[1].customerName, 'Truck');
   assert.equal(preview[2].status, 'valid');
   assert.equal(preview[2].customerName, 'Pickup Truck');
-  assert.equal(preview[3].status, 'invalid');
+  assert.equal(preview[3].status, 'valid');
+  assert.equal(preview[3].customerName, 'Workshop');
+  assert.equal(preview[4].status, 'valid');
+  assert.equal(preview[4].customerName, 'Accessories');
+  assert.equal(preview[5].status, 'valid');
+  assert.equal(preview[5].customerName, 'Rent a Car');
+  assert.equal(preview[6].status, 'invalid');
 });
 
 test('Multi-platform post links: normalizePostUrl, findDuplicatePost, computeKawsarPostStats, and Final Daily Summary CSV support TikTok, Instagram, and Twitter', () => {
@@ -1539,7 +1575,131 @@ test('Multi-platform post links: normalizePostUrl, findDuplicatePost, computeKaw
   assert.ok(csv.includes('Kawsar,2,1,1,2,1,1'));
 });
 
+test('Paid Customer Admin edits: PAID_PACKAGE_PRESETS, updatePaidCustomerDetails, and CSV Package column', () => {
+  assert.ok(PAID_PACKAGE_PRESETS.includes('1-Month Premium'));
 
+  const base: PaidCustomer = {
+    id: 'PC-EDIT-1',
+    leadId: 'L-EDIT-1',
+    customerName: 'Shafiqul Islam',
+    phone: '01711223344',
+    assignedAgentId: 'a1',
+    assignedAgentName: 'Tanjin',
+    confirmedDate: '2026-11-20',
+    renewalDate: '2026-12-20',
+    renewalStatus: 'Active',
+    lastRenewedAt: null,
+    packageName: '',
+    notes: 'Initial note',
+    createdAt: '2026-11-20T09:00:00.000Z',
+    updatedAt: '2026-11-20T09:00:00.000Z',
+  };
 
+  const now = new Date('2026-11-24T11:30:00+06:00');
+  const updated = updatePaidCustomerDetails(
+    base,
+    {
+      customerName: 'Shafiqul Islam Updated',
+      phone: '+880 1812-345678',
+      assignedAgentId: 'a2',
+      assignedAgentName: 'Kathy',
+      confirmedDate: '2026-11-21',
+      renewalDate: '2027-02-21',
+      renewalStatus: 'Renewed',
+      packageName: '3-Month Package',
+      notes: 'Upgraded to 3-Month plan',
+    },
+    now
+  );
 
+  assert.equal(updated.customerName, 'Shafiqul Islam Updated');
+  assert.equal(updated.phone, '01812345678');
+  assert.equal(updated.assignedAgentId, 'a2');
+  assert.equal(updated.assignedAgentName, 'Kathy');
+  assert.equal(updated.confirmedDate, '2026-11-21');
+  assert.equal(updated.renewalDate, '2027-02-21');
+  assert.equal(updated.renewalStatus, 'Renewed');
+  assert.equal(updated.packageName, '3-Month Package');
+  assert.equal(updated.notes, 'Upgraded to 3-Month plan');
+  assert.equal(updated.lastRenewedAt, now.toISOString());
+  assert.equal(updated.updatedAt, now.toISOString());
 
+  const csv = generatePaidCustomersCsv([updated], now);
+  assert.ok(csv.includes('3-Month Package'));
+  assert.ok(csv.includes('Upgraded to 3-Month plan'));
+});
+
+test('Lead Edit helpers: findDuplicateLead excludeLeadId and updateLeadDetails normalization', () => {
+  const leadsPool: Lead[] = [
+    {
+      ...existingLeads[0],
+      id: 'L-EDIT-SELF',
+      customerName: 'Car',
+      phone: '01711223344',
+      rawPhone: '01711223344',
+      facebookLink: 'https://www.facebook.com/car.owner.1/',
+      normalizedFacebookLink: 'facebook.com/car.owner.1',
+      notes: 'Original note',
+      collectorId: 'c1',
+      collectorName: 'Farhan',
+      assignedAgentId: 'a1',
+      assignedAgentName: 'Tanjin',
+      status: 'Pending',
+      lastCallNotes: '',
+    },
+    {
+      ...existingLeads[0],
+      id: 'L-OTHER',
+      customerName: 'Bike',
+      phone: '01819998877',
+      rawPhone: '01819998877',
+      facebookLink: 'https://facebook.com/bike.other',
+      normalizedFacebookLink: 'facebook.com/bike.other',
+    },
+  ];
+
+  // Keeping same phone & FB on L-EDIT-SELF does NOT self-trigger duplicate when excludeLeadId is provided
+  assert.equal(
+    findDuplicateLead(leadsPool, '+880 1711-223344', 'https://m.facebook.com/car.owner.1', {
+      excludeLeadId: 'L-EDIT-SELF',
+    }),
+    null
+  );
+
+  // Changing phone or FB to match L-OTHER triggers duplicate
+  const phoneDup = findDuplicateLead(leadsPool, '8801819998877', 'https://facebook.com/car.owner.1', {
+    excludeLeadId: 'L-EDIT-SELF',
+  });
+  assert.equal(phoneDup?.matchedBy, 'phone');
+  assert.equal(phoneDup?.lead.id, 'L-OTHER');
+
+  const fbDup = findDuplicateLead(leadsPool, '01955443322', 'https://www.facebook.com/bike.other?ref=share', {
+    excludeLeadId: 'L-EDIT-SELF',
+  });
+  assert.equal(fbDup?.matchedBy, 'facebook');
+  assert.equal(fbDup?.lead.id, 'L-OTHER');
+
+  const now = new Date('2026-11-24T15:00:00+06:00');
+  const updated = updateLeadDetails(
+    leadsPool[0],
+    {
+      customerName: 'workshop',
+      phone: '+880 1955-443322',
+      facebookLink: 'https://www.facebook.com/workshop.updated/?ref=share',
+      assignedAgentId: 'a6',
+      assignedAgentName: 'Sakib',
+      status: 'Interested',
+      notes: 'Fixed vehicle type and phone',
+    },
+    now
+  );
+
+  assert.equal(updated.customerName, 'Workshop');
+  assert.equal(updated.phone, '01955443322');
+  assert.equal(updated.normalizedFacebookLink, 'facebook.com/workshop.updated');
+  assert.equal(updated.assignedAgentId, 'a6');
+  assert.equal(updated.assignedAgentName, 'Sakib');
+  assert.equal(updated.status, 'Interested');
+  assert.equal(updated.notes, 'Fixed vehicle type and phone');
+  assert.equal(updated.updatedAt, now.toISOString());
+});

@@ -188,7 +188,8 @@ var KAWSAR_POST_HEADERS = [
 ];
 var PAID_CUSTOMER_HEADERS = [
   'Customer ID', 'Lead ID', 'Customer Name', 'Phone', 'Assigned Agent',
-  'Confirmed Date', 'Renewal Date', 'Days Remaining', 'Renewal Status', 'Updated At'
+  'Confirmed Date', 'Renewal Date', 'Days Remaining', 'Renewal Status', 'Updated At',
+  'Package', 'Notes'
 ];
 var PAID_AGENT_TAB_HEADERS = [
   'ID', 'Date', 'Customer / Vehicle', 'Phone', 'Facebook Link',
@@ -361,6 +362,20 @@ function ensureKawsarPostHeaders_(kawsarSheet) {
   if (col5 === 'posted by' || lastCol < KAWSAR_POST_HEADERS.length || String(hdr[4] || '').trim().toLowerCase() !== 'tiktok link') {
     kawsarSheet.getRange(1, 1, 1, KAWSAR_POST_HEADERS.length).setValues([KAWSAR_POST_HEADERS]);
     kawsarSheet.getRange(1, 1, 1, KAWSAR_POST_HEADERS.length).setFontWeight('bold');
+  }
+}
+
+function ensurePaidCustomerHeaders_(paidSheet) {
+  if (!paidSheet) return;
+  if (paidSheet.getLastRow() < 1) {
+    paidSheet.appendRow(PAID_CUSTOMER_HEADERS);
+    paidSheet.getRange(1, 1, 1, PAID_CUSTOMER_HEADERS.length).setFontWeight('bold');
+    return;
+  }
+  var lastCol = Math.max(10, paidSheet.getLastColumn());
+  if (lastCol < PAID_CUSTOMER_HEADERS.length) {
+    paidSheet.getRange(1, 1, 1, PAID_CUSTOMER_HEADERS.length).setValues([PAID_CUSTOMER_HEADERS]);
+    paidSheet.getRange(1, 1, 1, PAID_CUSTOMER_HEADERS.length).setFontWeight('bold');
   }
 }
 
@@ -594,6 +609,14 @@ function doGet(e) {
     var paidCustomers = [];
     if (paidSheet && paidSheet.getLastRow() > 1) {
       var pcCols = Math.max(10, paidSheet.getLastColumn());
+      var pcHeaderRow = paidSheet.getRange(1, 1, 1, pcCols).getValues()[0];
+      var pkgColIdx = -1;
+      var notesColIdx = -1;
+      for (var phIdx = 0; phIdx < pcHeaderRow.length; phIdx++) {
+        var phName = String(pcHeaderRow[phIdx] || '').trim().toLowerCase();
+        if (phName === 'package' || phName === 'amount / package') pkgColIdx = phIdx;
+        if (phName === 'notes') notesColIdx = phIdx;
+      }
       var pcRows = paidSheet.getRange(2, 1, paidSheet.getLastRow() - 1, pcCols).getValues();
       for (var pcIdx = 0; pcIdx < pcRows.length; pcIdx++) {
         var pr = pcRows[pcIdx];
@@ -603,7 +626,7 @@ function doGet(e) {
         var pcId = pr[0] ? String(pr[0]).trim() : ('SHEET-PC-ROW-' + (pcIdx + 2));
         var confYmd = toYmd_(String(pr[5] || '').replace(/^'+/, '')) || targetDate;
         var renYmd = toYmd_(String(pr[6] || '').replace(/^'+/, ''));
-        paidCustomers.push({
+        var pcItem = {
           id: pcId,
           leadId: String(pr[1] || '').trim(),
           customerName: pcName,
@@ -613,7 +636,14 @@ function doGet(e) {
           renewalDate: renYmd,
           renewalStatus: String(pr[8] || 'Active').trim(),
           updatedAt: pr[9] ? new Date(pr[9]).toISOString() : ''
-        });
+        };
+        if (pkgColIdx >= 0) {
+          pcItem.packageName = String(pr[pkgColIdx] || '').trim();
+        }
+        if (notesColIdx >= 0) {
+          pcItem.notes = String(pr[notesColIdx] || '').trim();
+        }
+        paidCustomers.push(pcItem);
       }
     }
 
@@ -655,6 +685,8 @@ function doPost(e) {
     var kawsarSheet = getOrCreateSheetCached_(ss, sheetsByName, 'Kawsar_Posts_Log', KAWSAR_POST_HEADERS);
     ensureKawsarPostHeaders_(kawsarSheet);
     var paidSheet = getOrCreateSheetCached_(ss, sheetsByName, 'Paid_Customers', PAID_CUSTOMER_HEADERS);
+    ensurePaidCustomerHeaders_(paidSheet);
+    var deletedPaidSet = buildDeletedPaidSet_(payload);
     var finalSummarySheet = getOrCreateSheetCached_(ss, sheetsByName, 'Final_Daily_Summary', [
       'Date', 'Total Calls', 'Orders Confirmed', 'Farhan Leads', 'Naim Leads',
       'Kawsar FB Links', 'Kawsar Web Links', 'Kawsar TikTok Links', 'Kawsar IG Links', 'Kawsar Twitter Links',
@@ -707,14 +739,18 @@ function doPost(e) {
     }
 
     // Read Master_Data ONCE into session memory when needed for lookup or upsert
+    var deletedLeadSet = buildDeletedLeadSet_(payload);
     var isBatchEvent =
       payload.event === 'FULL_SYNC' ||
       payload.event === 'TEST_SYNC' ||
       payload.event === 'LEADS_BATCH_UPSERT';
-    var masterSession = getSheetSession_(sessionCache, masterSheet, MASTER_HEADERS.length, 'id');
+    var masterSession = getSheetSession_(sessionCache, masterSheet, MASTER_HEADERS.length, 'lead');
     var leadLookup = buildLeadLookupMapsFromSession_(masterSession, payload.leads, payload.lead);
 
     if (isBatchEvent) {
+      if (deletedLeadSet.size > 0) {
+        deleteLeadAcrossAllSheets_(ss, sheetsByName, sessionCache, masterSheet, null, deletedLeadSet);
+      }
       var syncedPaidLeadKeys = new Map();
       var leadsList = Array.isArray(payload.leads) ? payload.leads : [];
       var desiredAgentTabById = new Map();
@@ -727,6 +763,7 @@ function doPost(e) {
       for (var li = 0; li < leadsList.length; li++) {
         var leadItem = leadsList[li];
         if (!leadItem || !leadItem.id) continue;
+        if (isLeadRecordDeleted_(leadItem, deletedLeadSet)) continue;
         var leadIdStr = String(leadItem.id).trim();
         upsertSessionRowById_(masterSession, leadIdStr, formatMasterRow(leadItem), '');
 
@@ -815,8 +852,16 @@ function doPost(e) {
         }
       }
 
-      // 6. Batch upsert Paid_Customers & Paid_<AgentName> tabs ONCE
-      var paidList = Array.isArray(payload.paidCustomers) ? payload.paidCustomers.slice() : [];
+      // 6. Batch upsert Paid_Customers & Paid_<AgentName> tabs ONCE (respecting deleted tombstones)
+      var paidList = [];
+      if (Array.isArray(payload.paidCustomers)) {
+        for (var rpi = 0; rpi < payload.paidCustomers.length; rpi++) {
+          var candPaid = payload.paidCustomers[rpi];
+          if (candPaid && !isPaidRecordDeleted_(candPaid, deletedPaidSet)) {
+            paidList.push(candPaid);
+          }
+        }
+      }
       for (var pki = 0; pki < paidList.length; pki++) {
         var pkItem = paidList[pki];
         if (!pkItem) continue;
@@ -830,12 +875,19 @@ function doPost(e) {
         var ol = confirmedLeadsForPaid[oli];
         var olIdStr = String(ol.id || '').trim();
         var olPhoneKey = ol.phone ? ('PH:' + normalizePhoneKey_(ol.phone)) : '';
-        if (!syncedPaidLeadKeys.has(olIdStr) && (!olPhoneKey || !syncedPaidLeadKeys.has(olPhoneKey))) {
+        if (
+          !isPaidRecordDeleted_({ id: 'PC-' + olIdStr, leadId: olIdStr }, deletedPaidSet) &&
+          !syncedPaidLeadKeys.has(olIdStr) &&
+          (!olPhoneKey || !syncedPaidLeadKeys.has(olPhoneKey))
+        ) {
           paidList.push(buildPaidCustomerFromLead_(ol));
         }
       }
 
       var paidSession = getSheetSession_(sessionCache, paidSheet, PAID_CUSTOMER_HEADERS.length, 'id');
+      if (deletedPaidSet.size > 0) {
+        deletePaidCustomerAcrossAllSheets_(ss, sheetsByName, sessionCache, paidSheet, null, deletedPaidSet);
+      }
       if (paidList.length > 0) {
         syncPaidBatchAcrossPaidTabs_(
           ss,
@@ -851,17 +903,29 @@ function doPost(e) {
       // 7. In-memory Backfill across Collector_* and Paid_* tabs (only on final FULL_SYNC / TEST_SYNC)
       if (!payload.skipBackfill && (payload.event === 'FULL_SYNC' || payload.event === 'TEST_SYNC')) {
         backfillCollectorTabsFromMasterSession_(ss, sheetsByName, sessionCache, collectorSheets, masterSession);
-        backfillPaidAgentTabsFromPaidSession_(ss, sheetsByName, sessionCache, paidAgentSheets, paidSession, leadLookup);
+        backfillPaidAgentTabsFromPaidSession_(ss, sheetsByName, sessionCache, paidAgentSheets, paidSession, leadLookup, deletedPaidSet);
       }
-    } else if (payload.event === 'LEAD_UPSERT' && payload.lead) {
-      upsertSessionRowById_(masterSession, String(payload.lead.id || '').trim(), formatMasterRow(payload.lead), '');
-      syncLeadAcrossAgentTabsSession_(ss, sheetsByName, sessionCache, agentSheets, payload.lead);
-      syncLeadAcrossCollectorTabsSession_(ss, sheetsByName, sessionCache, collectorSheets, payload.lead);
-      var leadPaid = payload.paidCustomer || (payload.lead.status === 'Order Confirmed' ? buildPaidCustomerFromLead_(payload.lead) : null);
-      if (leadPaid) {
-        var paidSessionL = getSheetSession_(sessionCache, paidSheet, PAID_CUSTOMER_HEADERS.length, 'id');
-        syncPaidBatchAcrossPaidTabs_(ss, sheetsByName, sessionCache, paidSessionL, paidAgentSheets, [leadPaid], leadLookup);
+    } else if ((payload.event === 'LEAD_UPSERT' || payload.event === 'LEAD_UPDATED') && payload.lead) {
+      if (!isLeadRecordDeleted_(payload.lead, deletedLeadSet)) {
+        var prevLeadPhoneKey = payload.previousPhone ? normalizePhoneKey_(payload.previousPhone) : '';
+        upsertSessionRowById_(masterSession, String(payload.lead.id || '').trim(), formatMasterRow(payload.lead), prevLeadPhoneKey);
+        syncLeadAcrossAgentTabsSession_(ss, sheetsByName, sessionCache, agentSheets, payload.lead, prevLeadPhoneKey);
+        syncLeadAcrossCollectorTabsSession_(ss, sheetsByName, sessionCache, collectorSheets, payload.lead, prevLeadPhoneKey);
+        var leadPaid = payload.paidCustomer || (payload.lead.status === 'Order Confirmed' ? buildPaidCustomerFromLead_(payload.lead) : null);
+        if (leadPaid && !isPaidRecordDeleted_(leadPaid, deletedPaidSet)) {
+          var paidSessionL = getSheetSession_(sessionCache, paidSheet, PAID_CUSTOMER_HEADERS.length, 'id');
+          syncPaidBatchAcrossPaidTabs_(ss, sheetsByName, sessionCache, paidSessionL, paidAgentSheets, [leadPaid], leadLookup);
+        }
       }
+    } else if (payload.event === 'LEAD_DELETED') {
+      deleteLeadAcrossAllSheets_(
+        ss,
+        sheetsByName,
+        sessionCache,
+        masterSheet,
+        payload.deletedLead || null,
+        deletedLeadSet
+      );
     } else if (payload.event === 'CALL_LOGGED' && payload.callLog) {
       if (payload.lead) {
         upsertSessionRowById_(masterSession, String(payload.lead.id || '').trim(), formatMasterRow(payload.lead), '');
@@ -871,7 +935,7 @@ function doPost(e) {
       var logsSessionSingle = getSheetSession_(sessionCache, logsSheet, 10, 'callLog');
       upsertCallLogInSession_(logsSessionSingle, payload.callLog);
       var callPaid = payload.paidCustomer || (payload.lead && payload.lead.status === 'Order Confirmed' ? buildPaidCustomerFromLead_(payload.lead) : null);
-      if (callPaid) {
+      if (callPaid && !isPaidRecordDeleted_(callPaid, deletedPaidSet)) {
         var paidSessionC = getSheetSession_(sessionCache, paidSheet, PAID_CUSTOMER_HEADERS.length, 'id');
         syncPaidBatchAcrossPaidTabs_(ss, sheetsByName, sessionCache, paidSessionC, paidAgentSheets, [callPaid], leadLookup);
       }
@@ -882,6 +946,15 @@ function doPost(e) {
     } else if (payload.event === 'PAID_CUSTOMER_UPSERT' && payload.paidCustomer) {
       var paidSessionP = getSheetSession_(sessionCache, paidSheet, PAID_CUSTOMER_HEADERS.length, 'id');
       syncPaidBatchAcrossPaidTabs_(ss, sheetsByName, sessionCache, paidSessionP, paidAgentSheets, [payload.paidCustomer], leadLookup);
+    } else if (payload.event === 'PAID_CUSTOMER_DELETED') {
+      deletePaidCustomerAcrossAllSheets_(
+        ss,
+        sheetsByName,
+        sessionCache,
+        paidSheet,
+        payload.deletedPaidCustomer || null,
+        deletedPaidSet
+      );
     }
 
     if (payload.dailySummary) {
@@ -1334,7 +1407,9 @@ function formatPaidCustomerRow(pc) {
     "'" + (pc.renewalDate || ''),
     daysRemaining,
     pc.renewalStatus || 'Active',
-    pc.updatedAt || new Date().toISOString()
+    pc.updatedAt || new Date().toISOString(),
+    pc.packageName !== undefined ? String(pc.packageName || '').trim() : String(pc.amountOrPackage || '').trim(),
+    pc.notes || ''
   ];
 }
 
@@ -1354,8 +1429,8 @@ function formatPaidAgentRow_(pc, leadLookup) {
   var agent = String(pc.assignedAgentName || (matchedLead && matchedLead.assignedAgentName) || 'Unassigned').trim();
   var cleanRenewal = String(pc.renewalDate || '').replace(/^'+/, '').trim();
   var pkgVal = String(
-    pc.amountOrPackage ||
     pc.packageName ||
+    pc.amountOrPackage ||
     pc.amount ||
     (cleanRenewal ? ('1-Month Package (Renewal: ' + cleanRenewal + ')') : '1-Month Package')
   ).trim();
@@ -1525,7 +1600,88 @@ function backfillCollectorTabsFromMasterSession_(ss, sheetsByName, sessionCache,
   });
 }
 
-function backfillPaidAgentTabsFromPaidSession_(ss, sheetsByName, sessionCache, paidAgentSheets, paidSession, leadLookup) {
+function buildDeletedPaidSet_(payload) {
+  var set = new Set();
+  if (!payload) return set;
+  if (Array.isArray(payload.deletedPaidCustomerIds)) {
+    for (var i = 0; i < payload.deletedPaidCustomerIds.length; i++) {
+      var val = String(payload.deletedPaidCustomerIds[i] || '').trim();
+      if (val) set.add(val);
+    }
+  }
+  if (payload.deletedPaidCustomer) {
+    var dc = payload.deletedPaidCustomer;
+    if (dc.id) set.add(String(dc.id).trim());
+    if (dc.leadId) {
+      var lId = String(dc.leadId).trim();
+      set.add(lId);
+      set.add('PC-' + lId);
+    }
+  }
+  return set;
+}
+
+function isPaidRecordDeleted_(pc, deletedSet) {
+  if (!pc || !deletedSet || deletedSet.size === 0) return false;
+  var idStr = String(pc.id || '').trim();
+  var leadIdStr = String(pc.leadId || '').trim();
+  if (!leadIdStr && idStr.indexOf('PC-') === 0) leadIdStr = idStr.slice(3);
+  if (idStr && deletedSet.has(idStr)) return true;
+  if (leadIdStr && (deletedSet.has(leadIdStr) || deletedSet.has('PC-' + leadIdStr))) return true;
+  return false;
+}
+
+function deletePaidCustomerAcrossAllSheets_(ss, sheetsByName, sessionCache, paidSheet, deletedInfo, deletedSet) {
+  var keysMap = new Map();
+  if (deletedSet && typeof deletedSet.forEach === 'function') {
+    deletedSet.forEach(function(k) {
+      if (k) keysMap.set(k, true);
+    });
+  }
+  var phoneKey = '';
+  if (deletedInfo) {
+    var dId = String(deletedInfo.id || '').trim();
+    var dLeadId = String(deletedInfo.leadId || '').trim();
+    if (!dLeadId && dId.indexOf('PC-') === 0) dLeadId = dId.slice(3);
+    if (dId) keysMap.set(dId, true);
+    if (dLeadId) {
+      keysMap.set(dLeadId, true);
+      keysMap.set('PC-' + dLeadId, true);
+    }
+    if (deletedInfo.phone) {
+      phoneKey = normalizePhoneKey_(deletedInfo.phone);
+    }
+  }
+  var keyList = Array.from(keysMap.keys());
+  if (keyList.length === 0 && !phoneKey) return;
+
+  var paidSession = getSheetSession_(sessionCache, paidSheet, PAID_CUSTOMER_HEADERS.length, 'id');
+  deleteSessionRowsByKeys_(paidSession, keyList, '');
+  // Also match Paid_Customers rows by Lead ID (col 1) or Phone (col 3) when deletedInfo is present
+  for (var prIdx = 0; prIdx < paidSession.rows.length; prIdx++) {
+    if (paidSession.deletedIndices.has(prIdx)) continue;
+    var prow = paidSession.rows[prIdx];
+    var rowCustId = String(prow[0] || '').trim();
+    var rowLeadId = String(prow[1] || '').trim();
+    var rowPhoneKey = normalizePhoneKey_(prow[3]);
+    if (
+      keysMap.has(rowCustId) ||
+      (rowLeadId && (keysMap.has(rowLeadId) || keysMap.has('PC-' + rowLeadId))) ||
+      (phoneKey && rowPhoneKey && phoneKey === rowPhoneKey)
+    ) {
+      paidSession.deletedIndices.add(prIdx);
+      paidSession.dirtyIndices.delete(prIdx);
+    }
+  }
+
+  sheetsByName.forEach(function(sheet, sheetName) {
+    if (!isPaidAgentTabName_(sheetName)) return;
+    var pSession = getSheetSession_(sessionCache, sheet, PAID_AGENT_TAB_HEADERS.length, 'paidAgent');
+    deleteSessionRowsByKeys_(pSession, keyList, phoneKey);
+  });
+}
+
+function backfillPaidAgentTabsFromPaidSession_(ss, sheetsByName, sessionCache, paidAgentSheets, paidSession, leadLookup, deletedPaidSet) {
   if (!paidSession || !Array.isArray(paidSession.rows) || paidSession.rows.length === 0) return;
   var grouped = new Map();
   var pRows = paidSession.rows;
@@ -1537,6 +1693,7 @@ function backfillPaidAgentTabsFromPaidSession_(ss, sheetsByName, sessionCache, p
     var pcPhone = String(pr[3] || '').replace(/^'+/, '').trim();
     var pcAgent = String(pr[4] || '').trim();
     if ((!pcId && !pcPhone) || !pcAgent || pcAgent.toLowerCase() === 'unassigned') continue;
+    if (isPaidRecordDeleted_({ id: pcId, leadId: pcLeadId }, deletedPaidSet)) continue;
     var tabName = getPaidAgentTabName_(pcAgent);
     if (!paidAgentSheets[tabName]) {
       paidAgentSheets[tabName] = getOrCreateSheetCached_(ss, sheetsByName, tabName, PAID_AGENT_TAB_HEADERS);
@@ -1550,7 +1707,9 @@ function backfillPaidAgentTabsFromPaidSession_(ss, sheetsByName, sessionCache, p
       confirmedDate: String(pr[5] || '').replace(/^'+/, '').trim(),
       renewalDate: String(pr[6] || '').replace(/^'+/, '').trim(),
       renewalStatus: String(pr[8] || 'Active').trim(),
-      updatedAt: pr[9] || ''
+      updatedAt: pr[9] || '',
+      packageName: String(pr[10] || '').trim(),
+      notes: String(pr[11] || '').trim()
     };
     if (!grouped.has(tabName)) grouped.set(tabName, []);
     grouped.get(tabName).push(formatPaidAgentRow_(pcObj, leadLookup));
@@ -1575,25 +1734,82 @@ function backfillPaidAgentTabsFromPaidSession_(ss, sheetsByName, sessionCache, p
   });
 }
 
-function syncLeadAcrossAgentTabsSession_(ss, sheetsByName, sessionCache, agentSheets, lead) {
+function buildDeletedLeadSet_(payload) {
+  var set = new Set();
+  if (!payload) return set;
+  if (Array.isArray(payload.deletedLeadIds)) {
+    for (var i = 0; i < payload.deletedLeadIds.length; i++) {
+      var val = String(payload.deletedLeadIds[i] || '').trim();
+      if (val) set.add(val);
+    }
+  }
+  if (payload.deletedLead && payload.deletedLead.id) {
+    set.add(String(payload.deletedLead.id).trim());
+  }
+  return set;
+}
+
+function isLeadRecordDeleted_(lead, deletedSet) {
+  if (!lead || !deletedSet || deletedSet.size === 0) return false;
+  var idStr = String(lead.id || '').trim();
+  if (idStr && deletedSet.has(idStr)) return true;
+  var pk = normalizePhoneKey_(lead.phone || lead.rawPhone);
+  if (pk && deletedSet.has('SHEET-PH-' + pk)) return true;
+  return false;
+}
+
+function deleteLeadAcrossAllSheets_(ss, sheetsByName, sessionCache, masterSheet, deletedInfo, deletedLeadSet) {
+  var keysMap = new Map();
+  if (deletedLeadSet && typeof deletedLeadSet.forEach === 'function') {
+    deletedLeadSet.forEach(function(k) {
+      if (k) keysMap.set(k, true);
+    });
+  }
+  var phoneKey = '';
+  if (deletedInfo) {
+    var dId = String(deletedInfo.id || '').trim();
+    if (dId) keysMap.set(dId, true);
+    if (deletedInfo.phone) {
+      phoneKey = normalizePhoneKey_(deletedInfo.phone);
+    }
+  }
+  var keyList = Array.from(keysMap.keys());
+  if (keyList.length === 0 && !phoneKey) return;
+
+  var mSession = getSheetSession_(sessionCache, masterSheet, MASTER_HEADERS.length, 'lead');
+  deleteSessionRowsByKeys_(mSession, keyList, phoneKey);
+
+  sheetsByName.forEach(function(sheet, sheetName) {
+    if (sheetName.indexOf('Agent_') === 0 && sheetName !== 'Agent_Logs') {
+      var aSession = getSheetSession_(sessionCache, sheet, AGENT_TAB_HEADERS.length, 'lead');
+      deleteSessionRowsByKeys_(aSession, keyList, phoneKey);
+    } else if (sheetName.indexOf('Collector_') === 0) {
+      var cSession = getSheetSession_(sessionCache, sheet, COLLECTOR_TAB_HEADERS.length, 'lead');
+      deleteSessionRowsByKeys_(cSession, keyList, phoneKey);
+    }
+  });
+}
+
+function syncLeadAcrossAgentTabsSession_(ss, sheetsByName, sessionCache, agentSheets, lead, prevPhoneKey) {
   var targetName = lead.assignedAgentName ? String(lead.assignedAgentName).trim() : '';
   var targetTabName = (targetName && targetName.toLowerCase() !== 'unassigned') ? getAgentTabName_(targetName) : '';
   if (targetTabName && !agentSheets[targetTabName]) {
     agentSheets[targetTabName] = getOrCreateSheetCached_(ss, sheetsByName, targetTabName, AGENT_TAB_HEADERS);
   }
   var lId = String(lead.id || '').trim();
+  var lPhoneKey = normalizePhoneKey_(lead.phone || lead.rawPhone);
   sheetsByName.forEach(function(sheet, sheetName) {
     if (sheetName.indexOf('Agent_') !== 0 || sheetName === 'Agent_Logs') return;
-    var aSession = getSheetSession_(sessionCache, sheet, AGENT_TAB_HEADERS.length, 'id');
+    var aSession = getSheetSession_(sessionCache, sheet, AGENT_TAB_HEADERS.length, 'lead');
     if (targetTabName && sheetName === targetTabName) {
-      upsertSessionRowById_(aSession, lId, formatAgentRow(lead), '');
-    } else if (aSession.idIndex.has(lId)) {
-      deleteSessionRowsByKeys_(aSession, [lId], '');
+      upsertSessionRowById_(aSession, lId, formatAgentRow(lead), prevPhoneKey || lPhoneKey);
+    } else if (aSession.idIndex.has(lId) || (prevPhoneKey && aSession.phoneIndex.has(prevPhoneKey)) || (lPhoneKey && aSession.phoneIndex.has(lPhoneKey))) {
+      deleteSessionRowsByKeys_(aSession, [lId], prevPhoneKey || '');
     }
   });
 }
 
-function syncLeadAcrossCollectorTabsSession_(ss, sheetsByName, sessionCache, collectorSheets, lead) {
+function syncLeadAcrossCollectorTabsSession_(ss, sheetsByName, sessionCache, collectorSheets, lead, prevPhoneKey) {
   var rawCollector = lead && lead.collectorName ? String(lead.collectorName).trim() : '';
   var targetTabName = rawCollector ? getCollectorTabName_(rawCollector) : '';
   if (targetTabName && !collectorSheets[targetTabName]) {
@@ -1605,7 +1821,7 @@ function syncLeadAcrossCollectorTabsSession_(ss, sheetsByName, sessionCache, col
     if (sheetName.indexOf('Collector_') !== 0) return;
     var cSession = getSheetSession_(sessionCache, sheet, COLLECTOR_TAB_HEADERS.length, 'lead');
     if (targetTabName && sheetName === targetTabName) {
-      upsertSessionRowById_(cSession, lId, formatCollectorRow(lead), lPhoneKey);
+      upsertSessionRowById_(cSession, lId, formatCollectorRow(lead), prevPhoneKey || lPhoneKey);
     } else if (cSession.idIndex.has(lId)) {
       deleteSessionRowsByKeys_(cSession, [lId], '');
     }

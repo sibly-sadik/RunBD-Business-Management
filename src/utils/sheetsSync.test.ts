@@ -1866,11 +1866,576 @@ describe('Kawsar_Posts_Log TikTok, Instagram, and Twitter links in sheetsSync an
     assert.equal(pulledNew.twitterLink, 'https://x.com/runbd/status/18999');
     assert.equal(pulledNew.posterName, 'Kawsar');
   });
+
+  it('syncs Paid Customer Package edits & deletes across Paid_Customers, Paid_<Agent>, doGet pull, and tombstones', () => {
+    const customPaid: PaidCustomer = {
+      id: 'PC-PKG-1',
+      leadId: 'RBD-PKG-1',
+      customerName: 'Tareq Rahman',
+      phone: '01711889900',
+      assignedAgentId: 'agent-tanjin',
+      assignedAgentName: 'Tanjin',
+      confirmedDate: '2026-11-20',
+      renewalDate: '2026-12-20',
+      renewalStatus: 'Active',
+      lastRenewedAt: null,
+      packageName: '1-Month Premium',
+      notes: 'VIP tracker plan',
+      createdAt: '2026-11-20T10:00:00.000Z',
+      updatedAt: '2026-11-24T10:00:00.000Z',
+    };
+
+    const enriched = enrichPaidCustomersForSheetSync([customPaid], []);
+    assert.equal(enriched[0].packageName, '1-Month Premium');
+    assert.equal(enriched[0].amountOrPackage, '1-Month Premium');
+
+    // mergeRemotePaidCustomers filters deleted tombstones cleanly
+    const mergedAfterDelete = mergeRemotePaidCustomers(
+      [customPaid],
+      [
+        customPaid,
+        {
+          id: 'PC-KEEP-2',
+          leadId: 'RBD-KEEP-2',
+          customerName: 'Salma Begum',
+          phone: '01811223399',
+          assignedAgentName: 'Kathy',
+          confirmedDate: '2026-11-22',
+          renewalDate: '2026-12-22',
+          renewalStatus: 'Active',
+          packageName: '3-Month Package',
+          notes: 'Paid 3M',
+          updatedAt: '2026-11-24T09:00:00.000Z',
+        },
+      ],
+      ['PC-PKG-1']
+    );
+    assert.deepEqual(
+      mergedAfterDelete.map((c) => c.id),
+      ['PC-KEEP-2']
+    );
+    assert.equal(mergedAfterDelete[0].packageName, '3-Month Package');
+
+    const makeMockSheet = (name: string) => {
+      const rows: unknown[][] = [];
+      return {
+        getName: () => name,
+        appendRow: (row: unknown[]) => rows.push([...row]),
+        getLastRow: () => rows.length,
+        getLastColumn: () => (rows[0] ? rows[0].length : 0),
+        getDataRange: () => ({
+          getValues: () => rows.map((r) => [...r]),
+        }),
+        getRange: (row: number, col: number, numRows: number, numCols: number) => ({
+          setFontWeight: () => {},
+          getValues: () => {
+            const out: unknown[][] = [];
+            for (let r = row - 1; r < row - 1 + numRows; r++) {
+              const src = rows[r] ?? [];
+              const slice: unknown[] = [];
+              for (let c = col - 1; c < col - 1 + numCols; c++) {
+                slice.push(src[c] ?? '');
+              }
+              out.push(slice);
+            }
+            return out;
+          },
+          setValues: (newVals: unknown[][]) => {
+            for (let r = 0; r < numRows; r++) {
+              const targetIdx = row - 1 + r;
+              while (rows.length <= targetIdx) rows.push([]);
+              for (let c = 0; c < numCols; c++) {
+                rows[targetIdx][col - 1 + c] = newVals[r][c];
+              }
+            }
+          },
+        }),
+        deleteRow: (rowNum: number) => rows.splice(rowNum - 1, 1),
+        setFrozenRows: () => {},
+        _rows: rows,
+      };
+    };
+
+    const sheetsMap = new Map<string, ReturnType<typeof makeMockSheet>>();
+    const mockSpreadsheet = {
+      getSheetByName: (name: string) => sheetsMap.get(name) ?? null,
+      insertSheet: (name: string) => {
+        const s = makeMockSheet(name);
+        sheetsMap.set(name, s);
+        return s;
+      },
+      getSheets: () => Array.from(sheetsMap.values()),
+    };
+
+    const sandbox: Record<string, unknown> = {
+      SpreadsheetApp: { getActiveSpreadsheet: () => mockSpreadsheet },
+      Utilities: {
+        formatDate: (d: Date) => new Date(d.getTime() + 6 * 3600 * 1000).toISOString().slice(0, 10),
+      },
+      ContentService: {
+        MimeType: { JSON: 'JSON' },
+        createTextOutput: (txt: string) => ({ setMimeType: () => txt }),
+      },
+    };
+    vm.createContext(sandbox);
+    vm.runInContext(GOOGLE_APPS_SCRIPT_CODE, sandbox);
+
+    const doPost = sandbox.doPost as (e: { postData: { contents: string } }) => string;
+    const doGet = sandbox.doGet as (e: { parameter: Record<string, string> }) => string;
+
+    // 1. Upsert Paid Customer with Package
+    doPost({
+      postData: {
+        contents: JSON.stringify({
+          event: 'PAID_CUSTOMER_UPSERT',
+          paidCustomer: enriched[0],
+        }),
+      },
+    });
+
+    const paidSheet = sheetsMap.get('Paid_Customers')!;
+    const paidTanjin = sheetsMap.get('Paid_Tanjin')!;
+    assert.equal(paidSheet._rows[0][10], 'Package');
+    assert.equal(paidSheet._rows[1][10], '1-Month Premium');
+    assert.equal(paidSheet._rows[1][11], 'VIP tracker plan');
+    assert.equal(paidTanjin._rows[1][7], '1-Month Premium');
+
+    // Pull reads back packageName & notes cleanly
+    const pulled = JSON.parse(doGet({ parameter: { scope: 'all' } }));
+    assert.equal(pulled.paidCustomers.length, 1);
+    assert.equal(pulled.paidCustomers[0].packageName, '1-Month Premium');
+    assert.equal(pulled.paidCustomers[0].notes, 'VIP tracker plan');
+
+    // 2. Delete removes from both Paid_Customers & Paid_Tanjin
+    const delRes = JSON.parse(
+      doPost({
+        postData: {
+          contents: JSON.stringify({
+            event: 'PAID_CUSTOMER_DELETED',
+            deletedPaidCustomer: {
+              id: 'PC-PKG-1',
+              leadId: 'RBD-PKG-1',
+              phone: '01711889900',
+              assignedAgentName: 'Tanjin',
+            },
+            deletedPaidCustomerIds: ['PC-PKG-1', 'RBD-PKG-1'],
+          }),
+        },
+      })
+    );
+    assert.equal(delRes.ok, true);
+    assert.equal(paidSheet._rows.length, 1); // header only
+    assert.equal(paidTanjin._rows.length, 1); // header only
+
+    // 3. Subsequent FULL_SYNC with confirmed lead + deletedPaidCustomerIds does NOT resurrect deleted paid row
+    doPost({
+      postData: {
+        contents: JSON.stringify({
+          event: 'FULL_SYNC',
+          agentNames: ['Tanjin'],
+          collectorNames: ['Farhan'],
+          deletedPaidCustomerIds: ['PC-PKG-1', 'RBD-PKG-1'],
+          leads: [
+            {
+              id: 'RBD-PKG-1',
+              customerName: 'Tareq Rahman',
+              phone: '01711889900',
+              collectorName: 'Farhan',
+              assignedAgentName: 'Tanjin',
+              status: 'Order Confirmed',
+              createdAt: '2026-11-20T10:00:00.000Z',
+              updatedAt: '2026-11-20T10:00:00.000Z',
+            },
+          ],
+          paidCustomers: [enriched[0]],
+        }),
+      },
+    });
+    assert.equal(paidSheet._rows.length, 1);
+    assert.equal(paidTanjin._rows.length, 1);
+  });
+
+  it('syncs Workshop, Accessories, and Rent a Car leads and paid customers cleanly across Master_Data, Collector, Agent, and Paid tabs', () => {
+    const makeMockSheet = (name: string) => {
+      const rows: unknown[][] = [];
+      return {
+        getName: () => name,
+        getLastRow: () => rows.length,
+        getLastColumn: () => (rows[0] ? rows[0].length : 0),
+        appendRow: (row: unknown[]) => rows.push([...row]),
+        getDataRange: () => ({
+          getValues: () => rows.map((r) => [...r]),
+        }),
+        getRange: (r: number, c: number, numRows = 1, numCols = 1) => ({
+          setFontWeight: () => {},
+          getValues: () => {
+            const out: unknown[][] = [];
+            for (let i = 0; i < numRows; i++) {
+              const row = rows[r - 1 + i] ?? [];
+              const slice: unknown[] = [];
+              for (let j = 0; j < numCols; j++) {
+                slice.push(row[c - 1 + j] ?? '');
+              }
+              out.push(slice);
+            }
+            return out;
+          },
+          setValues: (vals: unknown[][]) => {
+            for (let i = 0; i < vals.length; i++) {
+              const rowIdx = r - 1 + i;
+              while (rows.length <= rowIdx) rows.push([]);
+              for (let j = 0; j < vals[i].length; j++) {
+                rows[rowIdx][c - 1 + j] = vals[i][j];
+              }
+            }
+          },
+        }),
+        deleteRow: (rowNum: number) => rows.splice(rowNum - 1, 1),
+        setFrozenRows: () => {},
+        _rows: rows,
+      };
+    };
+
+    const sheetsMap = new Map<string, ReturnType<typeof makeMockSheet>>();
+    const mockSpreadsheet = {
+      getSheetByName: (name: string) => sheetsMap.get(name) ?? null,
+      insertSheet: (name: string) => {
+        const s = makeMockSheet(name);
+        sheetsMap.set(name, s);
+        return s;
+      },
+      getSheets: () => Array.from(sheetsMap.values()),
+    };
+
+    const sandbox: Record<string, unknown> = {
+      SpreadsheetApp: { getActiveSpreadsheet: () => mockSpreadsheet },
+      Utilities: {
+        formatDate: (d: Date) => new Date(d.getTime() + 6 * 3600 * 1000).toISOString().slice(0, 10),
+      },
+      ContentService: {
+        MimeType: { JSON: 'JSON' },
+        createTextOutput: (txt: string) => ({ setMimeType: () => txt }),
+      },
+    };
+    vm.createContext(sandbox);
+    vm.runInContext(GOOGLE_APPS_SCRIPT_CODE, sandbox);
+
+    const doPost = sandbox.doPost as (e: { postData: { contents: string } }) => string;
+    const doGet = sandbox.doGet as (e: { parameter: Record<string, string> }) => string;
+
+    const leads: Lead[] = [
+      {
+        id: 'RBD-WS-1',
+        customerName: 'Workshop',
+        phone: '01711990001',
+        rawPhone: '01711990001',
+        facebookLink: 'https://facebook.com/workshop.dhaka',
+        normalizedFacebookLink: 'facebook.com/workshop.dhaka',
+        notes: 'Service center',
+        collectorId: 'collector-farhan',
+        collectorName: 'Farhan',
+        assignedAgentId: 'agent-tanjin',
+        assignedAgentName: 'Tanjin',
+        status: 'Order Confirmed',
+        followUpAt: null,
+        lastCallNotes: 'Confirmed',
+        createdAt: '2026-11-24T10:00:00.000Z',
+        updatedAt: '2026-11-24T10:00:00.000Z',
+        collectedDate: '2026-11-24',
+      },
+      {
+        id: 'RBD-AC-1',
+        customerName: 'Accessories',
+        phone: '01811990002',
+        rawPhone: '01811990002',
+        facebookLink: '',
+        normalizedFacebookLink: '',
+        notes: 'Car accessories shop',
+        collectorId: 'collector-farhan',
+        collectorName: 'Farhan',
+        assignedAgentId: 'agent-tanjin',
+        assignedAgentName: 'Tanjin',
+        status: 'Interested',
+        followUpAt: null,
+        lastCallNotes: '',
+        createdAt: '2026-11-24T10:05:00.000Z',
+        updatedAt: '2026-11-24T10:05:00.000Z',
+        collectedDate: '2026-11-24',
+      },
+      {
+        id: 'RBD-RC-1',
+        customerName: 'Rent a Car',
+        phone: '01911990003',
+        rawPhone: '01911990003',
+        facebookLink: '',
+        normalizedFacebookLink: '',
+        notes: 'Fleet rental',
+        collectorId: 'collector-farhan',
+        collectorName: 'Farhan',
+        assignedAgentId: 'agent-tanjin',
+        assignedAgentName: 'Tanjin',
+        status: 'Pending',
+        followUpAt: null,
+        lastCallNotes: '',
+        createdAt: '2026-11-24T10:10:00.000Z',
+        updatedAt: '2026-11-24T10:10:00.000Z',
+        collectedDate: '2026-11-24',
+      },
+    ];
+
+    const paidCustomers = enrichPaidCustomersForSheetSync(
+      [
+        {
+          id: 'PC-RBD-WS-1',
+          leadId: 'RBD-WS-1',
+          customerName: 'Workshop',
+          phone: '01711990001',
+          assignedAgentId: 'agent-tanjin',
+          assignedAgentName: 'Tanjin',
+          confirmedDate: '2026-11-24',
+          renewalDate: '2026-12-24',
+          renewalStatus: 'Active',
+          lastRenewedAt: null,
+          packageName: '1-Month Standard',
+          notes: 'Workshop fleet',
+          createdAt: '2026-11-24T10:00:00.000Z',
+          updatedAt: '2026-11-24T10:00:00.000Z',
+        },
+      ],
+      leads
+    );
+
+    const res = JSON.parse(
+      doPost({
+        postData: {
+          contents: JSON.stringify({
+            event: 'FULL_SYNC',
+            agentNames: ['Tanjin'],
+            collectorNames: ['Farhan'],
+            leads,
+            paidCustomers,
+          }),
+        },
+      })
+    );
+    assert.equal(res.ok, true);
+
+    assert.deepEqual(
+      sheetsMap.get('Master_Data')!._rows.slice(1).map((r) => r[1]),
+      ['Workshop', 'Accessories', 'Rent a Car']
+    );
+    assert.deepEqual(
+      sheetsMap.get('Collector_Farhan')!._rows.slice(1).map((r) => r[1]),
+      ['Workshop', 'Accessories', 'Rent a Car']
+    );
+    assert.deepEqual(
+      sheetsMap.get('Agent_Tanjin')!._rows.slice(1).map((r) => r[1]),
+      ['Workshop', 'Accessories', 'Rent a Car']
+    );
+    assert.equal(sheetsMap.get('Paid_Customers')!._rows[1][2], 'Workshop');
+    assert.equal(sheetsMap.get('Paid_Tanjin')!._rows[1][2], 'Workshop');
+
+    const pulled = JSON.parse(doGet({ parameter: { scope: 'all' } }));
+    assert.deepEqual(
+      pulled.leads.map((l: Partial<Lead>) => l.customerName),
+      ['Workshop', 'Accessories', 'Rent a Car']
+    );
+    assert.equal(pulled.paidCustomers[0].customerName, 'Workshop');
+  });
+
+  it('mergeRemoteLeads respects deletedLeadIds tombstones and Code.gs handles LEAD_UPDATED & LEAD_DELETED cleanly', () => {
+    const localLead: Lead = {
+      id: 'RBD-ED-1',
+      customerName: 'Car',
+      phone: '01711223344',
+      rawPhone: '01711223344',
+      facebookLink: 'https://facebook.com/ed.one',
+      normalizedFacebookLink: 'facebook.com/ed.one',
+      notes: 'Initial note',
+      collectorId: 'collector-farhan',
+      collectorName: 'Farhan',
+      assignedAgentId: 'agent-tanjin',
+      assignedAgentName: 'Tanjin',
+      status: 'Pending',
+      followUpAt: null,
+      lastCallNotes: '',
+      createdAt: '2026-11-24T09:00:00.000Z',
+      updatedAt: '2026-11-24T09:00:00.000Z',
+      collectedDate: '2026-11-24',
+    };
+
+    assert.deepEqual(mergeRemoteLeads([localLead], [], ['RBD-ED-1']), []);
+    assert.deepEqual(
+      mergeRemoteLeads(
+        [],
+        [localLead, { id: 'RBD-KEEP', customerName: 'Bike', phone: '01812345678', collectorName: 'Farhan' }],
+        ['RBD-ED-1']
+      ).map((l) => l.id),
+      ['RBD-KEEP']
+    );
+
+    const makeMockSheet = (name: string) => {
+      const rows: unknown[][] = [];
+      return {
+        getName: () => name,
+        getLastRow: () => rows.length,
+        getLastColumn: () => (rows[0] ? rows[0].length : 0),
+        appendRow: (row: unknown[]) => rows.push([...row]),
+        getDataRange: () => ({
+          getValues: () => rows.map((r) => [...r]),
+        }),
+        getRange: (r: number, c: number, numRows = 1, numCols = 1) => ({
+          setFontWeight: () => {},
+          getValues: () => {
+            const out: unknown[][] = [];
+            for (let i = 0; i < numRows; i++) {
+              const row = rows[r - 1 + i] ?? [];
+              const slice: unknown[] = [];
+              for (let j = 0; j < numCols; j++) {
+                slice.push(row[c - 1 + j] ?? '');
+              }
+              out.push(slice);
+            }
+            return out;
+          },
+          setValues: (vals: unknown[][]) => {
+            for (let i = 0; i < vals.length; i++) {
+              const rowIdx = r - 1 + i;
+              while (rows.length <= rowIdx) rows.push([]);
+              for (let j = 0; j < vals[i].length; j++) {
+                rows[rowIdx][c - 1 + j] = vals[i][j];
+              }
+            }
+          },
+        }),
+        deleteRow: (rowNum: number) => rows.splice(rowNum - 1, 1),
+        setFrozenRows: () => {},
+        _rows: rows,
+      };
+    };
+
+    const sheetsMap = new Map<string, ReturnType<typeof makeMockSheet>>();
+    const mockSpreadsheet = {
+      getSheetByName: (name: string) => sheetsMap.get(name) ?? null,
+      insertSheet: (name: string) => {
+        const s = makeMockSheet(name);
+        sheetsMap.set(name, s);
+        return s;
+      },
+      getSheets: () => Array.from(sheetsMap.values()),
+    };
+
+    const sandbox: Record<string, unknown> = {
+      SpreadsheetApp: { getActiveSpreadsheet: () => mockSpreadsheet },
+      Utilities: {
+        formatDate: (d: Date) => new Date(d.getTime() + 6 * 3600 * 1000).toISOString().slice(0, 10),
+      },
+      ContentService: {
+        MimeType: { JSON: 'JSON' },
+        createTextOutput: (txt: string) => ({ setMimeType: () => txt }),
+      },
+    };
+    vm.createContext(sandbox);
+    vm.runInContext(GOOGLE_APPS_SCRIPT_CODE, sandbox);
+
+    const doPost = sandbox.doPost as (e: { postData: { contents: string } }) => string;
+
+    // 1. Seed initial lead assigned to Tanjin
+    const createRes = JSON.parse(
+      doPost({
+        postData: {
+          contents: JSON.stringify({
+            event: 'LEAD_UPSERT',
+            agentNames: ['Tanjin', 'Sakib'],
+            collectorNames: ['Farhan'],
+            lead: localLead,
+          }),
+        },
+      })
+    );
+    assert.equal(createRes.ok, true);
+    assert.equal(sheetsMap.get('Agent_Tanjin')!._rows.length, 2);
+    assert.equal(sheetsMap.get('Agent_Sakib')!._rows.length, 1);
+
+    // 2. LEAD_UPDATED: edit vehicle -> Workshop, phone -> 01999887766, reassign Tanjin -> Sakib
+    const editedLead: Lead = {
+      ...localLead,
+      customerName: 'Workshop',
+      phone: '01999887766',
+      rawPhone: '01999887766',
+      assignedAgentId: 'agent-sakib',
+      assignedAgentName: 'Sakib',
+      status: 'Interested',
+      notes: 'Moved to Workshop + Sakib',
+      updatedAt: '2026-11-24T12:00:00.000Z',
+    };
+
+    const updateRes = JSON.parse(
+      doPost({
+        postData: {
+          contents: JSON.stringify({
+            event: 'LEAD_UPDATED',
+            agentNames: ['Tanjin', 'Sakib'],
+            collectorNames: ['Farhan'],
+            lead: editedLead,
+            previousAgentName: 'Tanjin',
+            previousPhone: localLead.phone,
+          }),
+        },
+      })
+    );
+    assert.equal(updateRes.ok, true);
+    assert.equal(sheetsMap.get('Master_Data')!._rows[1][1], 'Workshop');
+    assert.equal(sheetsMap.get('Master_Data')!._rows[1][2], "'01999887766");
+    assert.equal(sheetsMap.get('Master_Data')!._rows[1][5], 'Sakib');
+    assert.equal(sheetsMap.get('Collector_Farhan')!._rows[1][1], 'Workshop');
+    assert.equal(sheetsMap.get('Collector_Farhan')!._rows[1][2], "'01999887766");
+    assert.equal(sheetsMap.get('Agent_Tanjin')!._rows.length, 1); // removed from old agent tab
+    assert.equal(sheetsMap.get('Agent_Sakib')!._rows.length, 2);
+    assert.equal(sheetsMap.get('Agent_Sakib')!._rows[1][1], 'Workshop');
+
+    // 3. LEAD_DELETED: removes row from Master_Data, Collector_Farhan, and Agent_Sakib
+    const delRes = JSON.parse(
+      doPost({
+        postData: {
+          contents: JSON.stringify({
+            event: 'LEAD_DELETED',
+            agentNames: ['Tanjin', 'Sakib'],
+            collectorNames: ['Farhan'],
+            deletedLead: {
+              id: editedLead.id,
+              phone: editedLead.phone,
+              collectorName: 'Farhan',
+              assignedAgentName: 'Sakib',
+            },
+            deletedLeadIds: [editedLead.id],
+          }),
+        },
+      })
+    );
+    assert.equal(delRes.ok, true);
+    assert.equal(sheetsMap.get('Master_Data')!._rows.length, 1);
+    assert.equal(sheetsMap.get('Collector_Farhan')!._rows.length, 1);
+    assert.equal(sheetsMap.get('Agent_Sakib')!._rows.length, 1);
+
+    // 4. Subsequent FULL_SYNC with deletedLeadIds tombstone does NOT resurrect deleted lead
+    const fullSyncRes = JSON.parse(
+      doPost({
+        postData: {
+          contents: JSON.stringify({
+            event: 'FULL_SYNC',
+            agentNames: ['Tanjin', 'Sakib'],
+            collectorNames: ['Farhan'],
+            leads: [editedLead],
+            deletedLeadIds: [editedLead.id],
+          }),
+        },
+      })
+    );
+    assert.equal(fullSyncRes.ok, true);
+    assert.equal(sheetsMap.get('Master_Data')!._rows.length, 1);
+    assert.equal(sheetsMap.get('Collector_Farhan')!._rows.length, 1);
+    assert.equal(sheetsMap.get('Agent_Sakib')!._rows.length, 1);
+  });
 });
-
-
-
-
-
-
 

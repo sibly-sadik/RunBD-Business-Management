@@ -86,6 +86,7 @@ test('Supabase call log and paid customer mappers preserve Done status and 30-da
     renewalDate: '2026-12-21',
     renewalStatus: 'Active',
     lastRenewedAt: null,
+    packageName: '1-Month Premium',
     notes: 'Order confirmed',
     createdAt: '2026-11-21T10:20:00.000Z',
     updatedAt: '2026-11-21T10:20:00.000Z',
@@ -94,10 +95,12 @@ test('Supabase call log and paid customer mappers preserve Done status and 30-da
   const paidRow = paidCustomerToSupabaseRow(paid, 'https://facebook.com/mahmud.hasan');
   assert.equal(paidRow.renewal_date, '2026-12-21');
   assert.equal(paidRow.renewal_status, 'Active');
+  assert.equal(paidRow.package_name, '1-Month Premium');
 
   const parsedPaid = rowToPaidCustomer(paidRow);
   assert.equal(parsedPaid.renewalDate, '2026-12-21');
   assert.equal(parsedPaid.assignedAgentName, 'Tanjin');
+  assert.equal(parsedPaid.packageName, '1-Month Premium');
 });
 
 test('Supabase Kawsar post mapper normalizes Facebook, Website, TikTok, Instagram, and Twitter links and detects schema errors', () => {
@@ -290,3 +293,69 @@ test('resolveUpsertSupabaseCallLogRow reuses existing same-day row id by lead_id
   assert.deepEqual(nextDay.duplicateIdsToDelete, []);
 });
 
+test('Supabase mappers normalize and preserve Workshop, Accessories, and Rent a Car across leads, call logs, and paid customers', () => {
+  const categories = [
+    { input: 'workshop', expected: 'Workshop', phone: '01711000011', id: 'L-WS-1' },
+    { input: 'accessories', expected: 'Accessories', phone: '01811000022', id: 'L-AC-1' },
+    { input: 'rent-a-car', expected: 'Rent a Car', phone: '01911000033', id: 'L-RC-1' },
+  ];
+
+  for (const item of categories) {
+    const leadRow = leadToSupabaseRow({
+      id: item.id,
+      customerName: item.input,
+      phone: item.phone,
+      rawPhone: item.phone,
+      facebookLink: '',
+      normalizedFacebookLink: '',
+      notes: '',
+      collectorId: 'collector-farhan',
+      collectorName: 'Farhan',
+      assignedAgentId: 'agent-tanjin',
+      assignedAgentName: 'Tanjin',
+      status: 'Order Confirmed',
+      followUpAt: null,
+      lastCallNotes: '',
+      createdAt: '2026-11-24T10:00:00.000Z',
+      updatedAt: '2026-11-24T10:00:00.000Z',
+      collectedDate: '2026-11-24',
+    });
+    assert.equal(leadRow.customer_name, item.expected);
+    assert.equal(rowToLead(leadRow).customerName, item.expected);
+
+    const logRow = callLogToSupabaseRow({
+      id: `CL-${item.id}`,
+      leadId: item.id,
+      customerName: item.input,
+      phone: item.phone,
+      agentId: 'agent-tanjin',
+      agentName: 'Tanjin',
+      previousStatus: 'Pending',
+      newStatus: 'Order Confirmed',
+      notes: '',
+      followUpAt: null,
+      timestamp: '2026-11-24T10:05:00.000Z',
+    });
+    assert.equal(logRow.customer_name, item.expected);
+    assert.equal(rowToCallLog(logRow).customerName, item.expected);
+
+    const paidRow = paidCustomerToSupabaseRow({
+      id: `PC-${item.id}`,
+      leadId: item.id,
+      customerName: item.input,
+      phone: item.phone,
+      assignedAgentId: 'agent-tanjin',
+      assignedAgentName: 'Tanjin',
+      confirmedDate: '2026-11-24',
+      renewalDate: '2026-12-24',
+      renewalStatus: 'Active',
+      lastRenewedAt: null,
+      packageName: '1-Month Standard',
+      notes: '',
+      createdAt: '2026-11-24T10:05:00.000Z',
+      updatedAt: '2026-11-24T10:05:00.000Z',
+    });
+    assert.equal(paidRow.customer_name, item.expected);
+    assert.equal(rowToPaidCustomer(paidRow).customerName, item.expected);
+  }
+});

@@ -77,10 +77,13 @@ export interface SupabasePaidCustomerRow {
   renewal_date: string;
   renewal_status: string;
   last_renewed_at?: string | null;
+  package_name?: string | null;
   notes: string | null;
   created_at?: string | null;
   updated_at: string;
 }
+
+let supabaseSupportsPaidPackageColumn: boolean | null = null;
 
 export interface SupabaseContentPostRow {
   id: string;
@@ -273,7 +276,7 @@ export function rowToCallLog(row: SupabaseCallLogRow): CallLog {
   return {
     id: row.id,
     leadId: row.lead_id,
-    customerName: row.customer_name,
+    customerName: normalizeVehicleType(row.customer_name) || row.customer_name,
     phone: row.phone,
     agentId: row.agent_id?.trim() || slugId('agent', row.agent_name) || 'agent-tanjin',
     agentName: row.agent_name,
@@ -290,7 +293,7 @@ export function callLogToSupabaseRow(log: CallLog): SupabaseCallLogRow {
   return {
     id: log.id,
     lead_id: log.leadId,
-    customer_name: log.customerName,
+    customer_name: normalizeVehicleType(log.customerName) || log.customerName,
     phone: normalizeBdPhone(log.phone) || log.phone,
     agent_id: log.agentId,
     agent_name: log.agentName,
@@ -308,7 +311,7 @@ export function rowToPaidCustomer(row: SupabasePaidCustomerRow): PaidCustomer {
   return {
     id: row.id,
     leadId: row.lead_id?.trim() || row.id.replace(/^PC-/, ''),
-    customerName: row.customer_name,
+    customerName: normalizeVehicleType(row.customer_name) || row.customer_name,
     phone: row.phone,
     assignedAgentId:
       row.assigned_agent_id?.trim() || (agentName ? slugId('agent', agentName) : null),
@@ -317,6 +320,7 @@ export function rowToPaidCustomer(row: SupabasePaidCustomerRow): PaidCustomer {
     renewalDate: row.renewal_date,
     renewalStatus: sanitizeRenewalStatus(row.renewal_status),
     lastRenewedAt: row.last_renewed_at ?? null,
+    packageName: row.package_name?.trim() || '',
     notes: row.notes ?? '',
     createdAt: row.created_at || row.updated_at,
     updatedAt: row.updated_at,
@@ -330,7 +334,7 @@ export function paidCustomerToSupabaseRow(
   return {
     id: customer.id,
     lead_id: customer.leadId,
-    customer_name: customer.customerName,
+    customer_name: normalizeVehicleType(customer.customerName) || customer.customerName,
     phone: normalizeBdPhone(customer.phone) || customer.phone.trim(),
     facebook_link: facebookLink,
     assigned_agent_id: customer.assignedAgentId ?? null,
@@ -339,10 +343,18 @@ export function paidCustomerToSupabaseRow(
     renewal_date: customer.renewalDate,
     renewal_status: sanitizeRenewalStatus(customer.renewalStatus),
     last_renewed_at: customer.lastRenewedAt ?? null,
+    package_name: (customer.packageName ?? '').trim(),
     notes: customer.notes ?? '',
     created_at: customer.createdAt,
     updated_at: customer.updatedAt,
   };
+}
+
+function toLegacySupabasePaidCustomerRow(
+  row: SupabasePaidCustomerRow
+): SupabasePaidCustomerRow {
+  const { package_name: _ignored, ...rest } = row;
+  return rest;
 }
 
 export function rowToContentPost(row: SupabaseContentPostRow): ContentPost {
@@ -618,6 +630,11 @@ export async function fetchBootstrapFromSupabase(
       }
     }
 
+    if (Array.isArray(paidRes.data) && paidRes.data.length > 0) {
+      const sample = paidRes.data[0] as Record<string, unknown>;
+      supabaseSupportsPaidPackageColumn = 'package_name' in sample;
+    }
+
     return {
       ok: true,
       leads: ((leadsRes.data ?? []) as SupabaseLeadRow[]).map(rowToLead),
@@ -649,7 +666,8 @@ export async function fetchBootstrapFromSupabase(
 
 export async function checkLeadDuplicateInSupabase(
   rawPhone: string,
-  rawFacebookLink: string
+  rawFacebookLink: string,
+  options?: { excludeLeadId?: string }
 ): Promise<{
   ok: boolean;
   isDuplicate: boolean;
@@ -658,15 +676,18 @@ export async function checkLeadDuplicateInSupabase(
   schemaMissing?: boolean;
   error?: string;
 }> {
+  const excludeId = options?.excludeLeadId?.trim();
   try {
     const phoneNorm = normalizeBdPhone(rawPhone);
     if (phoneNorm) {
-      const { data, error } = await supabase
+      let query = supabase
         .from('leads')
         .select('*')
-        .eq('phone_normalized', phoneNorm)
-        .limit(1)
-        .maybeSingle();
+        .eq('phone_normalized', phoneNorm);
+      if (excludeId) {
+        query = query.neq('id', excludeId);
+      }
+      const { data, error } = await query.limit(1).maybeSingle();
 
       if (error) {
         return {
@@ -688,12 +709,14 @@ export async function checkLeadDuplicateInSupabase(
 
     const fbNorm = normalizeFacebookUrl(rawFacebookLink);
     if (fbNorm) {
-      const { data, error } = await supabase
+      let query = supabase
         .from('leads')
         .select('*')
-        .eq('facebook_normalized', fbNorm)
-        .limit(1)
-        .maybeSingle();
+        .eq('facebook_normalized', fbNorm);
+      if (excludeId) {
+        query = query.neq('id', excludeId);
+      }
+      const { data, error } = await query.limit(1).maybeSingle();
 
       if (error) {
         return {
@@ -913,6 +936,23 @@ export async function updateLeadInSupabase(
   }
 }
 
+export async function deleteLeadInSupabase(
+  leadId: string
+): Promise<{ ok: boolean; error?: string }> {
+  const cleanId = leadId.trim();
+  if (!cleanId) return { ok: false, error: 'Invalid lead ID.' };
+  try {
+    const { error } = await supabase.from('leads').delete().eq('id', cleanId);
+    if (error) return { ok: false, error: error.message };
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : 'Failed to delete lead from Supabase.',
+    };
+  }
+}
+
 export function resolveUpsertSupabaseCallLogRow(
   candidate: SupabaseCallLogRow,
   existingSameDayRows: SupabaseCallLogRow[]
@@ -1072,9 +1112,55 @@ export async function createPostInSupabase(post: ContentPost): Promise<{
 export async function upsertPaidCustomerInSupabase(
   customer: PaidCustomer,
   facebookLink = ''
-): Promise<void> {
-  const row = paidCustomerToSupabaseRow(customer, facebookLink);
-  await supabase.from('paid_customers').upsert(row, { onConflict: 'id' });
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const row = paidCustomerToSupabaseRow(customer, facebookLink);
+    const payload =
+      supabaseSupportsPaidPackageColumn === false
+        ? toLegacySupabasePaidCustomerRow(row)
+        : row;
+    const { error } = await supabase
+      .from('paid_customers')
+      .upsert(payload, { onConflict: 'id' });
+    if (error) {
+      if (isMissingColumnError(error, 'package_name')) {
+        supabaseSupportsPaidPackageColumn = false;
+        const legacyRes = await supabase
+          .from('paid_customers')
+          .upsert(toLegacySupabasePaidCustomerRow(row), { onConflict: 'id' });
+        if (legacyRes.error) return { ok: false, error: legacyRes.error.message };
+        return { ok: true };
+      }
+      return { ok: false, error: error.message };
+    }
+    supabaseSupportsPaidPackageColumn = true;
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : 'Failed to save paid customer to Supabase.',
+    };
+  }
+}
+
+export async function deletePaidCustomerInSupabase(
+  customerId: string
+): Promise<{ ok: boolean; error?: string }> {
+  const cleanId = customerId.trim();
+  if (!cleanId) return { ok: false, error: 'Invalid paid customer ID.' };
+  try {
+    const { error } = await supabase
+      .from('paid_customers')
+      .delete()
+      .eq('id', cleanId);
+    if (error) return { ok: false, error: error.message };
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : 'Failed to delete paid customer from Supabase.',
+    };
+  }
 }
 
 export async function saveDuplicateAttemptInSupabase(
@@ -1196,15 +1282,22 @@ export async function syncPulledRecordsToSupabase(payload: {
     );
   }
   if (payload.paidCustomers && payload.paidCustomers.length > 0) {
+    const paidRows = payload.paidCustomers.map((c) => paidCustomerToSupabaseRow(c));
+    const rowsToSend =
+      supabaseSupportsPaidPackageColumn === false
+        ? paidRows.map(toLegacySupabasePaidCustomerRow)
+        : paidRows;
     ops.push(
       Promise.resolve(
-        supabase
-          .from('paid_customers')
-          .upsert(
-            payload.paidCustomers.map((c) => paidCustomerToSupabaseRow(c)),
-            { onConflict: 'id' }
-          )
-      )
+        supabase.from('paid_customers').upsert(rowsToSend, { onConflict: 'id' })
+      ).then(async (res) => {
+        if (res.error && isMissingColumnError(res.error, 'package_name')) {
+          supabaseSupportsPaidPackageColumn = false;
+          await supabase
+            .from('paid_customers')
+            .upsert(paidRows.map(toLegacySupabasePaidCustomerRow), { onConflict: 'id' });
+        }
+      })
     );
   }
 

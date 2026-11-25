@@ -83,6 +83,7 @@ export const paidCustomers = pgTable(
     renewalDate: text('renewal_date').notNull(),
     renewalStatus: text('renewal_status').notNull().default('Active'),
     lastRenewedAt: text('last_renewed_at'),
+    packageName: text('package_name').notNull().default(''),
     notes: text('notes').notNull().default(''),
     createdAt: text('created_at').notNull(),
     updatedAt: text('updated_at').notNull(),

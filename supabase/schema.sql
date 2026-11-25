@@ -59,10 +59,14 @@ CREATE TABLE IF NOT EXISTS public.paid_customers (
   renewal_date TEXT NOT NULL,
   renewal_status TEXT NOT NULL DEFAULT 'Active',
   last_renewed_at TEXT,
+  package_name TEXT NOT NULL DEFAULT '',
   notes TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT '',
   updated_at TEXT NOT NULL
 );
+
+ALTER TABLE public.paid_customers
+  ADD COLUMN IF NOT EXISTS package_name TEXT NOT NULL DEFAULT '';
 
 CREATE INDEX IF NOT EXISTS idx_paid_customers_renewal_date ON public.paid_customers (renewal_date);
 

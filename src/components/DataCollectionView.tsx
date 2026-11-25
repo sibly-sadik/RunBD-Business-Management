@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   CheckCircle2,
@@ -7,13 +7,23 @@ import {
   FileUp,
   Loader2,
   MessageCircle,
+  Pencil,
   PlusCircle,
   Search,
   ShieldAlert,
+  Trash2,
   Upload,
   X,
 } from 'lucide-react';
-import { CsvPreviewRow, DuplicateAttempt, Lead, User, VEHICLE_TYPES } from '../types';
+import {
+  CALL_STATUSES,
+  CallStatus,
+  CsvPreviewRow,
+  DuplicateAttempt,
+  Lead,
+  User,
+  VEHICLE_TYPES,
+} from '../types';
 import {
   detectDeviceClockAhead,
   filterCollectorTodayLeads,
@@ -24,6 +34,7 @@ import {
   formatShortDate,
   getAuthoritativeDhakaTodayYmd,
   getEstimatedServerNow,
+  LeadEditInput,
   normalizeBdPhone,
   openWhatsAppChat,
   parseCsvLeads,
@@ -33,6 +44,7 @@ import { StatusBadge } from './StatusBadge';
 interface DataCollectionViewProps {
   currentUser: User;
   allLeads: Lead[];
+  agents?: User[];
   duplicateAttempts: DuplicateAttempt[];
   autoAssignEnabled: boolean;
   onCheckPhoneDuplicate?: (rawPhone: string) => Promise<{
@@ -53,17 +65,25 @@ interface DataCollectionViewProps {
   }>;
   onImportBulkLeads: (validRows: CsvPreviewRow[]) => Promise<void> | void;
   onRecordDuplicateAttempt: (attempt: Omit<DuplicateAttempt, 'id' | 'timestamp'>) => void;
+  onUpdateLead?: (
+    leadId: string,
+    updates: LeadEditInput
+  ) => Promise<{ ok: boolean; error?: string }> | { ok: boolean; error?: string };
+  onDeleteLead?: (leadId: string) => Promise<void> | void;
 }
 
 export function DataCollectionView({
   currentUser,
   allLeads,
+  agents = [],
   duplicateAttempts,
   autoAssignEnabled,
   onCheckPhoneDuplicate,
   onAddSingleLead,
   onImportBulkLeads,
   onRecordDuplicateAttempt,
+  onUpdateLead,
+  onDeleteLead,
 }: DataCollectionViewProps) {
   const [activeMode, setActiveMode] = useState<'single' | 'bulk'>('single');
   const [customerName, setCustomerName] = useState<string>('Car');
@@ -95,6 +115,126 @@ export function DataCollectionView({
   const [csvFileName, setCsvFileName] = useState('');
   const [csvPreview, setCsvPreview] = useState<CsvPreviewRow[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Admin-only Edit & Delete modal state
+  const isAdmin = currentUser.role === 'admin';
+  const canEdit = isAdmin && Boolean(onUpdateLead);
+  const canDelete = isAdmin && Boolean(onDeleteLead);
+  const showActions = canEdit || canDelete;
+
+  const [editingLead, setEditingLead] = useState<Lead | null>(null);
+  const [editVehicleType, setEditVehicleType] = useState<string>('Car');
+  const [editPhone, setEditPhone] = useState('');
+  const [editFacebookLink, setEditFacebookLink] = useState('');
+  const [editAgentId, setEditAgentId] = useState('');
+  const [editStatus, setEditStatus] = useState<CallStatus>('Pending');
+  const [editNotes, setEditNotes] = useState('');
+  const [editError, setEditError] = useState('');
+  const [savingEdit, setSavingEdit] = useState(false);
+
+  const [deletingLead, setDeletingLead] = useState<Lead | null>(null);
+  const [deletingBusy, setDeletingBusy] = useState(false);
+
+  useEffect(() => {
+    if (!editingLead && !deletingLead) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        if (!savingEdit) setEditingLead(null);
+        if (!deletingBusy) setDeletingLead(null);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [editingLead, deletingLead, savingEdit, deletingBusy]);
+
+  const editNormalizedPhone = useMemo(() => normalizeBdPhone(editPhone), [editPhone]);
+  const editLiveDuplicate = useMemo(() => {
+    if (!editingLead) return null;
+    if (!editPhone.trim() && !editFacebookLink.trim()) return null;
+    return findDuplicateLead(allLeads, editPhone, editFacebookLink, {
+      excludeLeadId: editingLead.id,
+    });
+  }, [allLeads, editingLead, editPhone, editFacebookLink]);
+
+  const openEditModal = (lead: Lead) => {
+    if (!canEdit) return;
+    setEditingLead(lead);
+    setEditVehicleType(lead.customerName || 'Car');
+    setEditPhone(lead.phone || lead.rawPhone || '');
+    setEditFacebookLink(lead.facebookLink || '');
+    setEditAgentId(lead.assignedAgentId ?? '');
+    setEditStatus(lead.status);
+    setEditNotes(lead.notes || '');
+    setEditError('');
+    setSavingEdit(false);
+  };
+
+  const handleSaveEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!canEdit || !editingLead || !onUpdateLead) return;
+
+    const cleanVehicle = editVehicleType.trim();
+    if (!cleanVehicle) {
+      setEditError('Vehicle Type / Customer Name is required.');
+      return;
+    }
+
+    const normalized = normalizeBdPhone(editPhone);
+    if (!normalized) {
+      setEditError('Enter a valid Bangladeshi phone number (e.g. 01712345678).');
+      return;
+    }
+
+    const dup = findDuplicateLead(allLeads, normalized, editFacebookLink, {
+      excludeLeadId: editingLead.id,
+    });
+    if (dup) {
+      setEditError(
+        `Duplicate ${dup.matchedBy === 'phone' ? 'phone number' : 'Facebook link'} already belongs to ${dup.lead.customerName} (${formatBdPhoneDisplay(dup.lead.phone)}).`
+      );
+      return;
+    }
+
+    const matchedAgent = editAgentId
+      ? agents.find((a) => a.id === editAgentId) ?? null
+      : null;
+    const assignedAgentId = editAgentId ? matchedAgent?.id ?? editAgentId : null;
+    const assignedAgentName = editAgentId
+      ? matchedAgent?.name ?? editingLead.assignedAgentName ?? null
+      : null;
+
+    setSavingEdit(true);
+    setEditError('');
+    try {
+      const result = await onUpdateLead(editingLead.id, {
+        customerName: cleanVehicle,
+        phone: normalized,
+        facebookLink: editFacebookLink.trim(),
+        assignedAgentId,
+        assignedAgentName,
+        status: editStatus,
+        notes: editNotes.trim(),
+      });
+      if (result && !result.ok) {
+        setEditError(result.error ?? 'Could not update lead.');
+        return;
+      }
+      setEditingLead(null);
+    } finally {
+      setSavingEdit(false);
+    }
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!canDelete || !deletingLead || !onDeleteLead) return;
+    setDeletingBusy(true);
+    try {
+      await onDeleteLead(deletingLead.id);
+      setDeletingLead(null);
+    } finally {
+      setDeletingBusy(false);
+    }
+  };
 
   // Real-time normalization & duplicate detection
   const normalizedPhone = useMemo(() => normalizeBdPhone(rawPhone), [rawPhone]);
@@ -368,6 +508,9 @@ export function DataCollectionView({
       'Car,+8801700000001,https://facebook.com/example.profile1',
       'Bike,01800000002,https://facebook.com/example.profile2',
       'Truck,01900000003,https://facebook.com/example.profile3',
+      'Workshop,01600000004,https://facebook.com/example.profile4',
+      'Accessories,01500000005,https://facebook.com/example.profile5',
+      'Rent a Car,01300000006,https://facebook.com/example.profile6',
     ].join('\n');
     const blob = new Blob([sample], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
@@ -870,9 +1013,9 @@ export function DataCollectionView({
       )}
 
       {/* Submission History & Duplicate Alerts Grid */}
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 xl:grid-cols-12 gap-6">
         {/* Submission History */}
-        <section className="xl:col-span-2 glass-panel rounded-2xl overflow-hidden">
+        <section className="xl:col-span-9 glass-panel rounded-2xl overflow-hidden">
           <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
             <div>
               <h2 className="text-base font-semibold text-slate-900 dark:text-white">
@@ -891,27 +1034,129 @@ export function DataCollectionView({
               No leads submitted today ({todayStr}) yet. Use the form above to add a lead.
             </div>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse text-sm">
-                <thead>
-                  <tr className="bg-slate-50 dark:bg-slate-900/60 text-xs text-slate-500 dark:text-slate-400 border-b border-slate-200 dark:border-slate-800">
-                    <th className="py-3 px-4 font-semibold">Vehicle / Customer</th>
-                    <th className="py-3 px-4 font-semibold">Phone</th>
-                    <th className="py-3 px-4 font-semibold">Assigned Agent</th>
-                    <th className="py-3 px-4 font-semibold">Status</th>
-                    <th className="py-3 px-4 font-semibold">Added</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-200 dark:divide-slate-800">
-                  {mySubmissions.slice(0, 15).map((lead) => (
-                    <tr
-                      key={lead.id}
-                      className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40 transition-colors"
-                    >
-                      <td className="py-3 px-4">
-                        <div className="font-medium text-slate-900 dark:text-slate-100">
+            <>
+              {/* Desktop Table */}
+              <div className="hidden md:block overflow-x-auto">
+                <table className="w-full text-left border-collapse text-sm">
+                  <thead>
+                    <tr className="bg-slate-50 dark:bg-slate-900/60 text-xs text-slate-500 dark:text-slate-400 border-b border-slate-200 dark:border-slate-800">
+                      <th className="py-3 px-2.5 font-semibold">Vehicle / Customer</th>
+                      <th className="py-3 px-2.5 font-semibold">Phone</th>
+                      <th className="py-3 px-2.5 font-semibold">Assigned Agent</th>
+                      <th className="py-3 px-2.5 font-semibold">Status</th>
+                      <th className="py-3 px-2.5 font-semibold">Added</th>
+                      {showActions && (
+                        <th className="py-3 px-2.5 font-semibold text-right">Action</th>
+                      )}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-200 dark:divide-slate-800">
+                    {mySubmissions.slice(0, 15).map((lead) => (
+                      <tr
+                        key={lead.id}
+                        data-testid={`collected-row-${lead.id}`}
+                        className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40 transition-colors"
+                      >
+                        <td className="py-3 px-2.5">
+                          <div className="font-medium text-slate-900 dark:text-slate-100 whitespace-nowrap">
+                            {lead.customerName}
+                          </div>
+                          {lead.facebookLink && (
+                            <a
+                              href={
+                                lead.facebookLink.startsWith('http')
+                                  ? lead.facebookLink
+                                  : `https://${lead.facebookLink}`
+                              }
+                              target="_blank"
+                              rel="noreferrer"
+                              className="inline-flex items-center gap-1 text-xs text-sky-600 dark:text-sky-400 hover:underline mt-0.5 whitespace-nowrap"
+                            >
+                              <span>Facebook Profile</span>
+                              <ExternalLink className="w-3 h-3 shrink-0" />
+                            </a>
+                          )}
+                          {isAdmin && lead.collectorName && (
+                            <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 whitespace-nowrap">
+                              Collector: {lead.collectorName}
+                            </p>
+                          )}
+                        </td>
+                        <td className="py-3 px-2.5">
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-mono text-xs tabular-nums text-slate-700 dark:text-slate-300 whitespace-nowrap">
+                              {formatBdPhoneDisplay(lead.phone)}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => openWhatsAppChat(lead.phone)}
+                              aria-label={`WhatsApp ${lead.customerName}`}
+                              className="p-1 rounded bg-slate-200/80 dark:bg-slate-800 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-600 hover:text-white transition-colors cursor-pointer"
+                            >
+                              <MessageCircle className="w-3 h-3" />
+                            </button>
+                          </div>
+                        </td>
+                        <td className="py-3 px-2.5 text-xs font-medium text-slate-700 dark:text-slate-300 whitespace-nowrap">
+                          {lead.assignedAgentName ?? (
+                            <span className="text-slate-400">Unassigned</span>
+                          )}
+                        </td>
+                        <td className="py-3 px-2.5 whitespace-nowrap">
+                          <StatusBadge status={lead.status} compact />
+                        </td>
+                        <td className="py-3 px-2.5 text-xs text-slate-500 dark:text-slate-400 tabular-nums whitespace-nowrap">
+                          {formatShortDate(lead.createdAt)}
+                        </td>
+                        {showActions && (
+                          <td className="py-3 px-2.5 text-right whitespace-nowrap">
+                            <div className="inline-flex items-center justify-end gap-1.5">
+                              {canEdit && (
+                                <button
+                                  type="button"
+                                  data-testid={`edit-lead-btn-${lead.id}`}
+                                  aria-label={`Edit ${lead.customerName} (${lead.phone})`}
+                                  onClick={() => openEditModal(lead)}
+                                  className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-[11px] font-semibold transition-colors whitespace-nowrap cursor-pointer"
+                                >
+                                  <Pencil className="w-3 h-3" />
+                                  <span>Edit</span>
+                                </button>
+                              )}
+                              {canDelete && (
+                                <button
+                                  type="button"
+                                  data-testid={`delete-lead-btn-${lead.id}`}
+                                  aria-label={`Delete ${lead.customerName} (${lead.phone})`}
+                                  onClick={() => setDeletingLead(lead)}
+                                  className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-rose-300/80 dark:border-rose-500/40 bg-rose-50/70 dark:bg-rose-500/10 hover:bg-rose-600 hover:text-white dark:hover:bg-rose-600 text-rose-700 dark:text-rose-300 text-[11px] font-semibold transition-colors whitespace-nowrap cursor-pointer"
+                                >
+                                  <Trash2 className="w-3 h-3" />
+                                  <span>Delete</span>
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                        )}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Mobile Cards */}
+              <div className="md:hidden divide-y divide-slate-200 dark:divide-slate-800">
+                {mySubmissions.slice(0, 15).map((lead) => (
+                  <div
+                    key={lead.id}
+                    data-testid={`collected-card-${lead.id}`}
+                    className="p-4 space-y-2.5"
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="text-sm font-semibold text-slate-900 dark:text-white truncate">
                           {lead.customerName}
-                        </div>
+                        </p>
                         {lead.facebookLink && (
                           <a
                             href={
@@ -927,43 +1172,89 @@ export function DataCollectionView({
                             <ExternalLink className="w-3 h-3" />
                           </a>
                         )}
-                      </td>
-                      <td className="py-3 px-4">
-                        <div className="flex items-center gap-2">
-                          <span className="font-mono text-xs tabular-nums text-slate-700 dark:text-slate-300 whitespace-nowrap">
-                            {formatBdPhoneDisplay(lead.phone)}
-                          </span>
+                      </div>
+                      <StatusBadge status={lead.status} compact />
+                    </div>
+
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                      <div className="flex items-center gap-1.5">
+                        <span className="font-mono tabular-nums text-slate-700 dark:text-slate-300">
+                          {formatBdPhoneDisplay(lead.phone)}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => openWhatsAppChat(lead.phone)}
+                          aria-label={`WhatsApp ${lead.customerName}`}
+                          className="p-1 rounded bg-slate-200/80 dark:bg-slate-800 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-600 hover:text-white transition-colors cursor-pointer"
+                        >
+                          <MessageCircle className="w-3 h-3" />
+                        </button>
+                      </div>
+                      <span className="text-slate-500 dark:text-slate-400 tabular-nums">
+                        {formatShortDate(lead.createdAt)}
+                      </span>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-600 dark:text-slate-400">
+                      <span>
+                        Agent:{' '}
+                        <strong className="text-slate-900 dark:text-slate-200">
+                          {lead.assignedAgentName ?? 'Unassigned'}
+                        </strong>
+                      </span>
+                      {isAdmin && lead.collectorName && (
+                        <span>
+                          Collector:{' '}
+                          <strong className="text-slate-900 dark:text-slate-200">
+                            {lead.collectorName}
+                          </strong>
+                        </span>
+                      )}
+                    </div>
+
+                    {lead.notes && (
+                      <p className="text-xs text-slate-500 dark:text-slate-400 line-clamp-2">
+                        {lead.notes}
+                      </p>
+                    )}
+
+                    {showActions && (
+                      <div className="flex items-center gap-2 pt-1">
+                        {canEdit && (
                           <button
                             type="button"
-                            onClick={() => openWhatsAppChat(lead.phone)}
-                            aria-label={`WhatsApp ${lead.customerName}`}
-                            className="p-1 rounded bg-slate-200/80 dark:bg-slate-800 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-600 hover:text-white transition-colors cursor-pointer"
+                            data-testid={`edit-lead-btn-mobile-${lead.id}`}
+                            aria-label={`Edit ${lead.customerName} (${lead.phone})`}
+                            onClick={() => openEditModal(lead)}
+                            className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 text-xs font-semibold transition-colors cursor-pointer"
                           >
-                            <MessageCircle className="w-3 h-3" />
+                            <Pencil className="w-3.5 h-3.5" />
+                            <span>Edit</span>
                           </button>
-                        </div>
-                      </td>
-                      <td className="py-3 px-4 text-xs font-medium text-slate-700 dark:text-slate-300 whitespace-nowrap">
-                        {lead.assignedAgentName ?? (
-                          <span className="text-slate-400">Unassigned</span>
                         )}
-                      </td>
-                      <td className="py-3 px-4">
-                        <StatusBadge status={lead.status} compact />
-                      </td>
-                      <td className="py-3 px-4 text-xs text-slate-500 dark:text-slate-400 tabular-nums whitespace-nowrap">
-                        {formatShortDate(lead.createdAt)}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                        {canDelete && (
+                          <button
+                            type="button"
+                            data-testid={`delete-lead-btn-mobile-${lead.id}`}
+                            aria-label={`Delete ${lead.customerName} (${lead.phone})`}
+                            onClick={() => setDeletingLead(lead)}
+                            className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md border border-rose-300/80 dark:border-rose-500/40 bg-rose-50/70 dark:bg-rose-500/10 hover:bg-rose-600 hover:text-white dark:hover:bg-rose-600 text-rose-700 dark:text-rose-300 text-xs font-semibold transition-colors cursor-pointer"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            <span>Delete</span>
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </>
           )}
         </section>
 
         {/* Duplicate Alerts Log */}
-        <section className="glass-panel rounded-2xl overflow-hidden flex flex-col">
+        <section className="xl:col-span-3 glass-panel rounded-2xl overflow-hidden flex flex-col">
           <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
             <div>
               <h2 className="text-base font-semibold text-slate-900 dark:text-white">
@@ -1091,6 +1382,292 @@ export function DataCollectionView({
                   className="px-4 py-2 rounded-lg bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 text-xs font-semibold hover:opacity-90 transition-opacity cursor-pointer"
                 >
                   Understood
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Admin-Only Edit Collected Lead Modal */}
+      {canEdit && editingLead && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="edit-lead-modal-title"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs"
+          onClick={(e) => {
+            if (e.target === e.currentTarget && !savingEdit) setEditingLead(null);
+          }}
+        >
+          <div className="w-full max-w-lg rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden max-h-[90vh] flex flex-col">
+            <div className="px-6 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3">
+              <div>
+                <h2
+                  id="edit-lead-modal-title"
+                  className="text-base font-semibold text-slate-900 dark:text-white"
+                >
+                  Edit Collected Lead
+                </h2>
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                  Updates sync immediately to Agent queues, Supabase, and Google Sheets.
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={savingEdit}
+                onClick={() => setEditingLead(null)}
+                aria-label="Close edit lead modal"
+                className="p-1.5 rounded-lg text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer disabled:opacity-50"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveEdit} className="p-6 space-y-4 overflow-y-auto">
+              {editError && (
+                <div className="flex items-start gap-2 rounded-lg bg-rose-500/10 border border-rose-500/30 px-3 py-2 text-xs text-rose-600 dark:text-rose-400">
+                  <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                  <span>{editError}</span>
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                <div>
+                  <label
+                    htmlFor="edit-lead-vehicle"
+                    className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1"
+                  >
+                    Vehicle Type *
+                  </label>
+                  <select
+                    id="edit-lead-vehicle"
+                    required
+                    value={editVehicleType}
+                    onChange={(e) => setEditVehicleType(e.target.value)}
+                    className="w-full px-3 py-2 text-xs rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
+                  >
+                    {!(VEHICLE_TYPES as readonly string[]).includes(editVehicleType) &&
+                      editVehicleType.trim() && (
+                        <option value={editVehicleType}>{editVehicleType}</option>
+                      )}
+                    {VEHICLE_TYPES.map((vt) => (
+                      <option key={vt} value={vt}>
+                        {vt}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between gap-2 mb-1">
+                    <label
+                      htmlFor="edit-lead-phone"
+                      className="block text-xs font-medium text-slate-700 dark:text-slate-300"
+                    >
+                      Phone Number (BD) *
+                    </label>
+                    {editNormalizedPhone && !editLiveDuplicate && (
+                      <span className="text-[11px] font-mono text-emerald-600 dark:text-emerald-400">
+                        ✓ {editNormalizedPhone}
+                      </span>
+                    )}
+                  </div>
+                  <input
+                    id="edit-lead-phone"
+                    type="tel"
+                    required
+                    value={editPhone}
+                    onChange={(e) => {
+                      setEditPhone(e.target.value);
+                      if (editError) setEditError('');
+                    }}
+                    placeholder="017XXXXXXXX"
+                    className="w-full px-3 py-2 text-xs font-mono rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
+                  />
+                  {editLiveDuplicate && (
+                    <p className="mt-1 text-[11px] text-rose-600 dark:text-rose-400">
+                      Duplicate {editLiveDuplicate.matchedBy === 'phone' ? 'phone' : 'Facebook link'} on {editLiveDuplicate.lead.customerName} ({formatBdPhoneDisplay(editLiveDuplicate.lead.phone)}).
+                    </p>
+                  )}
+                </div>
+
+                <div className="sm:col-span-2">
+                  <label
+                    htmlFor="edit-lead-facebook"
+                    className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1"
+                  >
+                    Facebook Profile URL
+                  </label>
+                  <input
+                    id="edit-lead-facebook"
+                    type="text"
+                    value={editFacebookLink}
+                    onChange={(e) => {
+                      setEditFacebookLink(e.target.value);
+                      if (editError) setEditError('');
+                    }}
+                    placeholder="https://facebook.com/username"
+                    className="w-full px-3 py-2 text-xs rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
+                  />
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="edit-lead-agent"
+                    className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1"
+                  >
+                    Assigned Agent
+                  </label>
+                  <select
+                    id="edit-lead-agent"
+                    value={editAgentId}
+                    onChange={(e) => setEditAgentId(e.target.value)}
+                    className="w-full px-3 py-2 text-xs rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 text-slate-900 dark:text-slate-100"
+                  >
+                    <option value="">Unassigned</option>
+                    {editingLead.assignedAgentId &&
+                      !agents.some((a) => a.id === editingLead.assignedAgentId) && (
+                        <option value={editingLead.assignedAgentId}>
+                          {editingLead.assignedAgentName ?? editingLead.assignedAgentId}
+                        </option>
+                      )}
+                    {agents.map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {a.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="edit-lead-status"
+                    className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1"
+                  >
+                    Status
+                  </label>
+                  <select
+                    id="edit-lead-status"
+                    value={editStatus}
+                    onChange={(e) => setEditStatus(e.target.value as CallStatus)}
+                    className="w-full px-3 py-2 text-xs rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 text-slate-900 dark:text-slate-100"
+                  >
+                    {CALL_STATUSES.map((st) => (
+                      <option key={st} value={st}>
+                        {st}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label
+                  htmlFor="edit-lead-notes"
+                  className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1"
+                >
+                  Notes
+                </label>
+                <textarea
+                  id="edit-lead-notes"
+                  rows={2}
+                  value={editNotes}
+                  onChange={(e) => setEditNotes(e.target.value)}
+                  placeholder="Optional vehicle or collector notes..."
+                  className="w-full px-3 py-2 text-xs rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2.5 pt-2">
+                <button
+                  type="button"
+                  disabled={savingEdit}
+                  onClick={() => setEditingLead(null)}
+                  className="px-4 py-2 rounded-lg border border-slate-300 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingEdit || Boolean(editLiveDuplicate)}
+                  data-testid="save-lead-edit-btn"
+                  className="inline-flex items-center gap-1.5 px-5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-white text-xs font-semibold transition-colors cursor-pointer"
+                >
+                  {savingEdit && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                  <span>Save Changes</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Admin-Only Delete Lead Confirmation Modal */}
+      {canDelete && deletingLead && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="delete-lead-modal-title"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs"
+          onClick={(e) => {
+            if (e.target === e.currentTarget && !deletingBusy) setDeletingLead(null);
+          }}
+        >
+          <div className="w-full max-w-md rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden">
+            <div className="px-6 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
+              <h2
+                id="delete-lead-modal-title"
+                className="text-base font-semibold text-slate-900 dark:text-white"
+              >
+                Delete Collected Lead
+              </h2>
+              <button
+                type="button"
+                disabled={deletingBusy}
+                onClick={() => setDeletingLead(null)}
+                aria-label="Close delete lead confirmation modal"
+                className="p-1.5 rounded-lg text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer disabled:opacity-50"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-4">
+              <p className="text-sm text-slate-700 dark:text-slate-300">
+                Delete{' '}
+                <strong className="text-slate-900 dark:text-white">
+                  {deletingLead.customerName}
+                </strong>{' '}
+                (<span className="font-mono">{formatBdPhoneDisplay(deletingLead.phone)}</span>)?
+              </p>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                This permanently removes the lead from Data Collection, Agent queues, Supabase (
+                <code className="font-mono">leads</code>), and Google Sheets (
+                <code className="font-mono">Master_Data</code>,{' '}
+                <code className="font-mono">Collector_&lt;Name&gt;</code>, and{' '}
+                <code className="font-mono">Agent_&lt;Name&gt;</code>) so it will not reappear on
+                sync.
+              </p>
+
+              <div className="flex items-center justify-end gap-2.5 pt-2">
+                <button
+                  type="button"
+                  disabled={deletingBusy}
+                  onClick={() => setDeletingLead(null)}
+                  className="px-4 py-2 rounded-lg border border-slate-300 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={deletingBusy}
+                  data-testid="confirm-delete-lead-btn"
+                  onClick={handleConfirmDelete}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-500 disabled:opacity-60 text-white text-xs font-semibold transition-colors cursor-pointer"
+                >
+                  {deletingBusy && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                  <span>Delete Lead</span>
                 </button>
               </div>
             </div>
