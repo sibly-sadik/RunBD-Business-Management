@@ -45,7 +45,7 @@ describe('Google Sheets default webhook URL resolution', () => {
   it('uses the updated RunBD Apps Script deployment URL as the hardcoded fallback', () => {
     assert.equal(
       FALLBACK_GOOGLE_SHEETS_WEBHOOK_URL,
-      'https://script.google.com/macros/s/AKfycbwkuMzc7UJktjeULCfwgvnSU_4jS9H1GvFb6Y_68E0HntOWPwWpsXkzU2Wa8BWfxIUH/exec'
+      'https://script.google.com/macros/s/AKfycby6ctqVTCeRYY2_FUzbO9SIGPYYi9bFKHvCQsYjob4r4WKptiBoYmq4N444O6-NYALT/exec'
     );
   });
 
@@ -59,9 +59,13 @@ describe('Google Sheets default webhook URL resolution', () => {
   it('automatically replaces legacy/deprecated webhook URLs with the new default URL', () => {
     const legacyUrl =
       'https://script.google.com/macros/s/AKfycbwqMl23Bi200Idn267ySCDpKBY30b1FdYC8OWPOPK90neBvSPwWyn7Eq-VqV8ublfUD/exec';
+    const prevDefaultUrl =
+      'https://script.google.com/macros/s/AKfycbwkuMzc7UJktjeULCfwgvnSU_4jS9H1GvFb6Y_68E0HntOWPwWpsXkzU2Wa8BWfxIUH/exec';
     assert.equal(isLegacyWebhookUrl(legacyUrl), true);
+    assert.equal(isLegacyWebhookUrl(prevDefaultUrl), true);
     assert.equal(isLegacyWebhookUrl(` ${legacyUrl}/ `), true);
     assert.equal(resolveWebhookUrl(legacyUrl, ''), FALLBACK_GOOGLE_SHEETS_WEBHOOK_URL);
+    assert.equal(resolveWebhookUrl(prevDefaultUrl, ''), FALLBACK_GOOGLE_SHEETS_WEBHOOK_URL);
     assert.equal(getDefaultWebhookUrl(legacyUrl), FALLBACK_GOOGLE_SHEETS_WEBHOOK_URL);
     assert.equal(
       isLegacyWebhookUrl(FALLBACK_GOOGLE_SHEETS_WEBHOOK_URL),

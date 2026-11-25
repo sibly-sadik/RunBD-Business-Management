@@ -60,7 +60,7 @@ const STORAGE_KEYS = {
   THEME: 'runbd_theme_v1',
 };
 
-const CURRENT_WEBHOOK_VERSION = '2026-11-25-v1';
+const CURRENT_WEBHOOK_VERSION = '2026-11-25-v2';
 
 function safeRead<T>(key: string, fallback: () => T): T {
   try {
