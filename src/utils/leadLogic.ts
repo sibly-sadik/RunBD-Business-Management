@@ -340,7 +340,10 @@ export function normalizeVehicleType(raw: string | null | undefined): string {
     key === 'pickup track' ||
     key === 'pickuptrack'
   ) {
-    return 'Pickup Truck';
+    return 'Pickup';
+if (key === 'workshop' || key === 'Workshops') return 'Workshop';
+if (key === 'accessories' || key === 'Accessories') return 'Accessories';
+if (key === 'rent a car' || key === 'Rent a Car') return 'Rent a Car';   
   }
 
   return cleaned;
