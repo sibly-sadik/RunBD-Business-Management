@@ -2328,7 +2328,259 @@ export function filterAgentAssignedQueueLeads(
     return (
       l.customerName.toLowerCase().includes(q) ||
       l.phone.toLowerCase().includes(q) ||
-      l.lastCallNotes.toLowerCase().includes(q)
+      l.lastCallNotes.toLowerCase().includes(q) ||
+      l.notes.toLowerCase().includes(q)
     );
   });
 }
+
+// ============================================================================
+// Pending Lead Reassignment & Next-Day Carry Over Logic
+// ============================================================================
+
+const CLOSED_CARRY_OVER_STATUSES: ReadonlySet<CallStatus> = new Set([
+  'Done',
+  'Order Confirmed',
+  'Not Interested',
+  'Wrong Number',
+]);
+
+/**
+ * Returns tomorrow's Asia/Dhaka date string (YYYY-MM-DD, +1 day from `now`).
+ */
+export function getNextDayYmd(now: Date = new Date()): string {
+  return addDaysToYmd(getDhakaDateString(now), 1);
+}
+
+/**
+ * Returns true when a lead's stored collection date is strictly before Today (Asia/Dhaka).
+ */
+export function isPreviousDayLead(
+  lead: Partial<Pick<Lead, 'createdAt' | 'collectedDate' | 'date'>>,
+  now: Date = new Date()
+): boolean {
+  const collectedYmd = getLeadCollectedYmd(lead);
+  if (!collectedYmd) return false;
+  return collectedYmd < getDhakaDateString(now);
+}
+
+/**
+ * Returns true if a lead was collected before Today and carries an active/scheduled followUpAt timestamp.
+ */
+export function isLeadCarriedOver(
+  lead: Pick<Lead, 'createdAt' | 'collectedDate' | 'date' | 'followUpAt'>,
+  now: Date = new Date()
+): boolean {
+  if (!lead.followUpAt) return false;
+  const followUpYmd = parseDateToYmd(lead.followUpAt);
+  if (!followUpYmd) return false;
+  return isPreviousDayLead(lead, now);
+}
+
+/**
+ * Determines whether a lead should appear in a Call Center Agent's active workspace queue:
+ * - Collected Today (any status, matching Today-only behavior), OR
+ * - Earlier-day lead with an active `followUpAt` whose scheduled date has arrived (`followUpYmd <= todayYmd`)
+ *   and whose status is still active/unclosed (not Done, Order Confirmed, Not Interested, or Wrong Number).
+ */
+export function isLeadActiveInAgentWorkspace(
+  lead: Lead,
+  now: Date = new Date()
+): boolean {
+  const todayYmd = getDhakaDateString(now);
+  const collectedYmd = getLeadCollectedYmd(lead);
+  if (collectedYmd === todayYmd) {
+    return true;
+  }
+  if (!lead.followUpAt) return false;
+  const followUpYmd = parseDateToYmd(lead.followUpAt);
+  if (!followUpYmd) return false;
+  if (CLOSED_CARRY_OVER_STATUSES.has(lead.status)) return false;
+  return followUpYmd <= todayYmd;
+}
+
+/**
+ * Returns leads active for the Agent's daily workspace queue (Today's leads + active/due carried-over leads).
+ */
+export function filterAgentWorkspaceLeads(
+  leads: Lead[],
+  now: Date = new Date()
+): Lead[] {
+  return leads.filter((l) => isLeadActiveInAgentWorkspace(l, now));
+}
+
+/**
+ * Retains Today's leads AND any active/upcoming scheduled follow-up or carried-over leads
+ * during Agent bootstrap reconciliation so neither today-due nor tomorrow-scheduled leads are stripped.
+ */
+export function filterAgentBootstrapLeads(
+  leads: Lead[],
+  now: Date = new Date()
+): Lead[] {
+  const todayYmd = getDhakaDateString(now);
+  return leads.filter((l) => {
+    const collectedYmd = getLeadCollectedYmd(l);
+    if (collectedYmd !== null && collectedYmd >= todayYmd) return true;
+    if (!l.followUpAt) return false;
+    const followUpYmd = parseDateToYmd(l.followUpAt);
+    if (!followUpYmd) return false;
+    return !CLOSED_CARRY_OVER_STATUSES.has(l.status);
+  });
+}
+
+export type AdminLeadsScope =
+  | 'today_and_carryover'
+  | 'today'
+  | 'pending_previous'
+  | 'pending_all'
+  | 'scheduled_carryover'
+  | 'all';
+
+/**
+ * Filters leads for the Admin Centralized Lead Distribution view across scopes.
+ */
+export function filterAdminDistributionLeads(
+  leads: Lead[],
+  scope: AdminLeadsScope,
+  now: Date = new Date()
+): Lead[] {
+  const todayYmd = getDhakaDateString(now);
+  switch (scope) {
+    case 'today':
+      return filterTodayLeads(leads, now);
+    case 'pending_previous':
+      return leads.filter((l) => l.status === 'Pending' && isPreviousDayLead(l, now));
+    case 'pending_all':
+      return leads.filter((l) => l.status === 'Pending');
+    case 'scheduled_carryover':
+      return leads.filter((l) => {
+        if (!l.followUpAt || CLOSED_CARRY_OVER_STATUSES.has(l.status)) return false;
+        const followUpYmd = parseDateToYmd(l.followUpAt);
+        return Boolean(followUpYmd);
+      });
+    case 'today_and_carryover':
+      return leads.filter((l) => {
+        if (getLeadCollectedYmd(l) === todayYmd) return true;
+        if (isLeadActiveInAgentWorkspace(l, now)) return true;
+        if (!l.followUpAt || CLOSED_CARRY_OVER_STATUSES.has(l.status)) return false;
+        const followUpYmd = parseDateToYmd(l.followUpAt);
+        return Boolean(followUpYmd && followUpYmd >= todayYmd);
+      });
+    case 'all':
+    default:
+      return [...leads];
+  }
+}
+
+export type CarryOverAssignMode = 'keep' | 'specific' | 'round-robin';
+
+export interface CarryOverLeadsInput {
+  leadIds: string[];
+  assignMode: CarryOverAssignMode;
+  targetAgentId?: string | null;
+  targetDateYmd: string;
+  followUpTime?: string;
+  note?: string;
+}
+
+export interface CarryOverLeadsResult {
+  nextLeads: Lead[];
+  updatedLeads: Lead[];
+  previousAgentById: Record<string, string | null>;
+  nextRoundRobinIndex: number;
+  targetDateYmd: string;
+  targetFollowUpAt: string;
+}
+
+/**
+ * Reassigns and schedules one or more Pending leads for a target date (default Next Day +1)
+ * and target agent (keep current, specific agent, or active Round-Robin distribution),
+ * preserving original vehicle/customer name, phone, notes, collector info, and collected date.
+ */
+export function carryOverPendingLeads(
+  allLeads: Lead[],
+  agents: User[],
+  input: CarryOverLeadsInput,
+  roundRobinIndex: number = 0,
+  disabledAgentIds: readonly string[] = [],
+  now: Date = new Date()
+): CarryOverLeadsResult {
+  const safeYmd = parseYmdParts(input.targetDateYmd)
+    ? input.targetDateYmd.trim()
+    : getNextDayYmd(now);
+  const safeTime = /^\d{2}:\d{2}$/.test(input.followUpTime ?? '')
+    ? (input.followUpTime as string)
+    : '10:00';
+  const targetFollowUpAt =
+    buildDhakaFollowUpIso(safeYmd, safeTime) ?? new Date(now.getTime() + 86400000).toISOString();
+
+  const targetIdSet = new Set(input.leadIds.map((id) => id.trim()).filter(Boolean));
+  const activeAgents = getActiveAgents(agents, disabledAgentIds);
+  let pointer =
+    activeAgents.length > 0
+      ? ((roundRobinIndex % activeAgents.length) + activeAgents.length) % activeAgents.length
+      : 0;
+
+  const specificAgent =
+    input.assignMode === 'specific' && input.targetAgentId
+      ? agents.find((a) => a.id === input.targetAgentId) ?? null
+      : null;
+
+  const trimmedNote = (input.note ?? '').trim();
+  const nowIso = now.toISOString();
+  const updatedLeads: Lead[] = [];
+  const previousAgentById: Record<string, string | null> = {};
+
+  const nextLeads = allLeads.map((lead) => {
+    if (!targetIdSet.has(lead.id)) return lead;
+
+    previousAgentById[lead.id] = lead.assignedAgentName ?? null;
+
+    let nextAgentId = lead.assignedAgentId;
+    let nextAgentName = lead.assignedAgentName;
+
+    if (input.assignMode === 'specific') {
+      nextAgentId = specificAgent ? specificAgent.id : null;
+      nextAgentName = specificAgent ? specificAgent.name : null;
+    } else if (input.assignMode === 'round-robin') {
+      if (activeAgents.length > 0) {
+        const chosen = activeAgents[pointer];
+        pointer = (pointer + 1) % activeAgents.length;
+        nextAgentId = chosen.id;
+        nextAgentName = chosen.name;
+      }
+    }
+
+    let nextLastCallNotes = lead.lastCallNotes;
+    if (trimmedNote) {
+      const existing = lead.lastCallNotes.trim();
+      if (!existing) {
+        nextLastCallNotes = trimmedNote;
+      } else if (!existing.toLowerCase().includes(trimmedNote.toLowerCase())) {
+        nextLastCallNotes = `${existing} · ${trimmedNote}`;
+      }
+    }
+
+    const updated: Lead = {
+      ...lead,
+      assignedAgentId: nextAgentId,
+      assignedAgentName: nextAgentName,
+      status: lead.status === 'Pending' ? 'Pending' : 'Pending',
+      followUpAt: targetFollowUpAt,
+      lastCallNotes: nextLastCallNotes,
+      updatedAt: nowIso,
+    };
+    updatedLeads.push(updated);
+    return updated;
+  });
+
+  return {
+    nextLeads,
+    updatedLeads,
+    previousAgentById,
+    nextRoundRobinIndex: input.assignMode === 'round-robin' ? pointer : roundRobinIndex,
+    targetDateYmd: safeYmd,
+    targetFollowUpAt,
+  };
+}
+

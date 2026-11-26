@@ -403,7 +403,16 @@ export function filterPullPayloadByDate(
   return {
     leads: payload.leads.filter((l) => {
       const storedDate = l.collectedDate ?? l.date ?? l.createdAt;
-      return isRecordOnDate(storedDate, targetDateStr);
+      if (isRecordOnDate(storedDate, targetDateStr)) return true;
+      const followUpYmd = l.followUpAt ? parseDateToYmd(l.followUpAt) : null;
+      const status = normalizeStatus(l.status);
+      return Boolean(
+        followUpYmd &&
+          status !== 'Done' &&
+          status !== 'Order Confirmed' &&
+          status !== 'Not Interested' &&
+          status !== 'Wrong Number'
+      );
     }),
     callLogs: payload.callLogs.filter((c) => isRecordOnDate(c.timestamp, targetDateStr)),
     contentPosts: payload.contentPosts.filter((p) =>

@@ -2702,5 +2702,233 @@ describe('Kawsar_Posts_Log TikTok, Instagram, and Twitter links in sheetsSync an
     assert.equal(legacyPaidSheet._rows.length, 2);
     assert.equal(sheetsMap.get('Paid_Kathy')!._rows.length, 1);
   });
+
+  it('filterPullPayloadByDate and Code.gs doGet(scope=today) retain carried-over Pending leads with followUpAt while LEADS_BATCH_UPSERT moves Agent tabs cleanly', () => {
+    const filtered = filterPullPayloadByDate(
+      {
+        leads: [
+          {
+            id: 'L-PREV-UNSCHED',
+            customerName: 'Car',
+            phone: '01711110001',
+            status: 'Pending',
+            createdAt: '2026-11-25T10:00:00+06:00',
+            followUpAt: null,
+          },
+          {
+            id: 'L-PREV-CARRIED',
+            customerName: 'Workshop',
+            phone: '01711110002',
+            status: 'Pending',
+            createdAt: '2026-11-25T10:00:00+06:00',
+            followUpAt: '2026-11-27T10:00:00+06:00',
+          },
+          {
+            id: 'L-PREV-DONE',
+            customerName: 'Bike',
+            phone: '01711110003',
+            status: 'Done',
+            createdAt: '2026-11-25T10:00:00+06:00',
+            followUpAt: '2026-11-27T10:00:00+06:00',
+          },
+          {
+            id: 'L-TODAY',
+            customerName: 'Truck',
+            phone: '01711110004',
+            status: 'Pending',
+            createdAt: '2026-11-26T09:00:00+06:00',
+            followUpAt: null,
+          },
+        ],
+        callLogs: [],
+        contentPosts: [],
+        paidCustomers: [],
+      },
+      '2026-11-26'
+    );
+    assert.deepEqual(
+      filtered.leads.map((l) => l.id),
+      ['L-PREV-CARRIED', 'L-TODAY']
+    );
+
+    function makeSheet(name: string, initialRows: unknown[][] = []) {
+      const _rows = initialRows.map((r) => [...r]);
+      return {
+        _rows,
+        getName: () => name,
+        getLastRow: () => _rows.length,
+        getLastColumn: () => (_rows[0] ? _rows[0].length : 0),
+        appendRow: (row: unknown[]) => {
+          _rows.push([...row]);
+        },
+        getRange: (row: number, col: number, numRows: number, numCols: number) => ({
+          getValues: () => {
+            const out: unknown[][] = [];
+            for (let r = 0; r < numRows; r++) {
+              const src = _rows[row - 1 + r] || [];
+              const sliced: unknown[] = [];
+              for (let c = 0; c < numCols; c++) {
+                sliced.push(src[col - 1 + c] ?? '');
+              }
+              out.push(sliced);
+            }
+            return out;
+          },
+          setValues: (vals: unknown[][]) => {
+            for (let r = 0; r < numRows; r++) {
+              const targetIdx = row - 1 + r;
+              while (_rows.length <= targetIdx) _rows.push([]);
+              for (let c = 0; c < numCols; c++) {
+                _rows[targetIdx][col - 1 + c] = vals[r][c];
+              }
+            }
+          },
+          setFontWeight: () => undefined,
+        }),
+        deleteRow: (rowNum: number) => {
+          _rows.splice(rowNum - 1, 1);
+        },
+        setFrozenRows: () => undefined,
+      };
+    }
+
+    const sheetsMap = new Map<string, ReturnType<typeof makeSheet>>();
+    const ss = {
+      getSheets: () => Array.from(sheetsMap.values()),
+      getSheetByName: (name: string) => sheetsMap.get(name) ?? null,
+      insertSheet: (name: string) => {
+        const created = makeSheet(name);
+        sheetsMap.set(name, created);
+        return created;
+      },
+    };
+    const fixedNow = new Date('2026-11-26T10:00:00+06:00');
+    const context: Record<string, unknown> = {
+      SpreadsheetApp: { getActiveSpreadsheet: () => ss },
+      ContentService: {
+        MimeType: { JSON: 'application/json' },
+        createTextOutput: (txt: string) => ({
+          setMimeType: () => txt,
+        }),
+      },
+      Utilities: {
+        formatDate: (d: Date) =>
+          new Date(d.getTime() + 6 * 3600000).toISOString().slice(0, 10),
+      },
+      Date: class extends Date {
+        constructor(...args: unknown[]) {
+          if (args.length === 0) {
+            super(fixedNow.getTime());
+          } else {
+            super(...(args as [string | number]));
+          }
+        }
+      },
+      Map,
+      Set,
+      JSON,
+      String,
+      Number,
+      Array,
+      Math,
+    };
+    vm.createContext(context);
+    vm.runInContext(GOOGLE_APPS_SCRIPT_CODE, context);
+    const doPost = context.doPost as (e: { postData: { contents: string } }) => string;
+    const doGet = context.doGet as (e: { parameter: Record<string, string> }) => string;
+
+    // Seed two previous-day Pending leads under Tanjin
+    const seedRes = JSON.parse(
+      doPost({
+        postData: {
+          contents: JSON.stringify({
+            event: 'LEADS_BATCH_UPSERT',
+            agentNames: ['Tanjin', 'Sakib'],
+            collectorNames: ['Farhan'],
+            leads: [
+              {
+                id: 'L-CO-1',
+                customerName: 'Workshop',
+                phone: '01788112233',
+                collectorName: 'Farhan',
+                assignedAgentName: 'Tanjin',
+                status: 'Pending',
+                followUpAt: null,
+                notes: 'Collector note 1',
+                createdAt: '2026-11-25T10:00:00+06:00',
+                updatedAt: '2026-11-25T10:00:00+06:00',
+              },
+              {
+                id: 'L-CO-2',
+                customerName: 'Rent a Car',
+                phone: '01788112244',
+                collectorName: 'Farhan',
+                assignedAgentName: 'Tanjin',
+                status: 'Pending',
+                followUpAt: null,
+                notes: 'Collector note 2',
+                createdAt: '2026-11-25T11:00:00+06:00',
+                updatedAt: '2026-11-25T11:00:00+06:00',
+              },
+            ],
+          }),
+        },
+      })
+    );
+    assert.equal(seedRes.ok, true);
+    assert.equal(sheetsMap.get('Agent_Tanjin')!._rows.length, 3); // header + 2
+
+    // Carry over L-CO-1 to Sakib via LEADS_BATCH_UPSERT -> moves Agent_Tanjin -> Agent_Sakib cleanly
+    const batchRes = JSON.parse(
+      doPost({
+        postData: {
+          contents: JSON.stringify({
+            event: 'LEADS_BATCH_UPSERT',
+            agentNames: ['Tanjin', 'Sakib'],
+            collectorNames: ['Farhan'],
+            leads: [
+              {
+                id: 'L-CO-1',
+                customerName: 'Workshop',
+                phone: '01788112233',
+                collectorName: 'Farhan',
+                assignedAgentName: 'Sakib',
+                status: 'Pending',
+                followUpAt: '2026-11-27T10:00:00+06:00',
+                lastCallNotes: 'Call tomorrow morning',
+                notes: 'Collector note 1',
+                createdAt: '2026-11-25T10:00:00+06:00',
+                updatedAt: '2026-11-26T10:00:00+06:00',
+              },
+              {
+                id: 'L-CO-2',
+                customerName: 'Rent a Car',
+                phone: '01788112244',
+                collectorName: 'Farhan',
+                assignedAgentName: 'Sakib',
+                status: 'Pending',
+                followUpAt: '2026-11-27T10:00:00+06:00',
+                lastCallNotes: 'Call tomorrow morning',
+                notes: 'Collector note 2',
+                createdAt: '2026-11-25T11:00:00+06:00',
+                updatedAt: '2026-11-26T10:00:00+06:00',
+              },
+            ],
+          }),
+        },
+      })
+    );
+    assert.equal(batchRes.ok, true);
+    assert.equal(sheetsMap.get('Agent_Tanjin')!._rows.length, 1); // header only
+    assert.equal(sheetsMap.get('Agent_Sakib')!._rows.length, 3); // header + 2
+
+    // doGet(scope=today) returns both carried-over Pending leads even though createdAt is Nov 25
+    const pulled = JSON.parse(doGet({ parameter: { action: 'pull', scope: 'today' } }));
+    assert.equal(pulled.ok, true);
+    assert.equal(pulled.leads.length, 2);
+    assert.equal(pulled.leads[0].assignedAgentName, 'Sakib');
+    assert.ok(String(pulled.leads[0].followUpAt).includes('2026-11-'));
+  });
 });
+
 

@@ -33,6 +33,8 @@ import {
 } from './types';
 import {
   assignLeadsRoundRobin,
+  CarryOverLeadsInput,
+  carryOverPendingLeads,
   clampDateToDhakaToday,
   computeDashboardMetrics,
   computeFinalDailySummary,
@@ -40,6 +42,7 @@ import {
   createManualPaidCustomer,
   createPaidCustomerFromLead,
   extractPhoneCoreKey,
+  filterAgentBootstrapLeads,
   filterCollectorTodayLeads,
   filterTodayCallLogs,
   filterTodayLeads,
@@ -356,7 +359,7 @@ export default function App() {
             ? prev
             : isCollector
             ? filterCollectorTodayLeads(prev)
-            : filterTodayLeads(prev);
+            : filterAgentBootstrapLeads(prev);
           // Reconcile authoritatively with Supabase so leads deleted by Admin disappear
           // across all browsers/tabs, while preserving just-created (<8s) local items.
           const preserved = roleBase.filter((l) => {
@@ -2629,6 +2632,93 @@ export default function App() {
     );
   };
 
+  const handleCarryOverLeads = (input: CarryOverLeadsInput) => {
+    if (!currentUser || currentUser.role !== 'admin') return;
+    const dynamicAgents = getCallCenterAgents(teamMembersRef.current, {
+      includeInactive: true,
+    });
+    const result = carryOverPendingLeads(
+      leadsRef.current,
+      dynamicAgents,
+      input,
+      settings.roundRobinIndex,
+      settings.disabledAgentIds
+    );
+    if (result.updatedLeads.length === 0) return;
+
+    leadsRef.current = result.nextLeads;
+    setLeads(result.nextLeads);
+
+    if (input.assignMode === 'round-robin') {
+      const nextSettings: AppSettings = {
+        ...settings,
+        roundRobinIndex: result.nextRoundRobinIndex,
+      };
+      setSettings(nextSettings);
+      void saveSettingsInSupabase(nextSettings).catch(() => {});
+    }
+
+    if (result.updatedLeads.length === 1) {
+      void updateLeadInSupabase(result.updatedLeads[0]).catch(() => {});
+    } else {
+      void importLeadsBatchInSupabase(result.updatedLeads, result.nextRoundRobinIndex).catch(() => {});
+    }
+
+    const sampleLead = result.updatedLeads[0];
+    const targetSummary =
+      input.assignMode === 'round-robin'
+        ? 'Round-Robin agents'
+        : input.assignMode === 'keep'
+        ? 'current agent(s)'
+        : sampleLead.assignedAgentName ?? 'Unassigned';
+
+    appendAudit(
+      currentUser,
+      'LEAD_REASSIGNED',
+      `Carried over ${result.updatedLeads.length} Pending lead${
+        result.updatedLeads.length === 1 ? '' : 's'
+      } to ${targetSummary} for ${result.targetDateYmd}`
+    );
+
+    addToast(
+      'success',
+      result.updatedLeads.length === 1
+        ? 'Lead Carried Over'
+        : `${result.updatedLeads.length} Leads Carried Over`,
+      result.updatedLeads.length === 1
+        ? `${sampleLead.customerName} (${sampleLead.phone}) scheduled for ${result.targetDateYmd} under ${
+            sampleLead.assignedAgentName ?? 'Unassigned'
+          }.`
+        : `Scheduled ${result.updatedLeads.length} Pending leads for ${result.targetDateYmd} (${targetSummary}).`
+    );
+
+    if (result.updatedLeads.length === 1) {
+      const prevAgent = result.previousAgentById[sampleLead.id];
+      void triggerRealtimeSync(
+        settings.googleSheetsWebhookUrl,
+        {
+          event: 'LEAD_UPDATED',
+          lead: sampleLead,
+          ...(prevAgent && prevAgent !== sampleLead.assignedAgentName
+            ? { previousAgentName: prevAgent }
+            : {}),
+        },
+        result.nextLeads,
+        callLogsRef.current
+      );
+    } else {
+      void triggerChunkedRealtimeSync(
+        settings.googleSheetsWebhookUrl,
+        {
+          event: 'LEADS_BATCH_UPSERT',
+          leads: result.updatedLeads,
+        },
+        result.nextLeads,
+        callLogsRef.current
+      );
+    }
+  };
+
   const handleUpdateCollectedLead = async (
     leadId: string,
     updates: LeadEditInput
@@ -3083,9 +3173,8 @@ export default function App() {
       return { label: 'Today Confirmed', value: `${confirmedToday} / ${todayLeads.length}` };
     }
     if (currentUser.role === 'agent') {
-      const todayLeads = filterTodayLeads(leads);
-      const scheduled = getScheduledFollowUps(todayLeads, currentUser.id).length;
-      return { label: 'Today Follow-ups', value: String(scheduled) };
+      const scheduled = getScheduledFollowUps(leads, currentUser.id).length;
+      return { label: 'Scheduled Follow-ups', value: String(scheduled) };
     }
     if (currentUser.role === 'poster') {
       const postStats = computeKawsarPostStats(contentPosts);
@@ -3178,6 +3267,7 @@ export default function App() {
             onToggleAgentAvailability={handleToggleAgentAvailability}
             onReassignLead={handleReassignLead}
             onUpdateLeadStatus={handleAdminUpdateLeadStatus}
+            onCarryOverLeads={handleCarryOverLeads}
             onExportCsv={() =>
               addToast('success', 'CSV Exported', "Today's leads database downloaded.")
             }

@@ -8,6 +8,7 @@ import {
   buildSafeExternalUrl,
   buildTelUrl,
   buildWhatsAppUrl,
+  carryOverPendingLeads,
   clampDateToDhakaToday,
   normalizeWhatsAppPhone,
   openWhatsAppChat,
@@ -23,7 +24,10 @@ import {
   sanitizePaidPackageName,
   deduplicateSameDayCallLogs,
   detectDeviceClockAhead,
+  filterAdminDistributionLeads,
   filterAgentAssignedQueueLeads,
+  filterAgentBootstrapLeads,
+  filterAgentWorkspaceLeads,
   filterCollectorTodayLeads,
   filterTodayCallLogs,
   filterTodayDuplicateAttempts,
@@ -45,8 +49,12 @@ import {
   getDhakaFollowUpFields,
   getDueRenewalCustomers,
   getLeadCollectedYmd,
+  getNextDayYmd,
   getNextRoundRobinAgent,
   getScheduledFollowUps,
+  isLeadActiveInAgentWorkspace,
+  isLeadCarriedOver,
+  isPreviousDayLead,
   isTimestampToday,
   isValidPostUrl,
   normalizeBdPhone,
@@ -1793,3 +1801,245 @@ test('createManualPaidCustomer validates BD phone, blocks duplicates, and defaul
     assert.equal(okRes.customer.renewalStatus, 'Active');
   }
 });
+
+test('Pending lead carryOverPendingLeads supports single/bulk, specific/keep/round-robin, and preserves original metadata', () => {
+  const now = new Date('2026-11-26T10:00:00+06:00');
+  const nextDayYmd = getNextDayYmd(now);
+  assert.equal(nextDayYmd, '2026-11-27');
+
+  const pool: Lead[] = [
+    {
+      ...existingLeads[0],
+      id: 'L-PREV-1',
+      customerName: 'Workshop',
+      phone: '01710000001',
+      rawPhone: '01710000001',
+      notes: 'Original collector note A',
+      lastCallNotes: '',
+      collectorId: 'c1',
+      collectorName: 'Farhan',
+      assignedAgentId: 'a1',
+      assignedAgentName: 'Tanjin',
+      status: 'Pending',
+      followUpAt: null,
+      createdAt: '2026-11-25T11:00:00+06:00',
+      collectedDate: '2026-11-25',
+      updatedAt: '2026-11-25T11:00:00+06:00',
+    },
+    {
+      ...existingLeads[0],
+      id: 'L-PREV-2',
+      customerName: 'Rent a Car',
+      phone: '01710000002',
+      rawPhone: '01710000002',
+      notes: 'Original collector note B',
+      lastCallNotes: 'Called once',
+      collectorId: 'c2',
+      collectorName: 'Rafi',
+      assignedAgentId: 'a2',
+      assignedAgentName: 'Kathy',
+      status: 'Pending',
+      followUpAt: null,
+      createdAt: '2026-11-24T15:00:00+06:00',
+      collectedDate: '2026-11-24',
+      updatedAt: '2026-11-24T15:00:00+06:00',
+    },
+    {
+      ...existingLeads[0],
+      id: 'L-TODAY-1',
+      customerName: 'Car',
+      phone: '01710000003',
+      rawPhone: '01710000003',
+      notes: 'Today note',
+      lastCallNotes: '',
+      collectorId: 'c1',
+      collectorName: 'Farhan',
+      assignedAgentId: 'a1',
+      assignedAgentName: 'Tanjin',
+      status: 'Pending',
+      followUpAt: null,
+      createdAt: '2026-11-26T09:00:00+06:00',
+      collectedDate: '2026-11-26',
+      updatedAt: '2026-11-26T09:00:00+06:00',
+    },
+  ];
+
+  // 1. Specific agent reassignment + carry-over to Next Day (+1)
+  const specificRes = carryOverPendingLeads(
+    pool,
+    mockAgents,
+    {
+      leadIds: ['L-PREV-1'],
+      assignMode: 'specific',
+      targetAgentId: 'a6',
+      targetDateYmd: nextDayYmd,
+      note: 'Priority morning call',
+    },
+    0,
+    [],
+    now
+  );
+  assert.equal(specificRes.updatedLeads.length, 1);
+  const moved1 = specificRes.updatedLeads[0];
+  assert.equal(moved1.assignedAgentId, 'a6');
+  assert.equal(moved1.assignedAgentName, 'Sakib');
+  assert.equal(moved1.status, 'Pending');
+  assert.equal(moved1.notes, 'Original collector note A');
+  assert.equal(moved1.lastCallNotes, 'Priority morning call');
+  assert.equal(moved1.collectedDate, '2026-11-25');
+  assert.equal(moved1.createdAt, '2026-11-25T11:00:00+06:00');
+  assert.equal(parseDateToYmd(moved1.followUpAt), '2026-11-27');
+  assert.equal(specificRes.previousAgentById['L-PREV-1'], 'Tanjin');
+
+  // 2. Bulk round-robin skipping disabled agent ('a2') while keeping existing note + appending carry-over note
+  const rrRes = carryOverPendingLeads(
+    pool,
+    mockAgents,
+    {
+      leadIds: ['L-PREV-1', 'L-PREV-2'],
+      assignMode: 'round-robin',
+      targetDateYmd: '2026-11-26',
+      note: 'Follow up today',
+    },
+    0,
+    ['a2'],
+    now
+  );
+  assert.equal(rrRes.updatedLeads.length, 2);
+  assert.equal(rrRes.updatedLeads[0].assignedAgentName, 'Tanjin');
+  assert.equal(rrRes.updatedLeads[1].assignedAgentName, 'Tania');
+  assert.equal(rrRes.updatedLeads[1].lastCallNotes, 'Called once · Follow up today');
+  assert.equal(rrRes.nextRoundRobinIndex, 2);
+
+  // 3. Keep current agent mode preserves existing assignment
+  const keepRes = carryOverPendingLeads(
+    pool,
+    mockAgents,
+    {
+      leadIds: ['L-PREV-2'],
+      assignMode: 'keep',
+      targetDateYmd: nextDayYmd,
+    },
+    0,
+    [],
+    now
+  );
+  assert.equal(keepRes.updatedLeads[0].assignedAgentId, 'a2');
+  assert.equal(keepRes.updatedLeads[0].assignedAgentName, 'Kathy');
+});
+
+test('filterAgentWorkspaceLeads, filterAgentBootstrapLeads, and filterAdminDistributionLeads handle carried-over & previous-day leads cleanly without mutating filterTodayLeads', () => {
+  const nowToday = new Date('2026-11-26T12:00:00+06:00');
+  const nowTomorrow = new Date('2026-11-27T12:00:00+06:00');
+
+  const leadsPool: Lead[] = [
+    {
+      ...existingLeads[0],
+      id: 'L-PREV-UNSCHEDULED',
+      customerName: 'Car',
+      phone: '01711111111',
+      status: 'Pending',
+      followUpAt: null,
+      assignedAgentId: 'a1',
+      assignedAgentName: 'Tanjin',
+      createdAt: '2026-11-25T10:00:00+06:00',
+      collectedDate: '2026-11-25',
+    },
+    {
+      ...existingLeads[0],
+      id: 'L-CARRIED-TODAY',
+      customerName: 'Workshop',
+      phone: '01711111112',
+      status: 'Pending',
+      followUpAt: buildDhakaFollowUpIso('2026-11-26', '10:00'),
+      assignedAgentId: 'a1',
+      assignedAgentName: 'Tanjin',
+      createdAt: '2026-11-25T11:00:00+06:00',
+      collectedDate: '2026-11-25',
+    },
+    {
+      ...existingLeads[0],
+      id: 'L-CARRIED-TOMORROW',
+      customerName: 'Accessories',
+      phone: '01711111113',
+      status: 'Pending',
+      followUpAt: buildDhakaFollowUpIso('2026-11-27', '10:00'),
+      assignedAgentId: 'a1',
+      assignedAgentName: 'Tanjin',
+      createdAt: '2026-11-25T12:00:00+06:00',
+      collectedDate: '2026-11-25',
+    },
+    {
+      ...existingLeads[0],
+      id: 'L-CARRIED-DONE',
+      customerName: 'Bike',
+      phone: '01711111114',
+      status: 'Done',
+      followUpAt: buildDhakaFollowUpIso('2026-11-26', '10:00'),
+      assignedAgentId: 'a1',
+      assignedAgentName: 'Tanjin',
+      createdAt: '2026-11-25T12:00:00+06:00',
+      collectedDate: '2026-11-25',
+    },
+    {
+      ...existingLeads[0],
+      id: 'L-COLLECTED-TODAY',
+      customerName: 'Bus',
+      phone: '01711111115',
+      status: 'Pending',
+      followUpAt: null,
+      assignedAgentId: 'a1',
+      assignedAgentName: 'Tanjin',
+      createdAt: '2026-11-26T09:00:00+06:00',
+      collectedDate: '2026-11-26',
+    },
+  ];
+
+  // Historical filterTodayLeads stays strictly Today-collected only
+  assert.deepEqual(
+    filterTodayLeads(leadsPool, nowToday).map((l) => l.id),
+    ['L-COLLECTED-TODAY']
+  );
+
+  // Previous-day detection
+  assert.equal(isPreviousDayLead(leadsPool[0], nowToday), true);
+  assert.equal(isPreviousDayLead(leadsPool[4], nowToday), false);
+  assert.equal(isLeadCarriedOver(leadsPool[1], nowToday), true);
+  assert.equal(isLeadCarriedOver(leadsPool[0], nowToday), false);
+
+  // Agent workspace queue on Nov 26: shows Today collected + carried over for Today (not unscheduled prev, not tomorrow, not closed Done)
+  assert.equal(isLeadActiveInAgentWorkspace(leadsPool[0], nowToday), false);
+  assert.equal(isLeadActiveInAgentWorkspace(leadsPool[1], nowToday), true);
+  assert.equal(isLeadActiveInAgentWorkspace(leadsPool[2], nowToday), false);
+  assert.deepEqual(
+    filterAgentWorkspaceLeads(leadsPool, nowToday).map((l) => l.id),
+    ['L-CARRIED-TODAY', 'L-COLLECTED-TODAY']
+  );
+
+  // Agent workspace queue on Nov 27: tomorrow's carried-over lead automatically becomes active
+  assert.deepEqual(
+    filterAgentWorkspaceLeads(leadsPool, nowTomorrow).map((l) => l.id),
+    ['L-CARRIED-TODAY', 'L-CARRIED-TOMORROW']
+  );
+
+  // Agent bootstrap keeps Today's leads + BOTH today-due and tomorrow-scheduled active leads
+  assert.deepEqual(
+    filterAgentBootstrapLeads(leadsPool, nowToday).map((l) => l.id),
+    ['L-CARRIED-TODAY', 'L-CARRIED-TOMORROW', 'L-COLLECTED-TODAY']
+  );
+
+  // Admin distribution scopes
+  assert.deepEqual(
+    filterAdminDistributionLeads(leadsPool, 'pending_previous', nowToday).map((l) => l.id),
+    ['L-PREV-UNSCHEDULED', 'L-CARRIED-TODAY', 'L-CARRIED-TOMORROW']
+  );
+  assert.deepEqual(
+    filterAdminDistributionLeads(leadsPool, 'today_and_carryover', nowToday).map((l) => l.id),
+    ['L-CARRIED-TODAY', 'L-CARRIED-TOMORROW', 'L-COLLECTED-TODAY']
+  );
+  assert.deepEqual(
+    filterAdminDistributionLeads(leadsPool, 'scheduled_carryover', nowToday).map((l) => l.id),
+    ['L-CARRIED-TODAY', 'L-CARRIED-TOMORROW']
+  );
+});
+

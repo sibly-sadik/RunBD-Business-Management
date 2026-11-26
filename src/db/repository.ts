@@ -1,4 +1,4 @@
-import { asc, desc, eq, inArray, or } from 'drizzle-orm';
+import { asc, desc, eq, gte, inArray, isNotNull, or } from 'drizzle-orm';
 import { db } from './index.ts';
 import {
   appSettings,
@@ -392,7 +392,14 @@ export async function getBootstrapForRole(role: UserRole, todayYmd: string) {
     const leadsPromise =
       role === 'admin'
         ? db.select().from(leads).orderBy(desc(leads.createdAt)).limit(2000)
-        : role === 'collector' || role === 'agent'
+        : role === 'agent'
+        ? db
+            .select()
+            .from(leads)
+            .where(or(gte(leads.collectedDate, todayYmd), isNotNull(leads.followUpAt)))
+            .orderBy(desc(leads.updatedAt))
+            .limit(1000)
+        : role === 'collector'
         ? db
             .select()
             .from(leads)

@@ -516,6 +516,13 @@ export async function fetchBootstrapFromSupabase(
           .select('*')
           .order('created_at', { ascending: false })
           .limit(2000)
+      : role === 'agent'
+      ? supabase
+          .from('leads')
+          .select('*')
+          .or(`collected_date.gte.${todayYmd},follow_up_at.not.is.null`)
+          .order('updated_at', { ascending: false })
+          .limit(1000)
       : supabase
           .from('leads')
           .select('*')

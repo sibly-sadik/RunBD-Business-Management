@@ -19,17 +19,20 @@ import {
   buildTelUrl,
   DueRenewalItem,
   filterAgentAssignedQueueLeads,
-  filterTodayLeads,
+  filterAgentWorkspaceLeads,
   formatBdPhoneDisplay,
   formatDateTime,
   formatShortDate,
   formatTime,
   getAgentTodayCallLogs,
   getDhakaFollowUpFields,
+  getLeadCollectedYmd,
   getLocalDateString,
   getScheduledFollowUps,
   isFollowUpDueToday,
+  isLeadCarriedOver,
   openWhatsAppChat,
+  parseDateToYmd,
 } from '../utils/leadLogic';
 import { CopyPhoneButton } from './CopyPhoneButton';
 import { RenewalAlertBanner } from './RenewalAlertBanner';
@@ -83,10 +86,10 @@ export function AgentWorkspaceView({
 
   const todayStr = getLocalDateString();
 
-  // Strict Today-only visibility: Agents only see leads assigned Today and Today's call logs
+  // Active Daily Queue: Today's assigned leads + active/due carried-over leads
   const myLeads = useMemo(
     () =>
-      filterTodayLeads(leads)
+      filterAgentWorkspaceLeads(leads)
         .filter((l) => l.assignedAgentId === agent.id)
         .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()),
     [leads, agent.id]
@@ -100,13 +103,21 @@ export function AgentWorkspaceView({
   const myCallsToday = myCallHistory.length;
 
   const scheduledFollowUps = useMemo(
-    () => getScheduledFollowUps(myLeads, agent.id),
-    [myLeads, agent.id]
+    () => getScheduledFollowUps(leads, agent.id),
+    [leads, agent.id]
   );
 
   const todayFollowUpsCount = useMemo(
     () => scheduledFollowUps.filter((l) => isFollowUpDueToday(l.followUpAt)).length,
     [scheduledFollowUps]
+  );
+
+  const upcomingScheduledCount = useMemo(
+    () =>
+      scheduledFollowUps.filter(
+        (l) => (parseDateToYmd(l.followUpAt) ?? '') > todayStr
+      ).length,
+    [scheduledFollowUps, todayStr]
   );
 
   const pendingFollowUpCount = useMemo(
@@ -308,6 +319,8 @@ export function AgentWorkspaceView({
                   ? `Today · ${formatTime(lead.followUpAt)}`
                   : formatDateTime(lead.followUpAt)
                 : 'Scheduled';
+              const carriedOver = isLeadCarriedOver(lead);
+              const displayNote = lead.lastCallNotes || lead.notes;
               return (
               <div
                 key={lead.id}
@@ -319,19 +332,27 @@ export function AgentWorkspaceView({
                       <p className="text-sm font-semibold text-slate-900 dark:text-white truncate">
                         {lead.customerName}
                       </p>
-                      {buildSafeExternalUrl(lead.facebookLink) && (
-                        <a
-                          href={buildSafeExternalUrl(lead.facebookLink) as string}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          onClick={(e) => e.stopPropagation()}
-                          data-testid={`followup-fb-link-${lead.id}`}
-                          className="inline-flex items-center gap-1 text-xs text-sky-600 dark:text-sky-400 hover:underline mt-0.5"
-                        >
-                          <span>Facebook</span>
-                          <ExternalLink className="w-3 h-3" />
-                        </a>
-                      )}
+                      <div className="flex flex-wrap items-center gap-2 mt-0.5">
+                        {carriedOver && (
+                          <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-500/15 text-amber-700 dark:text-amber-300 whitespace-nowrap">
+                            Carried Over ·{' '}
+                            {formatShortDate(getLeadCollectedYmd(lead) || lead.createdAt)}
+                          </span>
+                        )}
+                        {buildSafeExternalUrl(lead.facebookLink) && (
+                          <a
+                            href={buildSafeExternalUrl(lead.facebookLink) as string}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            onClick={(e) => e.stopPropagation()}
+                            data-testid={`followup-fb-link-${lead.id}`}
+                            className="inline-flex items-center gap-1 text-xs text-sky-600 dark:text-sky-400 hover:underline"
+                          >
+                            <span>Facebook</span>
+                            <ExternalLink className="w-3 h-3" />
+                          </a>
+                        )}
+                      </div>
                     </div>
                     <span
                       className={`text-xs font-mono font-semibold tabular-nums px-2 py-0.5 rounded whitespace-nowrap shrink-0 ${
@@ -358,9 +379,9 @@ export function AgentWorkspaceView({
                     </div>
                     <StatusBadge status={lead.status} compact />
                   </div>
-                  {lead.lastCallNotes && (
+                  {displayNote && (
                     <p className="text-xs text-slate-500 dark:text-slate-400 mt-2 line-clamp-2">
-                      {lead.lastCallNotes}
+                      {displayNote}
                     </p>
                   )}
                 </div>
@@ -458,6 +479,11 @@ export function AgentWorkspaceView({
               {statusFilter === 'ALL' && doneLeadsCount > 0
                 ? ` · ${doneLeadsCount} moved to Today calls`
                 : ''}
+              {upcomingScheduledCount > 0
+                ? ` · ${upcomingScheduledCount} scheduled for upcoming day${
+                    upcomingScheduledCount === 1 ? '' : 's'
+                  }`
+                : ''}
             </p>
           </div>
 
@@ -511,14 +537,24 @@ export function AgentWorkspaceView({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200 dark:divide-slate-800">
-                  {filteredLeads.map((lead) => (
+                  {filteredLeads.map((lead) => {
+                    const carriedOver = isLeadCarriedOver(lead);
+                    const displayNote = lead.lastCallNotes || lead.notes;
+                    return (
                     <tr
                       key={lead.id}
                       className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40 transition-colors"
                     >
                       <td className="py-3.5 px-4">
-                        <div className="font-semibold text-slate-900 dark:text-slate-100">
-                          {lead.customerName}
+                        <div className="flex items-center gap-2">
+                          <span className="font-semibold text-slate-900 dark:text-slate-100">
+                            {lead.customerName}
+                          </span>
+                          {carriedOver && (
+                            <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-500/15 text-amber-700 dark:text-amber-300">
+                              Carried Over
+                            </span>
+                          )}
                         </div>
                         <div className="flex items-center gap-2 mt-0.5 text-xs text-slate-500 dark:text-slate-400">
                           {buildSafeExternalUrl(lead.facebookLink) && (
@@ -532,12 +568,12 @@ export function AgentWorkspaceView({
                               <ExternalLink className="w-3 h-3" />
                             </a>
                           )}
-                          {lead.lastCallNotes && (
+                          {displayNote && (
                             <>
                               {buildSafeExternalUrl(lead.facebookLink) && (
                                 <span aria-hidden="true">·</span>
                               )}
-                              <span className="truncate max-w-[220px]">{lead.lastCallNotes}</span>
+                              <span className="truncate max-w-[220px]">{displayNote}</span>
                             </>
                           )}
                         </div>
@@ -606,20 +642,31 @@ export function AgentWorkspaceView({
                         </div>
                       </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
 
             {/* Mobile Cards */}
             <div className="md:hidden divide-y divide-slate-200 dark:divide-slate-800">
-              {filteredLeads.map((lead) => (
+              {filteredLeads.map((lead) => {
+                const carriedOver = isLeadCarriedOver(lead);
+                const displayNote = lead.lastCallNotes || lead.notes;
+                return (
                 <div key={lead.id} className="p-4 space-y-3">
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">
-                      <p className="text-sm font-semibold text-slate-900 dark:text-white truncate">
-                        {lead.customerName}
-                      </p>
+                      <div className="flex items-center gap-1.5">
+                        <p className="text-sm font-semibold text-slate-900 dark:text-white truncate">
+                          {lead.customerName}
+                        </p>
+                        {carriedOver && (
+                          <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-500/15 text-amber-700 dark:text-amber-300 shrink-0">
+                            Carried Over
+                          </span>
+                        )}
+                      </div>
                       <div className="flex items-center gap-1.5 mt-0.5">
                         <p className="text-xs font-mono tabular-nums text-slate-600 dark:text-slate-400 whitespace-nowrap">
                           {formatBdPhoneDisplay(lead.phone)}
@@ -649,9 +696,9 @@ export function AgentWorkspaceView({
                     )}
                   </div>
 
-                  {lead.lastCallNotes && (
+                  {displayNote && (
                     <p className="text-xs text-slate-600 dark:text-slate-300 bg-slate-100/70 dark:bg-slate-800/50 rounded-lg px-3 py-2">
-                      {lead.lastCallNotes}
+                      {displayNote}
                     </p>
                   )}
 
@@ -695,7 +742,8 @@ export function AgentWorkspaceView({
                     </button>
                   </div>
                 </div>
-              ))}
+                );
+              })}
             </div>
           </>
         )}

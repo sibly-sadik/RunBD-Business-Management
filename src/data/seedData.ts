@@ -553,7 +553,7 @@ function doGet(e) {
 
     var leads = [];
     if (masterSheet && masterSheet.getLastRow() > 1) {
-      var mColCount = Math.max(10, masterSheet.getLastColumn());
+      var mColCount = Math.max(11, masterSheet.getLastColumn());
       var mRows = masterSheet.getRange(2, 1, masterSheet.getLastRow() - 1, mColCount).getValues();
       for (var i = 0; i < mRows.length; i++) {
         var r = mRows[i];
@@ -562,8 +562,21 @@ function doGet(e) {
         var rowName = String(r[1] || '').trim();
         if (!r[0] && !rowPhone && !rowFb && !rowName) continue;
         var rowCreatedVal = r[10];
-        if (todayOnly && toYmd_(rowCreatedVal) !== targetDate) continue;
+        var rowFollowUpRaw = r[7];
+        var rowFollowUpYmd = rowFollowUpRaw ? toYmd_(rowFollowUpRaw) : '';
+        var rowStatusStr = String(r[6] || 'Pending');
+        var hasActiveFollowUp = Boolean(
+          rowFollowUpYmd &&
+          rowStatusStr !== 'Done' &&
+          rowStatusStr !== 'Order Confirmed' &&
+          rowStatusStr !== 'Not Interested' &&
+          rowStatusStr !== 'Wrong Number'
+        );
+        if (todayOnly && toYmd_(rowCreatedVal) !== targetDate && !hasActiveFollowUp) continue;
         var rowId = r[0] ? String(r[0]).trim() : ('SHEET-ROW-' + (i + 2));
+        var followUpIso = rowFollowUpRaw
+          ? (rowFollowUpRaw instanceof Date ? rowFollowUpRaw.toISOString() : String(rowFollowUpRaw))
+          : null;
         leads.push({
           id: rowId,
           customerName: rowName,
@@ -571,8 +584,8 @@ function doGet(e) {
           facebookLink: rowFb,
           collectorName: String(r[4] || 'Farhan'),
           assignedAgentName: String(r[5] || '') === 'Unassigned' ? null : String(r[5] || ''),
-          status: String(r[6] || 'Pending'),
-          followUpAt: r[7] ? String(r[7]) : null,
+          status: rowStatusStr,
+          followUpAt: followUpIso,
           lastCallNotes: String(r[8] || ''),
           updatedAt: r[9] ? new Date(r[9]).toISOString() : '',
           createdAt: rowCreatedVal ? new Date(rowCreatedVal).toISOString() : ''
@@ -850,11 +863,16 @@ function doPost(e) {
       if (leadsList.length > 0) {
         sheetsByName.forEach(function(sheet, sheetName) {
           if (sheetName.indexOf('Agent_') !== 0 || sheetName === 'Agent_Logs') return;
-          var aSession = getSheetSession_(sessionCache, sheet, AGENT_TAB_HEADERS.length, 'id');
+          var aSession = getSheetSession_(sessionCache, sheet, AGENT_TAB_HEADERS.length, 'lead');
           var rowsForAgent = leadsByAgentTab.get(sheetName) || [];
           for (var ai = 0; ai < rowsForAgent.length; ai++) {
             var aLead = rowsForAgent[ai];
-            upsertSessionRowById_(aSession, String(aLead.id).trim(), formatAgentRow(aLead), '');
+            upsertSessionRowById_(
+              aSession,
+              String(aLead.id).trim(),
+              formatAgentRow(aLead),
+              normalizePhoneKey_(aLead.phone || aLead.rawPhone)
+            );
           }
           desiredAgentTabById.forEach(function(targetTab, lId) {
             if (targetTab !== sheetName && aSession.idIndex.has(lId)) {
@@ -1886,7 +1904,7 @@ function syncLeadAcrossAgentTabsSession_(ss, sheetsByName, sessionCache, agentSh
     if (targetTabName && sheetName === targetTabName) {
       upsertSessionRowById_(aSession, lId, formatAgentRow(lead), prevPhoneKey || lPhoneKey);
     } else if (aSession.idIndex.has(lId) || (prevPhoneKey && aSession.phoneIndex.has(prevPhoneKey)) || (lPhoneKey && aSession.phoneIndex.has(lPhoneKey))) {
-      deleteSessionRowsByKeys_(aSession, [lId], prevPhoneKey || '');
+      deleteSessionRowsByKeys_(aSession, [lId], prevPhoneKey || lPhoneKey || '');
     }
   });
 }
