@@ -12,6 +12,8 @@ import { KawsarPostsView } from './components/KawsarPostsView';
 import { Layout, NavTab } from './components/Layout';
 import { LoginScreen } from './components/LoginScreen';
 import { PaidCustomersView } from './components/PaidCustomersView';
+import { RoleWelcomeBanner } from './components/RoleWelcomeBanner';
+import { StartupSplash } from './components/StartupSplash';
 import { ToastContainer } from './components/ToastContainer';
 import { DEMO_USERS } from './data/seedData';
 import {
@@ -43,6 +45,7 @@ import {
   createPaidCustomerFromLead,
   extractPhoneCoreKey,
   filterAgentBootstrapLeads,
+  filterAgentWorkspaceLeads,
   filterCollectorTodayLeads,
   filterTodayCallLogs,
   filterTodayLeads,
@@ -137,6 +140,11 @@ import {
   storage,
   SUPERSEDED_SYNC_ERROR_NAME,
 } from './utils/storage';
+import {
+  markStartupSplashSeen,
+  RoleWelcomeContext,
+  shouldShowStartupSplash,
+} from './utils/welcomeLogic';
 
 function defaultTabForRole(role: User['role']): NavTab {
   if (role === 'admin') return 'admin-overview';
@@ -155,6 +163,15 @@ function makeId(prefix: string): string {
 export default function App() {
   const [theme, setTheme] = useState<'dark' | 'light'>(() => storage.getTheme());
   const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [showSplash, setShowSplash] = useState<boolean>(() =>
+    shouldShowStartupSplash(
+      typeof window !== 'undefined' ? window.sessionStorage : null,
+      typeof window !== 'undefined' ? window.location.search : ''
+    )
+  );
+  const [welcomeBanner, setWelcomeBanner] = useState<{ user: User; key: number } | null>(
+    null
+  );
 
   const [activeTab, setActiveTab] = useState<NavTab>('admin-overview');
 
@@ -1106,13 +1123,22 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const handleSplashComplete = useCallback(() => {
+    markStartupSplashSeen(typeof window !== 'undefined' ? window.sessionStorage : null);
+    setShowSplash(false);
+  }, []);
+
+  const handleDismissWelcome = useCallback(() => {
+    setWelcomeBanner(null);
+  }, []);
+
   // Auth handlers
   const handleLogin = (user: User) => {
     setCurrentUser(user);
     storage.saveSessionUserId(user.id);
     setActiveTab(defaultTabForRole(user.role));
+    setWelcomeBanner({ user, key: Date.now() });
     appendAudit(user, 'LOGIN', `Signed into ${user.role} workspace`);
-    addToast('success', `Welcome back, ${user.name}`, `Signed in as ${user.title}`);
     if (settings.googleSheetsWebhookUrl) {
       void syncFromSheets(settings.googleSheetsWebhookUrl, { scope: 'today' });
     }
@@ -1124,6 +1150,7 @@ export default function App() {
     }
     void logoutFromServer().then(() => refreshTeamMembers());
     setCurrentUser(null);
+    setWelcomeBanner(null);
     storage.saveSessionUserId(null);
     addToast('info', 'Signed out', 'Your session has been closed.');
   };
@@ -3186,9 +3213,34 @@ export default function App() {
     return { label: 'Collected Today', value: String(mineToday) };
   }, [currentUser, leads, contentPosts]);
 
+  const welcomeContext = useMemo<RoleWelcomeContext>(() => {
+    if (!currentUser) return {};
+    if (currentUser.role === 'agent') {
+      const activeQueue = filterAgentWorkspaceLeads(leads).filter(
+        (l) => l.assignedAgentId === currentUser.id && l.status !== 'Done'
+      ).length;
+      const scheduled = getScheduledFollowUps(leads, currentUser.id).length;
+      return {
+        agentActiveQueueCount: activeQueue,
+        agentScheduledCount: scheduled,
+      };
+    }
+    if (currentUser.role === 'collector') {
+      const collectedToday = filterCollectorTodayLeads(leads).filter(
+        (l) => l.collectorId === currentUser.id
+      ).length;
+      return { todayCollectedCount: collectedToday };
+    }
+    if (currentUser.role === 'poster') {
+      return { todayPostsCount: computeKawsarPostStats(contentPosts).todayCount };
+    }
+    return {};
+  }, [currentUser, leads, contentPosts]);
+
   if (!currentUser) {
     return (
       <>
+        {showSplash && <StartupSplash onComplete={handleSplashComplete} />}
         <LoginScreen
           teamMembers={teamMembers}
           onLogin={handleLogin}
@@ -3202,6 +3254,16 @@ export default function App() {
 
   return (
     <>
+      {showSplash && <StartupSplash onComplete={handleSplashComplete} />}
+      {!showSplash && welcomeBanner && welcomeBanner.user.id === currentUser.id && (
+        <RoleWelcomeBanner
+          key={welcomeBanner.key}
+          user={welcomeBanner.user}
+          welcomeKey={welcomeBanner.key}
+          context={welcomeContext}
+          onDismiss={handleDismissWelcome}
+        />
+      )}
       <Layout
         user={currentUser}
         activeTab={activeTab}
